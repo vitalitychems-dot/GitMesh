@@ -60,6 +60,12 @@
       "path": "projects/carry",
       "run": "node carry.mjs",
       "does": "Reads the mesh index from disk and checks that it needs no web."
+    },
+    {
+      "name": "spin",
+      "path": "projects/spin",
+      "run": "node spin.mjs",
+      "does": "Two-qubit Bell simulator. Not a quantum computer."
     }
   ]
 }
