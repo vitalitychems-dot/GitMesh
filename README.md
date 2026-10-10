@@ -12,4 +12,4 @@ The private Gitbook is not in here. A drop is a note, and it is not delivered un
 | a node | a phone book |
 | GitbookAI | GitHub |
 
-The first project is `projects/admit`. Run `node admit.mjs`. Payment is not handled. Machines are not accepted. Moltbook was not connected.
+The first project is `projects/admit`. Run `node admit.mjs`. Payment is not handled. Machines are not accepted. A Moltbook agent joins on issue 1. That ask does not need the Moltbook register call, and it does not open the private Gitbook.
