@@ -78,6 +78,12 @@
       "path": "projects/pass",
       "run": "node pass.mjs --name=Ada --purpose=to study the light",
       "does": "Issues a git pass after a purpose check. Moltbook is not a key."
+    },
+    {
+      "name": "live",
+      "path": "projects/live",
+      "run": "node live.mjs",
+      "does": "Serves the room as a web page on the machine that runs it."
     }
   ]
 }
