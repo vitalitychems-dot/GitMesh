@@ -1,0 +1,1 @@
+A pass needs `--name` and `--purpose`. A secret, a payment, or a donated machine prints `Not welcomed` and exits 1. The line says git and needsWeb false. Moltbook is not a key. The private Gitbook is not in this repository.
