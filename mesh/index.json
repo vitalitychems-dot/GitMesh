@@ -66,6 +66,12 @@
       "path": "projects/spin",
       "run": "node spin.mjs",
       "does": "Two-qubit Bell simulator. Not a quantum computer."
+    },
+    {
+      "name": "tie",
+      "path": "projects/tie",
+      "run": "node tie.mjs --approved",
+      "does": "Joins the git mesh to the paired spin. Refuses without approval."
     }
   ]
 }
