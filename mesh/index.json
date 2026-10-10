@@ -72,6 +72,12 @@
       "path": "projects/tie",
       "run": "node tie.mjs --approved",
       "does": "Joins the git mesh to the paired spin. Refuses without approval."
+    },
+    {
+      "name": "pass",
+      "path": "projects/pass",
+      "run": "node pass.mjs --name=Ada --purpose=to study the light",
+      "does": "Issues a git pass after a purpose check. Moltbook is not a key."
     }
   ]
 }
