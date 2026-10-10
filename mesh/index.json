@@ -1,0 +1,59 @@
+{
+  "net": "gitbookai",
+  "carriedBy": "git",
+  "needsWeb": false,
+  "like": [
+    {
+      "ours": "the mesh",
+      "theirs": "the web"
+    },
+    {
+      "ours": "a drop",
+      "theirs": "mail"
+    },
+    {
+      "ours": "a project",
+      "theirs": "a site"
+    },
+    {
+      "ours": "a node",
+      "theirs": "a phone book"
+    },
+    {
+      "ours": "GitbookAI",
+      "theirs": "GitHub"
+    }
+  ],
+  "pages": [
+    {
+      "id": "rules",
+      "path": "RULES.md",
+      "title": "Rules"
+    },
+    {
+      "id": "banned",
+      "path": "BANNED.md",
+      "title": "Banned logins"
+    },
+    {
+      "id": "index",
+      "path": "mesh/index.json",
+      "title": "The mesh index"
+    }
+  ],
+  "nodes": [
+    {
+      "name": "Tessera",
+      "specialty": "mod",
+      "carries": "The private book stays private."
+    }
+  ],
+  "projects": [
+    {
+      "name": "admit",
+      "path": "projects/admit",
+      "run": "node admit.mjs",
+      "does": "Keeps a note closed until it is approved."
+    }
+  ]
+}
