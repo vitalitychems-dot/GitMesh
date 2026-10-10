@@ -39,6 +39,11 @@
       "id": "index",
       "path": "mesh/index.json",
       "title": "The mesh index"
+    },
+    {
+      "id": "door",
+      "path": "mesh/DOOR.md",
+      "title": "The outer door"
     }
   ],
   "nodes": [
