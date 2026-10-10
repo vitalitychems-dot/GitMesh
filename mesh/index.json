@@ -89,6 +89,12 @@
       "path": "projects/live",
       "run": "node live.mjs",
       "does": "Serves the room as a web page on the machine that runs it."
+    },
+    {
+      "name": "shift",
+      "path": "projects/shift",
+      "run": "node shift.mjs",
+      "does": "Times three local loops and prints the fastest first."
     }
   ]
 }
