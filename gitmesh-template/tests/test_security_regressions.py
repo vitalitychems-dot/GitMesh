@@ -811,6 +811,45 @@ process.on("exit", saveCapture);
         )
         self.assertTrue(all(request["method"] == "GET" for request in requests))
 
+    def test_dry_run_stops_safely_when_refreshed_commit_id_is_invalid(self):
+        self.set_remote_snapshot()
+        invalid_sha = "UNTRUSTED_INVALID_REFRESHED_SHA_SENTINEL"
+        result = self.run_sync(
+            args=("--dry-run",),
+            moved_head_sha=MOVED_COMMIT_SHA,
+            second_moved_head_sha=invalid_sha,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Dry run could not complete a consistent comparison", result.stderr)
+        self.assertIn("invalid main branch commit", result.stderr)
+        self.assertIn("Rerun the dry run before publishing", result.stderr)
+        self.assertIn("No GitHub changes were made", result.stderr)
+        self.assertNotIn(invalid_sha, output)
+        self.assertNotIn("would be published", output)
+        self.assertEqual(reported_changed_paths(result.stdout), [])
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(output)
+
+        capture = json.loads(self.capture.read_text())
+        requests = capture["requests"]
+        head_reads = [
+            request for request in requests
+            if request["path"] == "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
+        ]
+        content_reads = [
+            request for request in requests
+            if request["method"] == "GET" and "/contents/" in request["path"]
+        ]
+        self.assertEqual(len(head_reads), 3)
+        self.assertEqual(len(content_reads), 6)
+        self.assertEqual(
+            [request["ref"] for request in content_reads],
+            [INITIAL_COMMIT_SHA] * 3 + [MOVED_COMMIT_SHA] * 3,
+        )
+        self.assertTrue(all(request["method"] == "GET" for request in requests))
+
     def test_dry_run_refresh_failure_requests_rerun(self):
         self.set_remote_snapshot()
         result = self.run_sync(
