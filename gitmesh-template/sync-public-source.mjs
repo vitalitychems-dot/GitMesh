@@ -61,6 +61,8 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_credential_check_reports_location_without_exposing_value",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
+  "test_precommit_hook_blocks_when_node_is_missing",
+  "test_precommit_hook_blocks_when_staged_index_cannot_be_read",
   "test_precommit_hook_passes_clean_source_and_ignores_unrelated_files",
   "test_hook_setup_enables_only_repository_local_path_when_safe",
   "test_hook_setup_preserves_existing_local_hooks_path",
@@ -404,7 +406,7 @@ function checkStagedCredentials() {
       ...sourceByGitPath.keys(),
     ],
     gitRoot,
-    "Could not inspect staged allowlisted source files.",
+    "Could not inspect staged allowlisted source files. Check that the staged index is readable and not locked, resolve any Git index errors, then stage the intended files again and retry the commit.",
   ).toString("utf8").split("\0").filter(Boolean);
   const stagedSources = [...new Set(
     stagedNames.map((name) => sourceByGitPath.get(name)).filter(Boolean),
@@ -425,7 +427,7 @@ function checkStagedCredentials() {
     const content = runStagedGitCommand(
       ["show", `:0:${gitPath}`],
       gitRoot,
-      `Could not safely read staged source file: ${source}. Resolve it and stage the intended file state again.`,
+      `Could not safely read staged source file: ${source}. Check that the staged index is readable, resolve any conflicts or Git index errors, then stage the intended file state again and retry the commit.`,
     );
     if (content.length > MAX_SOURCE_BYTES) {
       throw new Error(

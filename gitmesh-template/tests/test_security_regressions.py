@@ -1808,6 +1808,89 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_blocks_when_node_is_missing(self):
+        credential = "ghp_" + "N" * 36
+        source_sentinel = "NODE_MISSING_STAGED_SOURCE_SENTINEL"
+        self.readme.write_text(f"staged_secret={credential}\n{source_sentinel}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        path_without_node = self.repo_root / "path-without-node"
+        path_without_node.mkdir()
+        for command in ("git", "dirname"):
+            executable = shutil.which(command)
+            self.assertIsNotNone(executable, f"required test executable not found: {command}")
+            (path_without_node / command).symlink_to(executable)
+
+        env = self.hook_environment_without_github_token()
+        env["PATH"] = str(path_without_node)
+        result = self.run_git(
+            ["commit", "-m", "must be blocked without node"],
+            env=env,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Node.js 20 or newer is required", output)
+        self.assertIn("Install Node.js or make node available on PATH", output)
+        self.assertIn("retry the commit", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn("command not found", output)
+        self.assertNotIn(credential, output)
+        self.assertNotIn(source_sentinel, output)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(
+            self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+            "gitmesh-template/README.md",
+        )
+        self.assertFalse(self.network_marker.exists())
+
+    def test_precommit_hook_blocks_when_staged_index_cannot_be_read(self):
+        credential = "ghp_" + "I" * 36
+        source_sentinel = "UNREADABLE_INDEX_STAGED_SOURCE_SENTINEL"
+        diagnostic_sentinel = "PRIVATE_INDEX_DIAGNOSTIC_SENTINEL"
+        self.readme.write_text(f"staged_secret={credential}\n{source_sentinel}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        hook_dir = self.template_root / "hooks"
+        precommit_hook = hook_dir / "pre-commit"
+        original_hook = hook_dir / "gitmesh-pre-commit"
+        shutil.copy2(precommit_hook, original_hook)
+        unreadable_index = self.repo_root / "unreadable-index"
+        unreadable_index.write_text(f"invalid index {diagnostic_sentinel}\n")
+        precommit_hook.write_text(
+            "#!/bin/sh\n"
+            'HOOK_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)\n'
+            'export GIT_INDEX_FILE="$HOOK_DIR/../../unreadable-index"\n'
+            'exec "$HOOK_DIR/gitmesh-pre-commit" "$@"\n'
+        )
+        precommit_hook.chmod(0o755)
+
+        result = self.run_git(
+            ["commit", "-m", "must be blocked when index cannot be read"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not inspect staged allowlisted source files", output)
+        self.assertIn("Check that the staged index is readable and not locked", output)
+        self.assertIn("stage the intended files again and retry the commit", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn(diagnostic_sentinel, output)
+        self.assertNotIn("fatal: index is unreadable", output)
+        self.assertNotIn(credential, output)
+        self.assertNotIn(source_sentinel, output)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(
+            self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+            "gitmesh-template/README.md",
+        )
+        self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_passes_clean_source_and_ignores_unrelated_files(self):
         self.readme.write_bytes(self.baseline_readme + b"\nclean staged source fixture\n")
         self.run_git(["add", "gitmesh-template/README.md"])
