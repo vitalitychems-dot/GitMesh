@@ -1304,6 +1304,56 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_embedded_credentials_report_lines_for_unicode_separators_without_leaking(self):
+        source_path = self.source_root / "README.md"
+        original_content = source_path.read_bytes()
+        first_secret = "ghp_" + "N" * 36
+        second_secret = "github_pat_" + "P" * 40
+        first_line = f"token={first_secret}"
+        second_line = f"token={second_secret}"
+        try:
+            for label, line_ending in (
+                ("U+2028", "\u2028"),
+                ("U+2029", "\u2029"),
+            ):
+                source_text = line_ending.join(
+                    (
+                        "SAFE_UNICODE_HEADER_CONTEXT",
+                        first_line,
+                        "SAFE_UNICODE_MIDDLE_CONTEXT",
+                        second_line,
+                        "SAFE_UNICODE_FOOTER_CONTEXT",
+                    )
+                )
+                source_path.write_bytes(source_text.encode("utf-8"))
+
+                for mode, args, token_value in (
+                    ("sync", (), FAKE_GITHUB_TOKEN),
+                    ("local check without token", ("--check-credentials",), None),
+                ):
+                    with self.subTest(line_ending=label, mode=mode):
+                        result = self.run_sync(args=args, token_value=token_value)
+                        output = result.stdout + result.stderr
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(f"{source_path.name} (lines 2, 4)", result.stderr)
+                        self.assertIn("No GitHub requests were made", result.stderr)
+                        for private_text in (
+                            first_secret,
+                            second_secret,
+                            first_line,
+                            second_line,
+                            "SAFE_UNICODE_HEADER_CONTEXT",
+                            "SAFE_UNICODE_MIDDLE_CONTEXT",
+                            "SAFE_UNICODE_FOOTER_CONTEXT",
+                        ):
+                            self.assertNotIn(private_text, output)
+                        self.assert_safe_failure_output(result)
+
+                        capture = json.loads(self.capture.read_text())
+                        self.assertEqual(capture["requests"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"
