@@ -46,3 +46,7 @@ The scrypt verifier is local access control, not device encryption or account au
 This is separate from vault data transfer and makes an outbound HTTPS request to GitHub. On Replit, store a fine-grained token as the `GITHUB_TOKEN` Secret, limited to the `vitalitychems-dot/GitMesh` repository with Contents write access. Replit Secrets are project-level and available to processes running in the project; they are not folder-scoped. The sync script reads the token from `process.env.GITHUB_TOKEN` only when run and never writes or prints it.
 
 Run from this folder with `node ./sync-public-source.mjs`. It updates only the three fixed source paths listed in the script, on `main`, and uses a non-force ref update. It does not stage, read, or upload local vault data, bundles, or other workspace files. Do not put the token in a `.env` file, source file, Git remote URL, or command-line argument.
+
+## Security regression checks
+
+From the project root, run `python3 gitmesh-template/tests/test_security_regressions.py`. The checks use a disposable local vault and a mocked GitHub API; they do not read the active vault or make network requests. Python 3, Node.js, and Git must be available.
