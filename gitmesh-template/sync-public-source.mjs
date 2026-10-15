@@ -67,7 +67,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_hook_setup_preserves_existing_global_hooks_path",
   "test_hook_setup_preserves_existing_default_hooks",
   "test_hook_setup_refuses_linked_worktree_without_changing_config",
-  "test_hook_setup_refuses_linked_worktree_without_changing_config",
+  "test_embedded_credentials_report_lines_for_unicode_separators_without_leaking",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
   "test_preflight_safe_name_allowlist_matches_regression_tests",
   "test_missing_preflight_harness_has_safe_recovery_guidance",
@@ -97,7 +97,7 @@ function requireSha(value, label) {
 
 function findEmbeddedCredentialLines(text) {
   return text
-    .split(/\r\n|\n|\r/)
+    .split(/\r\n|[\n\r\u2028\u2029]/)
     .flatMap((line, index) =>
       EMBEDDED_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(line))
         ? [index + 1]
