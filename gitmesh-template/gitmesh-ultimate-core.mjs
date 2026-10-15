@@ -119,7 +119,6 @@ function promptLine(promptText) {
     return Promise.reject(new Error("Run this program in an interactive terminal."));
   }
   return new Promise((resolve, reject) => {
-    process.stdout.write(promptText);
     let value = "";
     const finish = (error) => {
       process.stdin.off("data", onData);
@@ -153,7 +152,9 @@ function promptLine(promptText) {
       process.stdin.setEncoding("utf8");
       process.stdin.resume();
       process.stdin.on("data", onData);
+      process.stdout.write(promptText);
     } catch {
+      try { process.stdin.setRawMode(false); } catch {}
       reject(new Error("This terminal does not support hidden sigil input."));
     }
   });

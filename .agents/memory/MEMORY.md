@@ -1,0 +1,1 @@
+- [Hidden terminal input](hidden-terminal-input.md) — enter no-echo mode before showing credential prompts; test with immediate PTY input to catch echo races.

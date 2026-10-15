@@ -132,7 +132,6 @@ class SigilRotationTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         initial_bytes = self.auth_path.read_bytes()
-        initial_auth = json.loads(initial_bytes)
         self.assertNotIn(INITIAL_SIGIL.encode(), initial_bytes)
         self.assertEqual(stat.S_IMODE(self.auth_path.stat().st_mode), 0o600)
 
@@ -141,8 +140,9 @@ class SigilRotationTests(unittest.TestCase):
         self.assertIn("Access denied.", output)
         self.assertEqual(self.auth_path.read_bytes(), initial_bytes)
 
-        code, output = self.reject(INITIAL_SIGIL)
+        code, output = self.enter(INITIAL_SIGIL)
         self.assertEqual(code, 0)
+        self.assertNotIn(INITIAL_SIGIL, output)
         first_rotation = re.search(r"gm-1-[A-Za-z0-9_-]{43}", output)
         self.assertIsNotNone(first_rotation, "A fresh first-generation sigil was not issued.")
         first_active = first_rotation.group(0)
@@ -152,7 +152,7 @@ class SigilRotationTests(unittest.TestCase):
         self.assertEqual(first_auth["usedSigilHashes"], [hashlib.sha256(INITIAL_SIGIL.encode()).hexdigest()])
         self.assertNotIn(first_active.encode(), first_bytes)
 
-        code, output = self.enter(INITIAL_SIGIL)
+        code, output = self.reject(INITIAL_SIGIL)
         self.assertNotEqual(code, 0)
         self.assertIn("Access denied.", output)
         self.assertEqual(self.auth_path.read_bytes(), first_bytes)
@@ -192,12 +192,25 @@ class SigilRotationTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("Admin sigil updated.", output)
+        self.assertNotIn(CUSTOM_SIGIL, output)
+        third_auto_match = re.search(r"gm-3-[A-Za-z0-9_-]{43}", output)
+        self.assertIsNotNone(third_auto_match, "Sign-in did not rotate before the manual key change.")
+        third_auto = third_auto_match.group(0)
         custom_bytes = self.auth_path.read_bytes()
         custom_auth = json.loads(custom_bytes)
         self.assertEqual(custom_auth["generation"], 3)
         self.assertEqual(
+            custom_auth["usedSigilHashes"],
+            [
+                hashlib.sha256(INITIAL_SIGIL.encode()).hexdigest(),
+                hashlib.sha256(first_active.encode()).hexdigest(),
+                hashlib.sha256(second_active.encode()).hexdigest(),
+                hashlib.sha256(third_auto.encode()).hexdigest(),
+            ],
+        )
+        self.assertEqual(
             custom_auth["usedSigilHashes"][-1],
-            hashlib.sha256(second_active.encode()).hexdigest(),
+            hashlib.sha256(third_auto.encode()).hexdigest(),
         )
         self.assertNotIn(CUSTOM_SIGIL.encode(), custom_bytes)
         self.assertEqual(stat.S_IMODE(self.auth_path.stat().st_mode), 0o600)
@@ -225,7 +238,12 @@ globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
   const method = init.method ?? "GET";
   const body = init.body ? JSON.parse(init.body) : null;
-  requests.push({ path: url.pathname, method, body });
+  requests.push({
+    path: url.pathname,
+    method,
+    body,
+    hasExpectedBearer: init.headers?.Authorization === "Bearer " + process.env.GITHUB_TOKEN,
+  });
   let data;
   if (method === "GET" && url.pathname === base + "/git/ref/heads/main") {
     data = { object: { sha: "a".repeat(40) } };
@@ -274,6 +292,7 @@ process.on("exit", () => fs.writeFileSync(capture, JSON.stringify(requests)));
         self.assertEqual(result.returncode, 0, "Mocked source sync did not complete.")
         self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
         requests = json.loads(self.capture.read_text())
+        self.assertTrue(all(request["hasExpectedBearer"] for request in requests))
         tree_calls = [request for request in requests if request["path"].endswith("/git/trees")]
         self.assertEqual(len(tree_calls), 1)
         tree_items = tree_calls[0]["body"]["tree"]
