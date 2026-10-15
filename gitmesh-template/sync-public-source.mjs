@@ -125,7 +125,8 @@ function summarizePreflightFailure(result) {
     return "Security regression preflight exceeded its output limit";
   }
   if (result.error) {
-    return "Python could not start the security regression preflight";
+    return "Python could not start the security regression preflight. " +
+      "Install Python 3 or make python3 available on PATH, then rerun the regression checks and sync";
   }
   if (result.signal) {
     return "Python security regression preflight was interrupted";

@@ -1511,7 +1511,12 @@ process.on("exit", saveCapture);
         cases = (
             ("failure", "publish", (), expected_multiple_summary),
             ("failure", "dry run", ("--dry-run",), expected_multiple_summary),
-            ("start", "python start", (), "Python could not start"),
+            (
+                "start",
+                "python start",
+                (),
+                "Install Python 3 or make python3 available on PATH, then rerun the regression checks and sync",
+            ),
             ("timeout", "python timeout", (), "preflight timed out"),
             ("output-limit", "large output", (), "exceeded its output limit"),
         )
