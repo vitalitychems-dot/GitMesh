@@ -1265,6 +1265,30 @@ process.on("exit", saveCapture);
         self.assertEqual(capture["requests"], [])
         self.assertEqual(capture["filesystemReads"], [])
 
+    def test_preflight_safe_name_allowlist_matches_regression_tests(self):
+        sync_source = SYNC.read_text()
+        safe_name_block = re.search(
+            r"const SAFE_PREFLIGHT_TEST_NAMES = new Set\(\[(.*?)\]\);",
+            sync_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(safe_name_block, "Could not find the safe preflight test-name allowlist.")
+        safe_names = set(
+            re.findall(r'"(test_[A-Za-z0-9_]+)"', safe_name_block.group(1))
+        )
+        regression_test_names = set(
+            re.findall(
+                r"^\s+def (test_[A-Za-z0-9_]+)\(",
+                pathlib.Path(__file__).read_text(),
+                re.MULTILINE,
+            )
+        )
+        self.assertEqual(
+            safe_names,
+            regression_test_names,
+            "Keep the safe preflight names in sync with all regression tests.",
+        )
+
     def test_failed_security_preflight_stops_before_github_without_leaking_output(self):
         expected_source_reads = Counter(
             (method, str((self.source_root / source).resolve()))
@@ -1325,6 +1349,28 @@ process.on("exit", saveCapture);
                     "SovereignMeshVault" in event["path"]
                     for event in capture["filesystemReads"]
                 ))
+
+        unknown_only_output = (
+            f"FAIL: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})\n"
+            f"{source_sentinel}\n{credential_sentinel}"
+        )
+        with self.subTest(mode="unknown test only"):
+            result = self.run_sync(
+                preflight_mode="failure",
+                preflight_output=unknown_only_output,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no safe failing test name was available", result.stderr)
+            for unsafe_text in (
+                unlisted_test_name,
+                source_sentinel,
+                credential_sentinel,
+                unknown_only_output,
+            ):
+                self.assertNotIn(unsafe_text, result.stdout + result.stderr)
+            self.assert_safe_failure_output(result)
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
 
     def test_malformed_credentials_fail_before_reading_sources_or_requesting_github(self):
         for bad_value in ("", "bad\ntoken", "x" * 4097):
