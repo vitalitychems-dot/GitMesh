@@ -1215,11 +1215,11 @@ process.on("exit", saveCapture);
         console_secret = "github_pat_" + "P" * 40
         readme_line = f"README_TOKEN={readme_secret}"
         console_line = f"CONSOLE_TOKEN={console_secret}"
-        readme.write_text(f"SAFE_README_CONTEXT\n{readme_line}\n")
-        console.write_text(
-            "SAFE_CONSOLE_HEADER\n"
-            "SAFE_CONSOLE_CONTEXT\n"
-            f"{console_line}\n"
+        readme.write_bytes(
+            f"SAFE_README_CONTEXT\r\n{readme_line}\r\nSAFE_README_FOOTER".encode("utf-8")
+        )
+        console.write_bytes(
+            f"SAFE_CONSOLE_HEADER\rSAFE_CONSOLE_CONTEXT\r{console_line}".encode("utf-8")
         )
 
         try:
@@ -1231,6 +1231,12 @@ process.on("exit", saveCapture);
                     result = self.run_sync(args=args, token_value=token_value)
                     output = result.stdout + result.stderr
                     self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(
+                        result.stderr.count(
+                            "Refusing to sync source files containing a credential-like value:"
+                        ),
+                        1,
+                    )
                     self.assertIn("README.md (line 2)", result.stderr)
                     self.assertIn("gitmesh-ultimate-core.mjs (line 3)", result.stderr)
                     self.assertIn("; ", result.stderr)
@@ -1241,6 +1247,7 @@ process.on("exit", saveCapture);
                         readme_line,
                         console_line,
                         "SAFE_README_CONTEXT",
+                        "SAFE_README_FOOTER",
                         "SAFE_CONSOLE_HEADER",
                         "SAFE_CONSOLE_CONTEXT",
                     ):
