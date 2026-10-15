@@ -836,11 +836,20 @@ process.on("exit", saveCapture);
         try:
             for label, credential in credential_samples:
                 with self.subTest(credential_type=label):
-                    source_path.write_text(f"Example configuration value: {credential}\n")
+                    source_line = f"Example configuration value: {credential}"
+                    source_path.write_text(f"{source_line}\n")
                     result = self.run_sync()
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("credential-like value", result.stderr)
                     self.assertIn(source_path.name, result.stderr)
+                    self.assertIn("Remove the value from this file", result.stderr)
+                    self.assertIn("Replit Secrets", result.stderr)
+                    self.assertIn(
+                        "Rotate it only if it was already shared or published elsewhere",
+                        result.stderr,
+                    )
+                    self.assertIn("No GitHub requests were made", result.stderr)
+                    self.assertNotIn(source_line, result.stdout + result.stderr)
                     self.assertNotIn(credential, result.stdout + result.stderr)
                     self.assertNotIn("PRIVATE_KEY_BODY_SENTINEL", result.stdout + result.stderr)
                     self.assert_safe_failure_output(result)
