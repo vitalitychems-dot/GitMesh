@@ -39,6 +39,15 @@ ALLOWED_SOURCE_NAMES = (
 )
 
 
+def reported_changed_paths(output):
+    lines = output.splitlines()
+    try:
+        start = lines.index("Changed files:") + 1
+    except ValueError:
+        return []
+    return [line[2:] for line in lines[start:] if line.startswith("- ")]
+
+
 def drive_console(workdir, steps, timeout=30):
     """Drive a fresh console process through a PTY without echoing sigils."""
     pid, master = pty.fork()
@@ -415,6 +424,10 @@ process.on("exit", saveCapture);
         result = self.run_sync()
         self.assertEqual(result.returncode, 0, "Mocked source sync did not complete.")
         self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+        self.assertNotIn(FAKE_AUTHORIZATION, result.stdout + result.stderr)
+        reported_paths = reported_changed_paths(result.stdout)
+        self.assertEqual(set(reported_paths), ALLOWED_GITHUB_PATHS)
+        self.assertEqual(len(reported_paths), len(ALLOWED_GITHUB_PATHS))
         capture = json.loads(self.capture.read_text())
         requests = capture["requests"]
         self.assertTrue(all(request["hasExpectedBearer"] for request in requests))
@@ -465,6 +478,7 @@ process.on("exit", saveCapture);
         self.assertIn("already match", result.stdout)
         self.assertIn("no commit created", result.stdout)
         self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+        self.assertEqual(reported_changed_paths(result.stdout), [])
         capture = json.loads(self.capture.read_text())
         self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
         writes = [
@@ -520,6 +534,11 @@ process.on("exit", saveCapture);
         self.assertEqual(result.returncode, 0)
         self.assertIn("Synced 1 changed allowlisted source files", result.stdout)
         self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+        self.assertNotIn(FAKE_AUTHORIZATION, result.stdout + result.stderr)
+        self.assertEqual(
+            reported_changed_paths(result.stdout),
+            ["projects/local-vault/README.md"],
+        )
         capture = json.loads(self.capture.read_text())
         blobs = [
             request for request in capture["requests"]

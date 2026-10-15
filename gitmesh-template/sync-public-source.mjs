@@ -204,6 +204,10 @@ async function syncSource() {
   }
 
   console.log(`Synced ${changedFiles.length} changed allowlisted source files to ${OWNER}/${REPOSITORY}@${BRANCH}.`);
+  console.log("Changed files:");
+  for (const { target } of changedFiles) {
+    console.log(`- ${target}`);
+  }
   console.log(`Commit: ${commitSha}`);
 }
 
