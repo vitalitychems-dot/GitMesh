@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+HOOK_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+unset GITHUB_TOKEN
+exec node "$HOOK_DIR/../sync-public-source.mjs" --check-staged-credentials
