@@ -28,7 +28,8 @@ FAKE_GITHUB_TOKEN = "test-only-not-a-real-token"
 FAKE_REQUEST_BODY = "MOCK_REQUEST_BODY_SENTINEL"
 FAKE_AUTHORIZATION = f"Bearer {FAKE_GITHUB_TOKEN}"
 INITIAL_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
-MOVED_COMMIT_SHA = "0123456" + "f" * 33
+MOVED_COMMIT_SHA = "abcdef0" + "f" * 33
+SECOND_MOVED_COMMIT_SHA = "7654321" + "e" * 33
 ALLOWED_GITHUB_PATHS = {
     "projects/local-vault/gitmesh-ultimate-core.mjs",
     "projects/local-vault/README.md",
@@ -423,7 +424,9 @@ globalThis.fetch = async (input, init = {}) => {
   });
   const route = url.pathname.slice(base.length);
   const failAt = process.env.GITMESH_TEST_FAIL_AT;
-  if (failAt === method + " " + route) {
+    const failRef = process.env.GITMESH_TEST_FAIL_REF;
+    if (failAt === method + " " + route &&
+        (!failRef || url.searchParams.get("ref") === failRef)) {
     saveCapture();
     if (process.env.GITMESH_TEST_FAIL_MODE === "network") {
       throw new Error("mock connection failure " + process.env.GITHUB_TOKEN + " MOCK_REQUEST_BODY_SENTINEL");
@@ -449,9 +452,13 @@ globalThis.fetch = async (input, init = {}) => {
   if (method === "GET" && url.pathname === base + "/git/ref/heads/main") {
     mainRefReadCount += 1;
     const movedHeadSha = process.env.GITMESH_TEST_MOVED_HEAD_SHA;
+    const secondMovedHeadSha = process.env.GITMESH_TEST_SECOND_MOVED_HEAD_SHA;
+    let previewSha = initialCommitSha;
+    if (mainRefReadCount > 1 && movedHeadSha) previewSha = movedHeadSha;
+    if (mainRefReadCount > 2 && secondMovedHeadSha) previewSha = secondMovedHeadSha;
     data = {
       object: {
-        sha: movedHeadSha && mainRefReadCount > 1 ? movedHeadSha : initialCommitSha,
+        sha: previewSha,
       },
     };
   } else if (method === "GET" && url.pathname === base + "/git/commits/" + initialCommitSha) {
@@ -512,6 +519,8 @@ process.on("exit", saveCapture);
         preflight_mode=None,
         preflight_output=None,
         moved_head_sha=None,
+        second_moved_head_sha=None,
+        fail_ref=None,
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -535,6 +544,8 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_PREFLIGHT_MODE", preflight_mode),
             ("GITMESH_TEST_PREFLIGHT_OUTPUT", preflight_output),
             ("GITMESH_TEST_MOVED_HEAD_SHA", moved_head_sha),
+            ("GITMESH_TEST_SECOND_MOVED_HEAD_SHA", second_moved_head_sha),
+            ("GITMESH_TEST_FAIL_REF", fail_ref),
         ):
             if value is None:
                 env.pop(key, None)
@@ -717,45 +728,107 @@ process.on("exit", saveCapture);
             3,
         )
 
-    def test_dry_run_warns_when_main_advances_during_comparison(self):
+    def test_dry_run_refreshes_once_when_main_advances(self):
+        self.set_remote_snapshot()
+        readme = self.source_root / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nLocal-only preview marker.\n")
+
         result = self.run_sync(
             args=("--dry-run",),
             moved_head_sha=MOVED_COMMIT_SHA,
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn("compared with commit " + INITIAL_COMMIT_SHA[:7], result.stdout)
-        self.assertIn("advanced during this preview", result.stderr)
-        self.assertIn("comparison against commit " + INITIAL_COMMIT_SHA[:7], result.stderr)
-        self.assertIn("Rerun the dry run before publishing", result.stderr)
+        self.assertIn("compared with commit " + MOVED_COMMIT_SHA[:7], result.stdout)
+        self.assertNotIn("Warning:", result.stdout + result.stderr)
+        self.assertIn("no GitHub changes were made", result.stdout)
+        self.assertEqual(
+            reported_changed_paths(result.stdout),
+            ["projects/local-vault/README.md"],
+        )
         self.assert_safe_failure_output(result)
         self.assert_no_source_contents_in_output(result.stdout + result.stderr)
 
         capture = json.loads(self.capture.read_text())
-        self.assert_preview_snapshot_matches_content_reads(result.stdout, capture)
+        requests = capture["requests"]
+        head_reads = [
+            request for request in requests
+            if request["path"] == "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
+        ]
+        content_reads = [
+            request for request in requests
+            if request["method"] == "GET" and "/contents/" in request["path"]
+        ]
+        self.assertEqual(len(head_reads), 3)
+        self.assertEqual(len(content_reads), 6)
         self.assertEqual(
-            sum(request["path"] == "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
-                for request in capture["requests"]),
-            2,
+            [request["ref"] for request in content_reads],
+            [INITIAL_COMMIT_SHA] * 3 + [MOVED_COMMIT_SHA] * 3,
         )
-        request_paths = [request["path"] for request in capture["requests"]]
+        self.assertTrue(all(request["method"] == "GET" for request in requests))
+
+    def test_dry_run_stops_after_second_head_advance(self):
+        result = self.run_sync(
+            args=("--dry-run",),
+            moved_head_sha=MOVED_COMMIT_SHA,
+            second_moved_head_sha=SECOND_MOVED_COMMIT_SHA,
+        )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("advanced again", result.stderr)
+        self.assertIn(MOVED_COMMIT_SHA[:7], result.stderr)
+        self.assertIn(SECOND_MOVED_COMMIT_SHA[:7], result.stderr)
+        self.assertIn("Rerun the dry run before publishing", result.stderr)
+        self.assertIn("No GitHub changes were made", result.stderr)
+        self.assertNotIn("would be published", output)
+        self.assertEqual(reported_changed_paths(result.stdout), [])
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(output)
+
+        capture = json.loads(self.capture.read_text())
+        requests = capture["requests"]
+        head_reads = [
+            request for request in requests
+            if request["path"] == "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
+        ]
+        content_reads = [
+            request for request in requests
+            if request["method"] == "GET" and "/contents/" in request["path"]
+        ]
+        self.assertEqual(len(head_reads), 3)
+        self.assertEqual(len(content_reads), 6)
         self.assertEqual(
-            request_paths,
-            [
-                "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main",
-                "/repos/vitalitychems-dot/GitMesh/contents/projects/local-vault/gitmesh-ultimate-core.mjs",
-                "/repos/vitalitychems-dot/GitMesh/contents/projects/local-vault/README.md",
-                "/repos/vitalitychems-dot/GitMesh/contents/projects/local-vault/sync-public-source.mjs",
-                "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main",
-            ],
+            [request["ref"] for request in content_reads],
+            [INITIAL_COMMIT_SHA] * 3 + [MOVED_COMMIT_SHA] * 3,
         )
-        self.assertEqual(
-            sum("/contents/" in request["path"] for request in capture["requests"]),
-            3,
+        self.assertTrue(all(request["method"] == "GET" for request in requests))
+
+    def test_dry_run_refresh_failure_requests_rerun(self):
+        self.set_remote_snapshot()
+        result = self.run_sync(
+            args=("--dry-run",),
+            moved_head_sha=MOVED_COMMIT_SHA,
+            fail_at="GET /contents/projects/local-vault/README.md",
+            fail_ref=MOVED_COMMIT_SHA,
+            fail_status=503,
         )
-        self.assertFalse(any(
-            request["method"] != "GET"
-            for request in capture["requests"]
-        ))
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Dry run could not complete a consistent comparison", result.stderr)
+        self.assertIn("temporarily unavailable", result.stderr)
+        self.assertIn("Rerun the dry run before publishing", result.stderr)
+        self.assertIn("No GitHub changes were made", result.stderr)
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(output)
+
+        capture = json.loads(self.capture.read_text())
+        requests = capture["requests"]
+        failed_retry_reads = [
+            request for request in requests
+            if request["path"].endswith("/contents/projects/local-vault/README.md")
+            and request["ref"] == MOVED_COMMIT_SHA
+        ]
+        self.assertEqual(len(failed_retry_reads), 1)
+        self.assertTrue(all(request["method"] == "GET" for request in requests))
 
     def test_unknown_sync_option_stops_before_github_request(self):
         result = self.run_sync(args=("--unexpected-option",))
