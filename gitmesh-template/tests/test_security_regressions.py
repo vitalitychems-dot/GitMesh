@@ -293,13 +293,48 @@ childProcess.spawnSync = (command, ...args) => {
       args: args[0],
       hasGitHubToken: Boolean(args[1]?.env?.GITHUB_TOKEN),
     });
-    const failed = process.env.GITMESH_TEST_PREFLIGHT_FAIL === "1";
+    const mode = process.env.GITMESH_TEST_PREFLIGHT_MODE ?? "success";
+    const childOutput = process.env.GITMESH_TEST_PREFLIGHT_OUTPUT ?? "";
+    if (mode === "start") {
+      return {
+        error: { code: "ENOENT", message: childOutput },
+        status: null,
+        signal: null,
+        stdout: childOutput,
+        stderr: childOutput,
+        pid: null,
+        output: [],
+      };
+    }
+    if (mode === "timeout") {
+      return {
+        error: { code: "ETIMEDOUT", message: childOutput },
+        status: null,
+        signal: "SIGTERM",
+        stdout: childOutput,
+        stderr: childOutput,
+        pid: 123,
+        output: [],
+      };
+    }
+    if (mode === "output-limit") {
+      return {
+        error: { code: "ENOBUFS", message: childOutput },
+        status: null,
+        signal: null,
+        stdout: childOutput,
+        stderr: childOutput,
+        pid: 123,
+        output: [],
+      };
+    }
+    const failed = mode === "failure";
     return {
       error: undefined,
       status: failed ? 1 : 0,
       signal: null,
-      stdout: "",
-      stderr: failed ? "PREFLIGHT_PRIVATE_OUTPUT_SENTINEL" : "",
+      stdout: failed ? childOutput : "",
+      stderr: failed ? childOutput : "",
       pid: 123,
       output: [],
     };
@@ -463,7 +498,8 @@ process.on("exit", saveCapture);
         replace_kind=None,
         mutate_during_read_path=None,
         mutate_during_read_content=None,
-        fail_preflight=False,
+        preflight_mode=None,
+        preflight_output=None,
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -484,7 +520,8 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_REPLACE_KIND", replace_kind),
             ("GITMESH_TEST_MUTATE_DURING_READ_PATH", mutate_during_read_path),
             ("GITMESH_TEST_MUTATE_DURING_READ_CONTENT", mutate_during_read_content),
-            ("GITMESH_TEST_PREFLIGHT_FAIL", "1" if fail_preflight else None),
+            ("GITMESH_TEST_PREFLIGHT_MODE", preflight_mode),
+            ("GITMESH_TEST_PREFLIGHT_OUTPUT", preflight_output),
         ):
             if value is None:
                 env.pop(key, None)
@@ -1001,16 +1038,40 @@ process.on("exit", saveCapture);
             for source in ALLOWED_SOURCE_NAMES
             for method in ("lstatSync", "openSync", "readFileSync")
         )
-        for mode, args in (("publish", ()), ("dry run", ("--dry-run",))):
+        safe_test_name = "test_sync_publishes_only_the_fixed_source_allowlist"
+        source_sentinel = "PREFLIGHT_SOURCE_CONTENT_SENTINEL"
+        credential_sentinel = "ghp_" + "Q" * 36
+        unlisted_test_name = f"test_{credential_sentinel}"
+        injected_output = (
+            f"FAIL: {safe_test_name} (__main__.GitHubSyncTests.{safe_test_name})\n"
+            f"FAIL: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})\n"
+            f"{source_sentinel}\n{credential_sentinel}"
+        )
+        cases = (
+            ("failure", "publish", (), safe_test_name),
+            ("failure", "dry run", ("--dry-run",), safe_test_name),
+            ("start", "python start", (), "Python could not start"),
+            ("timeout", "python timeout", (), "preflight timed out"),
+            ("output-limit", "large output", (), "exceeded its output limit"),
+        )
+        for preflight_mode, mode, args, expected_summary in cases:
             with self.subTest(mode=mode):
                 result = self.run_sync(
                     args=args,
-                    fail_preflight=True,
+                    preflight_mode=preflight_mode,
+                    preflight_output=injected_output,
                 )
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Security regression preflight failed", result.stderr)
-                self.assertIn("no GitHub requests were made", result.stderr)
-                self.assertNotIn("PREFLIGHT_PRIVATE_OUTPUT_SENTINEL", result.stdout + result.stderr)
+                self.assertIn(expected_summary, result.stderr)
+                self.assertIn(
+                    "python3 gitmesh-template/tests/test_security_regressions.py",
+                    result.stderr,
+                )
+                self.assertIn("No GitHub requests were made", result.stderr)
+                self.assertNotIn(source_sentinel, result.stdout + result.stderr)
+                self.assertNotIn(credential_sentinel, result.stdout + result.stderr)
+                self.assertNotIn(unlisted_test_name, result.stdout + result.stderr)
+                self.assertNotIn(injected_output, result.stdout + result.stderr)
                 self.assert_safe_failure_output(result)
 
                 capture = json.loads(self.capture.read_text())
