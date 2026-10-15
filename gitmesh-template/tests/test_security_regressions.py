@@ -956,7 +956,7 @@ process.on("exit", saveCapture);
                 "binary invalid utf-8",
                 lambda: source_path.write_bytes(b"\xffBINARY_LOCAL_CONTENT_SENTINEL"),
                 "non-text source file",
-                None,
+                "Save the intended source as valid UTF-8 plain text, then rerun sync. No GitHub requests were made.",
                 (b"BINARY_LOCAL_CONTENT_SENTINEL",),
                 [
                     ("lstatSync", str(source_path)),
@@ -968,7 +968,7 @@ process.on("exit", saveCapture);
                 "binary containing nul",
                 lambda: source_path.write_bytes(b"\x00BINARY_NUL_LOCAL_CONTENT_SENTINEL"),
                 "non-text source file",
-                None,
+                "Save the intended source as valid UTF-8 plain text, then rerun sync. No GitHub requests were made.",
                 (b"BINARY_NUL_LOCAL_CONTENT_SENTINEL",),
                 [
                     ("lstatSync", str(source_path)),
