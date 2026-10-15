@@ -23,6 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONSOLE = ROOT / "gitmesh-ultimate-core.mjs"
 SYNC = ROOT / "sync-public-source.mjs"
 PRE_COMMIT_HOOK = ROOT / "hooks" / "pre-commit"
+HOOK_INSTALLER = ROOT / "install-pre-commit-hook.mjs"
 INITIAL_SIGIL = "fixture-admin-sigil-one"
 CUSTOM_SIGIL = "fixture-admin-sigil-custom"
 FAKE_GITHUB_TOKEN = "test-only-not-a-real-token"
@@ -254,6 +255,10 @@ class GitHubSyncTests(unittest.TestCase):
         self.source_root.mkdir()
         for name in ALLOWED_SOURCE_NAMES:
             shutil.copy2(ROOT / name, self.source_root / name)
+        shutil.copy2(HOOK_INSTALLER, self.source_root / HOOK_INSTALLER.name)
+        source_hooks = self.source_root / "hooks"
+        source_hooks.mkdir()
+        shutil.copy2(PRE_COMMIT_HOOK, source_hooks / "pre-commit")
         self.preflight_harness = self.source_root / "tests" / "test_security_regressions.py"
         self.preflight_harness.parent.mkdir()
         shutil.copy2(pathlib.Path(__file__), self.preflight_harness)
@@ -1706,6 +1711,179 @@ class PreCommitHookTests(unittest.TestCase):
         self.assertIn("no allowlisted source files are staged", unrelated_output)
         self.assertNotIn(unrelated_credential, unrelated_output)
         self.assertFalse(self.network_marker.exists())
+
+
+class HookInstallerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="gitmesh-hook-installer-test-")
+        self.repo_root = pathlib.Path(self.temp.name)
+        self.template_root = self.repo_root / "gitmesh-template"
+        self.template_root.mkdir()
+        for name in ALLOWED_SOURCE_NAMES:
+            shutil.copy2(ROOT / name, self.template_root / name)
+        shutil.copy2(HOOK_INSTALLER, self.template_root / HOOK_INSTALLER.name)
+        hook_dir = self.template_root / "hooks"
+        hook_dir.mkdir()
+        shutil.copy2(PRE_COMMIT_HOOK, hook_dir / "pre-commit")
+
+        self.global_config = self.repo_root / "isolated-global.gitconfig"
+        self.global_config.write_text("")
+        self.env = os.environ.copy()
+        self.env.pop("GITHUB_TOKEN", None)
+        self.env["GIT_CONFIG_GLOBAL"] = str(self.global_config)
+        self.env["GIT_CONFIG_NOSYSTEM"] = "1"
+        self.run_git(["init", "--quiet"])
+        self.run_git(["config", "--local", "user.name", "GitMesh Hook Test"])
+        self.run_git(["config", "--local", "user.email", "gitmesh-hook-test@example.invalid"])
+        self.run_git(["config", "--local", "commit.gpgsign", "false"])
+        self.run_git(["add", "gitmesh-template"])
+        baseline = self.run_git(["commit", "--quiet", "-m", "fixture baseline"])
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_git(self, args):
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.repo_root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def run_installer(self):
+        return subprocess.run(
+            ["node", str(self.template_root / HOOK_INSTALLER.name)],
+            cwd=self.repo_root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def test_hook_setup_enables_only_repository_local_path_when_safe(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("for this repository only", result.stdout)
+        self.assertIn("git config --local --unset core.hooksPath", result.stdout)
+
+        configured = self.run_git(["config", "--local", "--get", "core.hooksPath"])
+        self.assertEqual(configured.returncode, 0)
+        self.assertEqual(configured.stdout.strip(), "gitmesh-template/hooks")
+        self.assertEqual(self.global_config.read_text(), "")
+
+        repeated = self.run_installer()
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertIn("already enabled", repeated.stdout)
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "core.hooksPath"]).stdout.strip(),
+            "gitmesh-template/hooks",
+        )
+
+        credential = "ghp_" + "Q" * 36
+        readme = self.template_root / "README.md"
+        readme.write_text(f"staged_secret={credential}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        commit = self.run_git(["commit", "-m", "installer enabled hook"])
+        output = commit.stdout + commit.stderr
+        self.assertNotEqual(commit.returncode, 0)
+        self.assertIn("README.md (line 1)", output)
+        self.assertNotIn(credential, output)
+
+    def test_hook_setup_preserves_existing_local_hooks_path(self):
+        existing_hooks = self.repo_root / "existing-local-hooks"
+        existing_hooks.mkdir()
+        existing_hook = existing_hooks / "pre-commit"
+        existing_hook.write_text("#!/bin/sh\nprintf 'existing-hook-ran\\n'\n")
+        self.run_git(["config", "--local", "core.hooksPath", "existing-local-hooks"])
+        result = self.run_installer()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("repository-local Git hooks path is already configured", output)
+        self.assertIn("No Git configuration was changed", output)
+        self.assertIn("--check-staged-credentials", output)
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "core.hooksPath"]).stdout.strip(),
+            "existing-local-hooks",
+        )
+        self.assertEqual(existing_hook.read_text(), "#!/bin/sh\nprintf 'existing-hook-ran\\n'\n")
+        self.assertEqual(self.global_config.read_text(), "")
+
+    def test_hook_setup_preserves_multiple_local_hooks_paths(self):
+        self.run_git(["config", "--local", "--add", "core.hooksPath", "first-hooks"])
+        self.run_git(["config", "--local", "--add", "core.hooksPath", "second-hooks"])
+        result = self.run_installer()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("repository-local Git hooks path is already configured", output)
+        self.assertIn("No Git configuration was changed", output)
+        paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
+        self.assertEqual(paths.returncode, 0)
+        self.assertEqual(paths.stdout.splitlines(), ["first-hooks", "second-hooks"])
+        self.assertEqual(self.global_config.read_text(), "")
+
+    def test_hook_setup_preserves_existing_global_hooks_path(self):
+        self.run_git(["config", "--global", "core.hooksPath", "existing-global-hooks"])
+        result = self.run_installer()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("configured outside this repository", output)
+        self.assertIn("No Git configuration was changed", output)
+        self.assertEqual(
+            self.run_git(["config", "--global", "--get", "core.hooksPath"]).stdout.strip(),
+            "existing-global-hooks",
+        )
+        self.assertEqual(self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode, 1)
+
+    def test_hook_setup_preserves_existing_default_hooks(self):
+        hooks_path = self.run_git(["rev-parse", "--git-path", "hooks"]).stdout.strip()
+        default_hooks = self.repo_root / hooks_path
+        default_hooks.mkdir(parents=True, exist_ok=True)
+        (default_hooks / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+
+        result = self.run_installer()
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Custom files already exist in Git's default hooks directory", output)
+        self.assertIn("No Git configuration was changed", output)
+        self.assertEqual(self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode, 1)
+        self.assertTrue((default_hooks / "pre-commit").exists())
+
+    def test_hook_setup_refuses_linked_worktree_without_changing_config(self):
+        worktree_root = self.repo_root / "linked-worktree"
+        added = self.run_git(["worktree", "add", "--detach", str(worktree_root), "HEAD"])
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+
+        installer = worktree_root / "gitmesh-template" / HOOK_INSTALLER.name
+        result = subprocess.run(
+            ["node", str(installer)],
+            cwd=worktree_root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("linked Git worktree", output)
+        self.assertIn("No Git configuration was changed", output)
+        self.assertEqual(self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode, 1)
+        worktree_config = subprocess.run(
+            ["git", "config", "--local", "--get", "core.hooksPath"],
+            cwd=worktree_root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(worktree_config.returncode, 1)
 
 
 if __name__ == "__main__":
