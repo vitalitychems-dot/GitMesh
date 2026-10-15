@@ -222,7 +222,7 @@ function readSourceContent(sourcePath, source) {
 }
 
 function readSourceFiles({ validateSyntax = true } = {}) {
-  return ALLOWED_FILES.map(({ source, target }) => {
+  const sourceFiles = ALLOWED_FILES.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
     const content = readSourceContent(sourcePath, source);
     if (content.includes(0)) {
@@ -234,22 +234,48 @@ function readSourceFiles({ validateSyntax = true } = {}) {
     } catch {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
-    const credentialLines = findEmbeddedCredentialLines(text);
-    if (credentialLines.length > 0) {
+    return {
+      source,
+      target,
+      content,
+      credentialLines: findEmbeddedCredentialLines(text),
+    };
+  });
+  const credentialFindings = sourceFiles.filter(({ credentialLines }) =>
+    credentialLines.length > 0
+  );
+  if (credentialFindings.length > 0) {
+    const locations = credentialFindings.map(({ source, credentialLines }) => {
       const lineLabel = credentialLines.length === 1
         ? `line ${credentialLines[0]}`
         : `lines ${credentialLines.join(", ")}`;
-      throw new Error(
-        `Refusing to sync a source file containing a credential-like value: ${source} (${lineLabel}). ` +
-        "Remove the value from this file; use Replit Secrets for runtime credentials. " +
-        "Rotate it only if it was already shared or published elsewhere. No GitHub requests were made.",
-      );
+      return `${source} (${lineLabel})`;
+    });
+    const hasMultipleLocations = credentialFindings.some(
+      ({ credentialLines }) => credentialLines.length > 1,
+    ) || credentialFindings.length > 1;
+    const removalGuidance = credentialFindings.length > 1
+      ? "Remove the values from these files"
+      : hasMultipleLocations
+        ? "Remove the values from this file"
+        : "Remove the value from this file";
+    const rotationGuidance = hasMultipleLocations
+      ? "Rotate them only if they were already shared or published elsewhere."
+      : "Rotate it only if it was already shared or published elsewhere.";
+    throw new Error(
+      `Refusing to sync source files containing a credential-like value: ${locations.join("; ")}. ` +
+      `${removalGuidance}; use Replit Secrets for runtime credentials. ` +
+      `${rotationGuidance} No GitHub requests were made.`,
+    );
+  }
+  if (validateSyntax) {
+    for (const { source, content } of sourceFiles) {
+      if (path.extname(source) === ".mjs") {
+        validateJavaScriptSyntax(content, source);
+      }
     }
-    if (validateSyntax && path.extname(source) === ".mjs") {
-      validateJavaScriptSyntax(content, source);
-    }
-    return { target, content };
-  });
+  }
+  return sourceFiles.map(({ target, content }) => ({ target, content }));
 }
 
 function checkLocalCredentials() {
