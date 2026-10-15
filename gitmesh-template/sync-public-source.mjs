@@ -52,7 +52,9 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_embedded_credentials_stop_before_github_without_leaking_values",
   "test_credentials_in_multiple_sources_are_all_reported_without_leaking",
   "test_embedded_credentials_report_lines_for_crlf_and_bare_cr_without_leaking",
-  "test_dry_run_warns_when_main_advances_during_comparison",
+  "test_dry_run_refreshes_once_when_main_advances",
+  "test_dry_run_stops_after_second_head_advance",
+  "test_dry_run_refresh_failure_requests_rerun",
   "test_changed_source_updates_only_the_changed_allowlisted_file",
   "test_missing_secret_fails_before_any_github_request",
   "test_local_credential_check_passes_without_token_or_github_requests",
@@ -417,6 +419,61 @@ async function findChangedFiles(token, files, refSha) {
   return changedFiles;
 }
 
+async function previewSource(token, files) {
+  let parentSha;
+  let changedFiles;
+  let branchAdvancedToSha;
+  try {
+    const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
+    parentSha = requireSha(ref?.object?.sha, "main branch commit");
+    changedFiles = await findChangedFiles(token, files, parentSha);
+
+    const latestRef = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
+    const latestSha = requireSha(latestRef?.object?.sha, "main branch commit");
+    if (latestSha !== parentSha) {
+      parentSha = latestSha;
+      changedFiles = await findChangedFiles(token, files, parentSha);
+
+      const refreshedRef = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
+      const refreshedSha = requireSha(refreshedRef?.object?.sha, "main branch commit");
+      if (refreshedSha !== parentSha) {
+        branchAdvancedToSha = refreshedSha;
+      }
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "A GitHub request failed.";
+    throw new Error(
+      `Dry run could not complete a consistent comparison. ${detail} ` +
+      "Rerun the dry run before publishing. No GitHub changes were made.",
+    );
+  }
+  if (branchAdvancedToSha) {
+    throw new Error(
+      `GitHub branch advanced again from commit ${parentSha.slice(0, 7)} ` +
+      `to ${branchAdvancedToSha.slice(0, 7)} during the one automatic refresh. ` +
+      "Rerun the dry run before publishing. No GitHub changes were made.",
+    );
+  }
+
+  const shortParentSha = parentSha.slice(0, 7);
+  if (changedFiles.length === 0) {
+    console.log(
+      `Dry run: all ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH} (commit ${shortParentSha}); ` +
+      "no changes would be published and no commit was created.",
+    );
+    return;
+  }
+
+  console.log(
+    `Dry run: ${changedFiles.length} allowlisted source files would be published to ${OWNER}/${REPOSITORY}@${BRANCH}, ` +
+    `compared with commit ${shortParentSha}; no GitHub changes were made.`,
+  );
+  console.log("Changed files:");
+  for (const { target } of changedFiles) {
+    console.log(`- ${target}`);
+  }
+}
+
 function parseArguments(args) {
   if (args.length === 0) return { dryRun: false, checkCredentials: false };
   if (args.length === 1 && args[0] === "--dry-run") {
@@ -434,45 +491,16 @@ async function syncSource({ dryRun }) {
   const token = getToken();
   const files = readSourceFiles();
   runSecurityPreflight();
-  const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
-  const parentSha = requireSha(ref?.object?.sha, "main branch commit");
-  const shortParentSha = parentSha.slice(0, 7);
-
-  const changedFiles = await findChangedFiles(token, files, parentSha);
-  let latestPreviewSha;
   if (dryRun) {
-    const latestRef = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
-    latestPreviewSha = requireSha(latestRef?.object?.sha, "main branch commit");
-  }
-  const warnIfPreviewIsStale = () => {
-    if (dryRun && latestPreviewSha !== parentSha) {
-      console.warn(
-        `Warning: ${OWNER}/${REPOSITORY}@${BRANCH} advanced during this preview after comparison against commit ${shortParentSha}. ` +
-        "Rerun the dry run before publishing.",
-      );
-    }
-  };
-  if (changedFiles.length === 0) {
-    if (dryRun) {
-      console.log(
-        `Dry run: all ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH} (commit ${shortParentSha}); no changes would be published and no commit was created.`,
-      );
-      warnIfPreviewIsStale();
-      return;
-    }
-    console.log(`All ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH}; no commit created.`);
+    await previewSource(token, files);
     return;
   }
 
-  if (dryRun) {
-    console.log(
-      `Dry run: ${changedFiles.length} allowlisted source files would be published to ${OWNER}/${REPOSITORY}@${BRANCH}, compared with commit ${shortParentSha}; no GitHub changes were made.`,
-    );
-    console.log("Changed files:");
-    for (const { target } of changedFiles) {
-      console.log(`- ${target}`);
-    }
-    warnIfPreviewIsStale();
+  const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
+  const parentSha = requireSha(ref?.object?.sha, "main branch commit");
+  const changedFiles = await findChangedFiles(token, files, parentSha);
+  if (changedFiles.length === 0) {
+    console.log(`All ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH}; no commit created.`);
     return;
   }
 
