@@ -296,6 +296,7 @@ globalThis.fetch = async (input, init = {}) => {
   const body = init.body ? JSON.parse(init.body) : null;
   requests.push({
     path: url.pathname,
+    ref: url.searchParams.get("ref"),
     method,
     body,
     hasExpectedBearer: init.headers?.Authorization === "Bearer " + process.env.GITHUB_TOKEN,
@@ -417,6 +418,14 @@ process.on("exit", saveCapture);
         for sensitive in (FAKE_GITHUB_TOKEN, FAKE_AUTHORIZATION, FAKE_REQUEST_BODY):
             self.assertNotIn(sensitive, combined)
 
+    def assert_content_reads_use_initial_snapshot(self, capture):
+        content_reads = [
+            request for request in capture["requests"]
+            if request["method"] == "GET" and "/contents/" in request["path"]
+        ]
+        self.assertTrue(content_reads)
+        self.assertTrue(all(request["ref"] == "a" * 40 for request in content_reads))
+
     def set_remote_snapshot(self, overrides=None):
         contents = {
             f"projects/local-vault/{name}": base64.b64encode(
@@ -437,6 +446,7 @@ process.on("exit", saveCapture);
         self.assertEqual(len(reported_paths), len(ALLOWED_GITHUB_PATHS))
         capture = json.loads(self.capture.read_text())
         requests = capture["requests"]
+        self.assert_content_reads_use_initial_snapshot(capture)
         self.assertTrue(all(request["hasExpectedBearer"] for request in requests))
         tree_calls = [request for request in requests if request["path"].endswith("/git/trees")]
         self.assertEqual(len(tree_calls), 1)
@@ -512,6 +522,7 @@ process.on("exit", saveCapture);
         capture = json.loads(self.capture.read_text())
         self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
         self.assertTrue(all(request["method"] == "GET" for request in capture["requests"]))
+        self.assert_content_reads_use_initial_snapshot(capture)
         self.assertFalse(any("/git/commits/" in request["path"] for request in capture["requests"]))
 
     def test_dry_run_lists_only_changed_paths_without_contents_or_writes(self):
@@ -533,6 +544,7 @@ process.on("exit", saveCapture);
         capture = json.loads(self.capture.read_text())
         self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
         self.assertTrue(all(request["method"] == "GET" for request in capture["requests"]))
+        self.assert_content_reads_use_initial_snapshot(capture)
         self.assertEqual(
             sum("/contents/" in request["path"] for request in capture["requests"]),
             3,

@@ -144,11 +144,11 @@ async function githubRequest(token, route, method = "GET", body = undefined, { a
   }
 }
 
-async function readRemoteSourceFile(token, target) {
+async function readRemoteSourceFile(token, target, refSha) {
   const encodedPath = target.split("/").map(encodeURIComponent).join("/");
   const remote = await githubRequest(
     token,
-    `/contents/${encodedPath}?ref=${encodeURIComponent(BRANCH)}`,
+    `/contents/${encodedPath}?ref=${encodeURIComponent(refSha)}`,
     "GET",
     undefined,
     { allowNotFound: true },
@@ -166,10 +166,10 @@ async function readRemoteSourceFile(token, target) {
   return content;
 }
 
-async function findChangedFiles(token, files) {
+async function findChangedFiles(token, files, refSha) {
   const changedFiles = [];
   for (const file of files) {
-    const remoteContent = await readRemoteSourceFile(token, file.target);
+    const remoteContent = await readRemoteSourceFile(token, file.target, refSha);
     if (remoteContent === null || !remoteContent.equals(file.content)) {
       changedFiles.push(file);
     }
@@ -189,7 +189,7 @@ async function syncSource({ dryRun }) {
   const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
   const parentSha = requireSha(ref?.object?.sha, "main branch commit");
 
-  const changedFiles = await findChangedFiles(token, files);
+  const changedFiles = await findChangedFiles(token, files, parentSha);
   if (changedFiles.length === 0) {
     if (dryRun) {
       console.log(
