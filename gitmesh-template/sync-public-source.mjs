@@ -105,6 +105,14 @@ function findEmbeddedCredentialLines(text) {
     );
 }
 
+function nonTextSourceError(source) {
+  return new Error(
+    `Refusing to sync a non-text source file: ${source}. ` +
+      "Save the intended source as valid UTF-8 plain text, then rerun sync. " +
+      "No GitHub requests were made.",
+  );
+}
+
 function summarizePreflightFailure(result) {
   if (
     result.error?.code === "ETIMEDOUT" ||
@@ -267,13 +275,13 @@ function readSourceFiles({ validateSyntax = true } = {}) {
     const sourcePath = path.join(ROOT, source);
     const content = readSourceContent(sourcePath, source);
     if (content.includes(0)) {
-      throw new Error(`Refusing to sync a non-text source file: ${source}`);
+      throw nonTextSourceError(source);
     }
     let text;
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(content);
     } catch {
-      throw new Error(`Refusing to sync a non-text source file: ${source}`);
+      throw nonTextSourceError(source);
     }
     return {
       source,
