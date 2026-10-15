@@ -376,6 +376,7 @@ process.on("exit", saveCapture);
         fail_status=None,
         retry_after=None,
         rate_remaining=None,
+        args=(),
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -396,7 +397,13 @@ process.on("exit", saveCapture);
             else:
                 env[key] = value
         return subprocess.run(
-            ["node", "--import", str(self.preload), str(self.source_root / SYNC.name)],
+            [
+                "node",
+                "--import",
+                str(self.preload),
+                str(self.source_root / SYNC.name),
+                *args,
+            ],
             cwd=self.source_root,
             env=env,
             capture_output=True,
@@ -491,6 +498,53 @@ process.on("exit", saveCapture);
                 for request in capture["requests"]),
             3,
         )
+
+    def test_dry_run_with_no_changes_reports_no_commit_and_makes_no_writes(self):
+        self.set_remote_snapshot()
+        result = self.run_sync(args=("--dry-run",))
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Dry run:", result.stdout)
+        self.assertIn("already match", result.stdout)
+        self.assertIn("no commit was created", result.stdout)
+        self.assertEqual(reported_changed_paths(result.stdout), [])
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
+        self.assertTrue(all(request["method"] == "GET" for request in capture["requests"]))
+        self.assertFalse(any("/git/commits/" in request["path"] for request in capture["requests"]))
+
+    def test_dry_run_lists_only_changed_paths_without_contents_or_writes(self):
+        self.set_remote_snapshot()
+        private_file_content = b"DRY_RUN_PRIVATE_FILE_CONTENT_SENTINEL"
+        (self.source_root / "README.md").write_bytes(private_file_content)
+
+        result = self.run_sync(args=("--dry-run",))
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("would be published", result.stdout)
+        self.assertIn("no GitHub changes were made", result.stdout)
+        self.assertEqual(
+            reported_changed_paths(result.stdout),
+            ["projects/local-vault/README.md"],
+        )
+        self.assertNotIn(private_file_content.decode(), result.stdout + result.stderr)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
+        self.assertTrue(all(request["method"] == "GET" for request in capture["requests"]))
+        self.assertEqual(
+            sum("/contents/" in request["path"] for request in capture["requests"]),
+            3,
+        )
+
+    def test_unknown_sync_option_stops_before_github_request(self):
+        result = self.run_sync(args=("--unexpected-option",))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Usage: node ./sync-public-source.mjs [--dry-run].", result.stderr)
+        self.assert_safe_failure_output(result)
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
 
     def test_malformed_remote_files_stop_before_any_github_write(self):
         target = "projects/local-vault/gitmesh-ultimate-core.mjs"

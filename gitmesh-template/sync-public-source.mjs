@@ -155,20 +155,43 @@ async function findChangedFiles(token, files) {
   return changedFiles;
 }
 
-async function syncSource() {
+function parseArguments(args) {
+  if (args.length === 0) return { dryRun: false };
+  if (args.length === 1 && args[0] === "--dry-run") return { dryRun: true };
+  throw new Error("Usage: node ./sync-public-source.mjs [--dry-run].");
+}
+
+async function syncSource({ dryRun }) {
   const token = getToken();
   const files = readSourceFiles();
   const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
   const parentSha = requireSha(ref?.object?.sha, "main branch commit");
-  const parentCommit = await githubRequest(token, `/git/commits/${parentSha}`);
-  const baseTreeSha = requireSha(parentCommit?.tree?.sha, "base tree");
 
   const changedFiles = await findChangedFiles(token, files);
   if (changedFiles.length === 0) {
+    if (dryRun) {
+      console.log(
+        `Dry run: all ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH}; no changes would be published and no commit was created.`,
+      );
+      return;
+    }
     console.log(`All ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH}; no commit created.`);
     return;
   }
 
+  if (dryRun) {
+    console.log(
+      `Dry run: ${changedFiles.length} allowlisted source files would be published to ${OWNER}/${REPOSITORY}@${BRANCH}; no GitHub changes were made.`,
+    );
+    console.log("Changed files:");
+    for (const { target } of changedFiles) {
+      console.log(`- ${target}`);
+    }
+    return;
+  }
+
+  const parentCommit = await githubRequest(token, `/git/commits/${parentSha}`);
+  const baseTreeSha = requireSha(parentCommit?.tree?.sha, "base tree");
   const blobs = await Promise.all(changedFiles.map(async ({ content }) => {
     const blob = await githubRequest(token, "/git/blobs", "POST", {
       content: content.toString("base64"),
@@ -211,12 +234,13 @@ async function syncSource() {
   console.log(`Commit: ${commitSha}`);
 }
 
-if (process.argv.length !== 2) {
-  console.error("This program does not accept command-line arguments.");
-  process.exitCode = 2;
-} else {
-  syncSource().catch((error) => {
+try {
+  const options = parseArguments(process.argv.slice(2));
+  syncSource(options).catch((error) => {
     console.error(error instanceof Error ? error.message : "Source sync failed.");
     process.exitCode = 1;
   });
+} catch (error) {
+  console.error(error instanceof Error ? error.message : "Source sync failed.");
+  process.exitCode = 2;
 }
