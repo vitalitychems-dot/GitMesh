@@ -41,7 +41,7 @@ function requireSha(value, label) {
 }
 
 function validateJavaScriptSyntax(content, source) {
-  const result = spawnSync(process.execPath, ["--check"], {
+  const result = spawnSync(process.execPath, ["--input-type=module", "--check"], {
     input: content,
     encoding: "utf8",
     timeout: 10_000,

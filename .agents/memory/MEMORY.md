@@ -1,1 +1,2 @@
 - [Hidden terminal input](hidden-terminal-input.md) — enter no-echo mode before showing credential prompts; test with immediate PTY input to catch echo races.
+- [Node stdin syntax checks](node-stdin-syntax-check.md) — syntax-check ES module snapshots from stdin with module mode; keep diagnostics captured because they can include source.
