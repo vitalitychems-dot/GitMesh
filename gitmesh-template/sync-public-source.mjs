@@ -54,6 +54,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_embedded_credentials_report_lines_for_crlf_and_bare_cr_without_leaking",
   "test_dry_run_refreshes_once_when_main_advances",
   "test_dry_run_stops_after_second_head_advance",
+  "test_dry_run_stops_safely_when_refreshed_commit_id_is_invalid",
   "test_dry_run_refresh_failure_requests_rerun",
   "test_changed_source_updates_only_the_changed_allowlisted_file",
   "test_missing_secret_fails_before_any_github_request",
