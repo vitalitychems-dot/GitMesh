@@ -49,4 +49,4 @@ Run from this folder with `node ./sync-public-source.mjs`. It updates only the t
 
 ## Security regression checks
 
-From the project root, run `python3 gitmesh-template/tests/test_security_regressions.py`. The checks use a disposable local vault and a mocked GitHub API; they do not read the active vault or make network requests. Python 3, Node.js, and Git must be available.
+The regression harness is maintained in the Replit workspace and is not included in the GitHub source sync. From the Replit workspace root, run `python3 gitmesh-template/tests/test_security_regressions.py`. The checks use a disposable fixture and a mocked GitHub API; they do not read the active vault or make network requests. Python 3, Node.js, and Git must be available.
