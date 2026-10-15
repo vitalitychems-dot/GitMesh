@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { TextDecoder } from "node:util";
@@ -39,6 +40,18 @@ function requireSha(value, label) {
   return value;
 }
 
+function validateJavaScriptSyntax(sourcePath, source) {
+  const result = spawnSync(process.execPath, ["--check", sourcePath], {
+    encoding: "utf8",
+    timeout: 10_000,
+    maxBuffer: 64 * 1024,
+    env: { PATH: process.env.PATH ?? "" },
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`Refusing to sync JavaScript that fails Node syntax validation: ${source}`);
+  }
+}
+
 function readSourceFiles() {
   return ALLOWED_FILES.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
@@ -54,6 +67,9 @@ function readSourceFiles() {
       new TextDecoder("utf-8", { fatal: true }).decode(content);
     } catch {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
+    }
+    if (path.extname(source) === ".mjs") {
+      validateJavaScriptSyntax(sourcePath, source);
     }
     return { target, content };
   });
