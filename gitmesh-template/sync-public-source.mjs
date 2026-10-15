@@ -195,7 +195,10 @@ function validateJavaScriptSyntax(content, source) {
     env: { PATH: process.env.PATH ?? "" },
   });
   if (result.error || result.status !== 0) {
-    throw new Error(`Refusing to sync JavaScript that fails Node syntax validation: ${source}`);
+    throw new Error(
+      `Refusing to sync JavaScript that fails Node syntax validation: ${source}. ` +
+      "Review and correct this file, save it, then rerun sync. No GitHub requests were made.",
+    );
   }
 }
 

@@ -1125,8 +1125,15 @@ process.on("exit", saveCapture);
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Node syntax validation", result.stderr)
         self.assertIn(source_path.name, result.stderr)
+        self.assertIn(
+            "Review and correct this file, save it, then rerun sync. No GitHub requests were made.",
+            result.stderr,
+        )
         self.assertNotIn(invalid_source.strip(), result.stdout + result.stderr)
         self.assertNotIn("INVALID_JS_SOURCE_SENTINEL", result.stdout + result.stderr)
+        self.assertNotIn("SyntaxError", result.stdout + result.stderr)
+        self.assertNotIn("Unexpected token", result.stdout + result.stderr)
+        self.assertNotIn("Node.js v", result.stdout + result.stderr)
         self.assert_safe_failure_output(result)
 
         capture = json.loads(self.capture.read_text())
