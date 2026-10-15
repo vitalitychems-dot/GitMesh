@@ -2,6 +2,7 @@
 """Isolated security regression checks for the GitMesh console and source sync."""
 
 import base64
+from collections import Counter
 import hashlib
 import json
 import os
@@ -29,6 +30,11 @@ ALLOWED_GITHUB_PATHS = {
     "projects/local-vault/README.md",
     "projects/local-vault/sync-public-source.mjs",
 }
+ALLOWED_SOURCE_NAMES = (
+    "gitmesh-ultimate-core.mjs",
+    "README.md",
+    "sync-public-source.mjs",
+)
 
 
 def drive_console(workdir, steps, timeout=30):
@@ -228,12 +234,48 @@ class GitHubSyncTests(unittest.TestCase):
         self.temp_path = pathlib.Path(self.temp.name)
         self.capture = self.temp_path / "requests.json"
         self.preload = self.temp_path / "mock-github.mjs"
+        self.source_root = self.temp_path / "isolated-source"
+        self.source_root.mkdir()
+        for name in ALLOWED_SOURCE_NAMES:
+            shutil.copy2(ROOT / name, self.source_root / name)
+
+        # Private sentinels prove the sync process neither reads nor uploads
+        # records, credentials, bundles, assets, or arbitrary workspace files.
+        private_files = {
+            "SovereignMeshVault/active_sigil.hash": b"PRIVATE_SIGIL_FILE_SENTINEL",
+            "SovereignMeshVault/security_audit.log": b"PRIVATE_AUDIT_SENTINEL",
+            "SovereignMeshVault/ledger_matrix/private-record.json": b"PRIVATE_RECORD_SENTINEL",
+            "SovereignMeshVault/bundles_outbound/private.bundle": b"PRIVATE_BUNDLE_SENTINEL",
+            "SovereignMeshVault/drops_inbound/incoming.bundle": b"PRIVATE_INBOUND_SENTINEL",
+            "attached_assets/private.txt": b"PRIVATE_ASSET_SENTINEL",
+            "workspace-private.txt": b"PRIVATE_WORKSPACE_SENTINEL",
+        }
+        for relative_path, content in private_files.items():
+            target = self.source_root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+
         self.preload.write_text(
             """
 import fs from "node:fs";
+import path from "node:path";
 const requests = [];
+const filesystemReads = [];
 const capture = process.env.GITMESH_TEST_CAPTURE;
 const base = "/repos/vitalitychems-dot/GitMesh";
+for (const name of ["lstatSync", "readFileSync"]) {
+  const original = fs[name].bind(fs);
+  fs[name] = (target, ...args) => {
+    if (typeof target === "string" || target instanceof URL) {
+      filesystemReads.push({ method: name, path: path.resolve(String(target)) });
+    }
+    return original(target, ...args);
+  };
+}
+const saveCapture = () => fs.writeFileSync(
+  capture,
+  JSON.stringify({ requests, filesystemReads }),
+);
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
   const method = init.method ?? "GET";
@@ -244,6 +286,19 @@ globalThis.fetch = async (input, init = {}) => {
     body,
     hasExpectedBearer: init.headers?.Authorization === "Bearer " + process.env.GITHUB_TOKEN,
   });
+  const route = url.pathname.slice(base.length);
+  const failAt = process.env.GITMESH_TEST_FAIL_AT;
+  if (failAt === method + " " + route) {
+    saveCapture();
+    if (process.env.GITMESH_TEST_FAIL_MODE === "network") {
+      throw new Error("mock connection failure");
+    }
+    return {
+      ok: false,
+      status: Number(process.env.GITMESH_TEST_FAIL_STATUS ?? "500"),
+      json: async () => ({ message: "mock failure" }),
+    };
+  }
   let data;
   if (method === "GET" && url.pathname === base + "/git/ref/heads/main") {
     data = { object: { sha: "a".repeat(40) } };
@@ -260,26 +315,35 @@ globalThis.fetch = async (input, init = {}) => {
   } else {
     throw new Error("Unexpected mocked GitHub request.");
   }
-  fs.writeFileSync(capture, JSON.stringify(requests));
+  saveCapture();
   return { ok: true, status: 200, json: async () => data };
 };
-process.on("exit", () => fs.writeFileSync(capture, JSON.stringify(requests)));
+process.on("exit", saveCapture);
 """.strip()
         )
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_sync(self, with_token=True):
+    def run_sync(self, token_value=FAKE_GITHUB_TOKEN, fail_at=None, fail_mode=None, fail_status=None):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
-        if with_token:
-            env["GITHUB_TOKEN"] = FAKE_GITHUB_TOKEN
+        if token_value is not None:
+            env["GITHUB_TOKEN"] = token_value
         else:
             env.pop("GITHUB_TOKEN", None)
+        for key, value in (
+            ("GITMESH_TEST_FAIL_AT", fail_at),
+            ("GITMESH_TEST_FAIL_MODE", fail_mode),
+            ("GITMESH_TEST_FAIL_STATUS", str(fail_status) if fail_status is not None else None),
+        ):
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
         return subprocess.run(
-            ["node", "--import", str(self.preload), str(SYNC)],
-            cwd=ROOT,
+            ["node", "--import", str(self.preload), str(self.source_root / SYNC.name)],
+            cwd=self.source_root,
             env=env,
             capture_output=True,
             text=True,
@@ -291,7 +355,8 @@ process.on("exit", () => fs.writeFileSync(capture, JSON.stringify(requests)));
         result = self.run_sync()
         self.assertEqual(result.returncode, 0, "Mocked source sync did not complete.")
         self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
-        requests = json.loads(self.capture.read_text())
+        capture = json.loads(self.capture.read_text())
+        requests = capture["requests"]
         self.assertTrue(all(request["hasExpectedBearer"] for request in requests))
         tree_calls = [request for request in requests if request["path"].endswith("/git/trees")]
         self.assertEqual(len(tree_calls), 1)
@@ -306,23 +371,91 @@ process.on("exit", () => fs.writeFileSync(capture, JSON.stringify(requests)));
             if request["method"] == "POST" and request["path"].endswith("/git/blobs")
         }
         expected_contents = {
-            (ROOT / source).read_bytes()
-            for source in (
-                "gitmesh-ultimate-core.mjs",
-                "README.md",
-                "sync-public-source.mjs",
-            )
+            (self.source_root / source).read_bytes() for source in ALLOWED_SOURCE_NAMES
         }
         self.assertEqual(uploaded_contents, expected_contents)
         self.assertEqual(len(uploaded_contents), 3)
         self.assertFalse(any("SovereignMeshVault" in item["path"] for item in tree_items))
+        self.assertIs(requests[-1]["body"]["force"], False)
+
+        expected_reads = Counter(
+            (method, str((self.source_root / source).resolve()))
+            for source in ALLOWED_SOURCE_NAMES
+            for method in ("lstatSync", "readFileSync")
+        )
+        observed_reads = Counter(
+            (event["method"], event["path"]) for event in capture["filesystemReads"]
+        )
+        self.assertEqual(observed_reads, expected_reads)
+        self.assertFalse(any("SovereignMeshVault" in event["path"] for event in capture["filesystemReads"]))
+        for sentinel in (
+            b"PRIVATE_SIGIL_FILE_SENTINEL",
+            b"PRIVATE_RECORD_SENTINEL",
+            b"PRIVATE_BUNDLE_SENTINEL",
+            b"PRIVATE_INBOUND_SENTINEL",
+            b"PRIVATE_ASSET_SENTINEL",
+            b"PRIVATE_WORKSPACE_SENTINEL",
+        ):
+            self.assertNotIn(sentinel, uploaded_contents)
 
     def test_missing_secret_fails_before_any_github_request(self):
-        result = self.run_sync(with_token=False)
+        result = self.run_sync(token_value=None)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Set GITHUB_TOKEN through Replit Secrets", result.stderr)
-        requests = json.loads(self.capture.read_text())
-        self.assertEqual(requests, [])
+        self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(capture["filesystemReads"], [])
+
+    def test_malformed_credentials_fail_before_reading_sources_or_requesting_github(self):
+        for bad_value in ("", "bad\ntoken", "x" * 4097):
+            with self.subTest(length=len(bad_value)):
+                result = self.run_sync(token_value=bad_value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Set GITHUB_TOKEN through Replit Secrets", result.stderr)
+                if bad_value:
+                    self.assertNotIn(bad_value, result.stdout + result.stderr)
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+                self.assertEqual(capture["filesystemReads"], [])
+
+    def test_http_and_network_failures_stop_without_printing_token(self):
+        failure_cases = (
+            ("GET /git/ref/heads/main", "http", 401),
+            ("GET /git/commits/" + "a" * 40, "network", None),
+        )
+        for route, mode, status in failure_cases:
+            with self.subTest(route=route, mode=mode):
+                result = self.run_sync(
+                    fail_at=route,
+                    fail_mode=mode,
+                    fail_status=status,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+                capture = json.loads(self.capture.read_text())
+                self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
+                self.assertEqual(capture["requests"][-1]["path"], "/repos/vitalitychems-dot/GitMesh" + route.split(" ", 1)[1])
+
+    def test_branch_conflict_uses_non_force_update_and_stops(self):
+        result = self.run_sync(
+            fail_at="PATCH /git/refs/heads/main",
+            fail_mode="http",
+            fail_status=409,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HTTP 409", result.stderr)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+        capture = json.loads(self.capture.read_text())
+        update = capture["requests"][-1]
+        self.assertEqual(update["method"], "PATCH")
+        self.assertIs(update["body"]["force"], False)
+
+    def test_gitignore_excludes_local_vault_from_normal_git_operations(self):
+        patterns = (ROOT / ".gitignore").read_text().splitlines()
+        self.assertIn("SovereignMeshVault/", patterns)
+        self.assertIn(".env", patterns)
+        self.assertIn(".env.*", patterns)
 
 
 if __name__ == "__main__":
