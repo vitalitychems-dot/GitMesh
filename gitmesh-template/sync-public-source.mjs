@@ -36,6 +36,31 @@ const EMBEDDED_CREDENTIAL_PATTERNS = [
   /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/,
   /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/,
 ];
+const SAFE_PREFLIGHT_TEST_NAMES = new Set([
+  "test_rotation_failure_recovery_and_never_reuses_active_sigil",
+  "test_sync_publishes_only_the_fixed_source_allowlist",
+  "test_unchanged_source_skips_blob_tree_commit_and_branch_update",
+  "test_dry_run_with_no_changes_reports_no_commit_and_makes_no_writes",
+  "test_dry_run_lists_only_changed_paths_without_contents_or_writes",
+  "test_unknown_sync_option_stops_before_github_request",
+  "test_malformed_remote_files_stop_before_any_github_write",
+  "test_unsafe_local_sources_stop_before_github_and_do_not_leak_contents",
+  "test_hard_linked_private_source_is_rejected_before_read_or_github_request",
+  "test_source_replaced_after_metadata_check_is_not_followed_or_read",
+  "test_in_place_source_edit_during_read_is_rejected_before_github",
+  "test_invalid_javascript_stops_before_github_without_printing_source",
+  "test_embedded_credentials_stop_before_github_without_leaking_values",
+  "test_changed_source_updates_only_the_changed_allowlisted_file",
+  "test_missing_secret_fails_before_any_github_request",
+  "test_failed_security_preflight_stops_before_github_without_leaking_output",
+  "test_malformed_credentials_fail_before_reading_sources_or_requesting_github",
+  "test_http_and_network_failures_stop_without_printing_token",
+  "test_branch_conflict_uses_non_force_update_and_stops",
+  "test_authentication_and_permission_errors_give_safe_recovery_guidance",
+  "test_rate_limit_and_transient_errors_give_safe_retry_guidance",
+  "test_gitignore_excludes_local_vault_from_normal_git_operations",
+]);
+const PREFLIGHT_REPRO_COMMAND = "python3 gitmesh-template/tests/test_security_regressions.py";
 
 function getToken() {
   const token = process.env.GITHUB_TOKEN;
@@ -62,6 +87,39 @@ function findEmbeddedCredentialLines(text) {
     );
 }
 
+function summarizePreflightFailure(result) {
+  if (
+    result.error?.code === "ETIMEDOUT" ||
+    result.signal === "SIGTERM" ||
+    result.signal === "SIGKILL"
+  ) {
+    return "Security regression preflight timed out";
+  }
+  if (result.error?.code === "ENOBUFS") {
+    return "Security regression preflight exceeded its output limit";
+  }
+  if (result.error) {
+    return "Python could not start the security regression preflight";
+  }
+  if (result.signal) {
+    return "Python security regression preflight was interrupted";
+  }
+
+  const output = [result.stdout, result.stderr]
+    .filter((chunk) => typeof chunk === "string")
+    .join("\n");
+  const failedTests = new Set();
+  for (const match of output.matchAll(/^(?:FAIL|ERROR): (test_[A-Za-z0-9_]+) \(/gm)) {
+    if (SAFE_PREFLIGHT_TEST_NAMES.has(match[1])) {
+      failedTests.add(match[1]);
+    }
+  }
+  if (failedTests.size > 0) {
+    return `Security regression preflight failed in: ${[...failedTests].join(", ")}`;
+  }
+  return "Security regression preflight failed; no safe failing test name was available";
+}
+
 function runSecurityPreflight() {
   const result = spawnSync(
     "python3",
@@ -79,7 +137,11 @@ function runSecurityPreflight() {
     },
   );
   if (result.error || result.status !== 0) {
-    throw new Error("Security regression preflight failed; no GitHub requests were made.");
+    const summary = summarizePreflightFailure(result);
+    throw new Error(
+      `${summary}. Run locally from the workspace root: ${PREFLIGHT_REPRO_COMMAND}. ` +
+      "No GitHub requests were made.",
+    );
   }
 }
 
