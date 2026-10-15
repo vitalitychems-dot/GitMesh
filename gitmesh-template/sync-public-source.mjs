@@ -165,7 +165,11 @@ function validateSourceFileInfo(fileInfo, source) {
       fileInfo.isSymbolicLink() ||
       fileInfo.nlink > 1n ||
       fileInfo.size > BigInt(MAX_SOURCE_BYTES)) {
-    throw new Error(`Refusing to sync an invalid, linked, or oversized source file: ${source}`);
+    throw new Error(
+      `Refusing to sync an invalid, linked, or oversized source file: ${source}. ` +
+      "Review and save the intended file as a regular file within the size limit, then rerun sync. " +
+      "No GitHub requests were made.",
+    );
   }
 }
 
@@ -183,7 +187,10 @@ function readSourceContent(sourcePath, source) {
   try {
     pathInfo = fs.lstatSync(sourcePath, { bigint: true });
   } catch {
-    throw new Error(`Refusing to sync an unavailable source file: ${source}`);
+    throw new Error(
+      `Refusing to sync an unavailable source file: ${source}. ` +
+      "Review and save the intended file state, then rerun sync. No GitHub requests were made.",
+    );
   }
   validateSourceFileInfo(pathInfo, source);
 
@@ -209,7 +216,10 @@ function readSourceContent(sourcePath, source) {
     }
     return content;
   } catch {
-    throw new Error(`Refusing to sync a source file that changed or could not be safely opened: ${source}`);
+    throw new Error(
+      `Refusing to sync a source file that changed or could not be safely opened: ${source}. ` +
+      "Review and save the intended file state, then rerun sync. No GitHub requests were made.",
+    );
   } finally {
     if (descriptor !== undefined) {
       try {

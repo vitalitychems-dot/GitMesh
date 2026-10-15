@@ -848,6 +848,7 @@ process.on("exit", saveCapture);
                 "symlink",
                 lambda: source_path.symlink_to(symlink_target),
                 "invalid, linked, or oversized source file",
+                "Review and save the intended file as a regular file within the size limit, then rerun sync. No GitHub requests were made.",
                 (b"PRIVATE_SIGIL_FILE_SENTINEL",),
                 [("lstatSync", str(source_path))],
             ),
@@ -857,13 +858,23 @@ process.on("exit", saveCapture);
                     b"OVERSIZED_LOCAL_CONTENT_SENTINEL" + b"x" * (512 * 1024)
                 ),
                 "invalid, linked, or oversized source file",
+                "Review and save the intended file as a regular file within the size limit, then rerun sync. No GitHub requests were made.",
                 (b"OVERSIZED_LOCAL_CONTENT_SENTINEL",),
                 [("lstatSync", str(source_path))],
+            ),
+            (
+                "unavailable",
+                lambda: None,
+                "unavailable source file",
+                "Review and save the intended file state, then rerun sync. No GitHub requests were made.",
+                (),
+                [],
             ),
             (
                 "binary invalid utf-8",
                 lambda: source_path.write_bytes(b"\xffBINARY_LOCAL_CONTENT_SENTINEL"),
                 "non-text source file",
+                None,
                 (b"BINARY_LOCAL_CONTENT_SENTINEL",),
                 [
                     ("lstatSync", str(source_path)),
@@ -875,6 +886,7 @@ process.on("exit", saveCapture);
                 "binary containing nul",
                 lambda: source_path.write_bytes(b"\x00BINARY_NUL_LOCAL_CONTENT_SENTINEL"),
                 "non-text source file",
+                None,
                 (b"BINARY_NUL_LOCAL_CONTENT_SENTINEL",),
                 [
                     ("lstatSync", str(source_path)),
@@ -883,7 +895,14 @@ process.on("exit", saveCapture);
                 ],
             ),
         )
-        for case_name, create_unsafe_source, expected_error, sentinels, expected_reads in unsafe_cases:
+        for (
+            case_name,
+            create_unsafe_source,
+            expected_error,
+            expected_guidance,
+            sentinels,
+            expected_reads,
+        ) in unsafe_cases:
             with self.subTest(source_type=case_name):
                 source_path.unlink(missing_ok=True)
                 create_unsafe_source()
@@ -892,6 +911,8 @@ process.on("exit", saveCapture);
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected_error, result.stderr)
                 self.assertIn(source_name, result.stderr)
+                if expected_guidance:
+                    self.assertIn(expected_guidance, result.stderr)
                 self.assert_safe_failure_output(result)
                 for sentinel in sentinels:
                     self.assertNotIn(sentinel.decode(), result.stdout + result.stderr)
@@ -916,6 +937,10 @@ process.on("exit", saveCapture);
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("linked", result.stderr)
         self.assertIn(source_path.name, result.stderr)
+        self.assertIn(
+            "Review and save the intended file as a regular file within the size limit, then rerun sync. No GitHub requests were made.",
+            result.stderr,
+        )
         self.assertNotIn("PRIVATE_RECORD_SENTINEL", result.stdout + result.stderr)
         self.assert_safe_failure_output(result)
 
@@ -944,6 +969,10 @@ process.on("exit", saveCapture);
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("changed or could not be safely opened", result.stderr)
                 self.assertIn(source_path.name, result.stderr)
+                self.assertIn(
+                    "Review and save the intended file state, then rerun sync. No GitHub requests were made.",
+                    result.stderr,
+                )
                 self.assertNotIn("PRIVATE_RECORD_SENTINEL", result.stdout + result.stderr)
                 self.assert_safe_failure_output(result)
 
@@ -981,6 +1010,10 @@ process.on("exit", saveCapture);
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("changed or could not be safely opened", result.stderr)
         self.assertIn(source_path.name, result.stderr)
+        self.assertIn(
+            "Review and save the intended file state, then rerun sync. No GitHub requests were made.",
+            result.stderr,
+        )
         self.assertNotIn(changed_secret, result.stdout + result.stderr)
         self.assertNotIn(changed_content, result.stdout + result.stderr)
         self.assert_safe_failure_output(result)
