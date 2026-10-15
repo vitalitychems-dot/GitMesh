@@ -22,6 +22,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONSOLE = ROOT / "gitmesh-ultimate-core.mjs"
 SYNC = ROOT / "sync-public-source.mjs"
+PRE_COMMIT_HOOK = ROOT / "hooks" / "pre-commit"
 INITIAL_SIGIL = "fixture-admin-sigil-one"
 CUSTOM_SIGIL = "fixture-admin-sigil-custom"
 FAKE_GITHUB_TOKEN = "test-only-not-a-real-token"
@@ -834,7 +835,7 @@ process.on("exit", saveCapture);
         result = self.run_sync(args=("--unexpected-option",))
         self.assertEqual(result.returncode, 2)
         self.assertIn(
-            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials].",
+            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-staged-credentials].",
             result.stderr,
         )
         self.assert_safe_failure_output(result)
@@ -1591,6 +1592,120 @@ process.on("exit", saveCapture);
         self.assertIn("SovereignMeshVault/", patterns)
         self.assertIn(".env", patterns)
         self.assertIn(".env.*", patterns)
+
+
+class PreCommitHookTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="gitmesh-precommit-test-")
+        self.repo_root = pathlib.Path(self.temp.name)
+        self.template_root = self.repo_root / "gitmesh-template"
+        self.template_root.mkdir()
+        for name in ALLOWED_SOURCE_NAMES:
+            shutil.copy2(ROOT / name, self.template_root / name)
+        hook_dir = self.template_root / "hooks"
+        hook_dir.mkdir()
+        shutil.copy2(PRE_COMMIT_HOOK, hook_dir / "pre-commit")
+
+        self.run_git(["init", "--quiet"])
+        self.run_git(["config", "user.name", "GitMesh Security Test"])
+        self.run_git(["config", "user.email", "gitmesh-security-test@example.invalid"])
+        self.run_git(["config", "commit.gpgsign", "false"])
+        self.run_git(["config", "core.hooksPath", ".git/hooks"])
+        self.run_git(["add", "gitmesh-template"])
+        baseline = self.run_git(["commit", "--quiet", "-m", "fixture baseline"])
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        self.run_git(["config", "core.hooksPath", "gitmesh-template/hooks"])
+
+        self.readme = self.template_root / "README.md"
+        self.baseline_readme = self.readme.read_bytes()
+        self.network_marker = self.repo_root / "unexpected-network-request"
+        self.network_guard = self.repo_root / "network-guard.mjs"
+        self.network_guard.write_text(
+            'import fs from "node:fs";\n'
+            "globalThis.fetch = async () => {\n"
+            '  fs.writeFileSync(process.env.GITMESH_TEST_NETWORK_MARKER, "called");\n'
+            '  throw new Error("network request attempted");\n'
+            "};\n"
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_git(self, args, env=None):
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def hook_environment_without_github_token(self):
+        env = os.environ.copy()
+        env.pop("GITHUB_TOKEN", None)
+        env["GITMESH_TEST_NETWORK_MARKER"] = str(self.network_marker)
+        env["NODE_OPTIONS"] = f"--import={self.network_guard.as_uri()}"
+        return env
+
+    def test_precommit_hook_blocks_staged_credentials_without_exposing_them(self):
+        credential = "ghp_" + "Z" * 36
+        staged_source_line = f"staged_secret={credential}"
+        self.readme.write_text(f"staged source fixture\n{staged_source_line}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+
+        # The staged blob still contains the credential after the working
+        # tree is restored, so a correct hook must inspect the index version.
+        self.readme.write_bytes(self.baseline_readme)
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        result = self.run_git(
+            ["commit", "-m", "must be blocked"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README.md (line 2)", output)
+        self.assertIn("Remove the value from this staged file", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn(credential, output)
+        self.assertNotIn(staged_source_line, output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(
+            self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+            "gitmesh-template/README.md",
+        )
+        self.assertFalse(self.network_marker.exists())
+
+    def test_precommit_hook_passes_clean_source_and_ignores_unrelated_files(self):
+        self.readme.write_bytes(self.baseline_readme + b"\nclean staged source fixture\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        unstaged_credential = "ghp_" + "X" * 36
+        self.readme.write_text(f"unstaged_secret={unstaged_credential}\n")
+        clean_result = self.run_git(
+            ["commit", "-m", "clean allowlisted source"],
+            env=self.hook_environment_without_github_token(),
+        )
+        clean_output = clean_result.stdout + clean_result.stderr
+        self.assertEqual(clean_result.returncode, 0, clean_output)
+        self.assertIn("1 staged allowlisted source file", clean_output)
+        self.assertNotIn(unstaged_credential, clean_output)
+        self.assertFalse(self.network_marker.exists())
+
+        unrelated_credential = "ghp_" + "Y" * 36
+        unrelated = self.repo_root / "unrelated-private-file.txt"
+        unrelated.write_text(f"unrelated_secret={unrelated_credential}\n")
+        self.run_git(["add", "unrelated-private-file.txt"])
+        unrelated_result = self.run_git(
+            ["commit", "-m", "unrelated file"],
+            env=self.hook_environment_without_github_token(),
+        )
+        unrelated_output = unrelated_result.stdout + unrelated_result.stderr
+
+        self.assertEqual(unrelated_result.returncode, 0, unrelated_output)
+        self.assertIn("no allowlisted source files are staged", unrelated_output)
+        self.assertNotIn(unrelated_credential, unrelated_output)
+        self.assertFalse(self.network_marker.exists())
 
 
 if __name__ == "__main__":

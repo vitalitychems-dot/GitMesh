@@ -59,6 +59,8 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_missing_secret_fails_before_any_github_request",
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_credential_check_reports_location_without_exposing_value",
+  "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
+  "test_precommit_hook_passes_clean_source_and_ignores_unrelated_files",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
   "test_preflight_safe_name_allowlist_matches_regression_tests",
   "test_missing_preflight_harness_has_safe_recovery_guidance",
@@ -317,6 +319,152 @@ function checkLocalCredentials() {
   );
 }
 
+function runStagedGitCommand(args, cwd, failureMessage) {
+  const env = { ...process.env };
+  delete env.GITHUB_TOKEN;
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: null,
+    timeout: 15_000,
+    maxBuffer: 1024 * 1024,
+    env,
+  });
+  if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
+    throw new Error(`${failureMessage} No GitHub requests were made.`);
+  }
+  return result.stdout;
+}
+
+function checkStagedCredentials() {
+  const gitRootOutput = runStagedGitCommand(
+    ["rev-parse", "--show-toplevel"],
+    ROOT,
+    "Could not locate the Git repository to inspect staged source files.",
+  );
+  let gitRootText;
+  try {
+    gitRootText = new TextDecoder("utf-8", { fatal: true }).decode(gitRootOutput).trim();
+  } catch {
+    throw new Error(
+      "Could not locate the Git repository to inspect staged source files. No GitHub requests were made.",
+    );
+  }
+  if (!gitRootText) {
+    throw new Error(
+      "Could not locate the Git repository to inspect staged source files. No GitHub requests were made.",
+    );
+  }
+  const gitRoot = path.resolve(gitRootText);
+  const sourceByGitPath = new Map();
+  for (const { source } of ALLOWED_FILES) {
+    const sourcePath = path.resolve(ROOT, source);
+    const relativePath = path.relative(gitRoot, sourcePath);
+    if (
+      path.isAbsolute(relativePath) ||
+      relativePath === ".." ||
+      relativePath.startsWith(`..${path.sep}`)
+    ) {
+      throw new Error(
+        "Could not map allowlisted source files to the Git repository. No GitHub requests were made.",
+      );
+    }
+    sourceByGitPath.set(relativePath.split(path.sep).join("/"), source);
+  }
+
+  const stagedNames = runStagedGitCommand(
+    [
+      "diff",
+      "--cached",
+      "--name-only",
+      "--no-ext-diff",
+      "--no-textconv",
+      "-z",
+      "--diff-filter=ACMRT",
+      "--",
+      ...sourceByGitPath.keys(),
+    ],
+    gitRoot,
+    "Could not inspect staged allowlisted source files.",
+  ).toString("utf8").split("\0").filter(Boolean);
+  const stagedSources = [...new Set(
+    stagedNames.map((name) => sourceByGitPath.get(name)).filter(Boolean),
+  )];
+  if (stagedSources.length === 0) {
+    console.log("Credential check passed: no allowlisted source files are staged.");
+    return;
+  }
+
+  const credentialFindings = [];
+  for (const source of stagedSources) {
+    const gitPath = [...sourceByGitPath].find(([, stagedSource]) => stagedSource === source)?.[0];
+    if (!gitPath) {
+      throw new Error(
+        `Could not map staged source file ${source} to the Git index. No GitHub requests were made.`,
+      );
+    }
+    const content = runStagedGitCommand(
+      ["show", `:0:${gitPath}`],
+      gitRoot,
+      `Could not safely read staged source file: ${source}. Resolve it and stage the intended file state again.`,
+    );
+    if (content.length > MAX_SOURCE_BYTES) {
+      throw new Error(
+        `Refusing to check an oversized staged source file: ${source}. ` +
+        "Review the file and stage a version within the size limit. No GitHub requests were made.",
+      );
+    }
+    if (content.includes(0)) {
+      throw new Error(
+        `Refusing to check a non-text staged source file: ${source}. ` +
+        "Save it as UTF-8 text and stage it again. No GitHub requests were made.",
+      );
+    }
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+    } catch {
+      throw new Error(
+        `Refusing to check a non-text staged source file: ${source}. ` +
+        "Save it as UTF-8 text and stage it again. No GitHub requests were made.",
+      );
+    }
+    const credentialLines = findEmbeddedCredentialLines(text);
+    if (credentialLines.length > 0) {
+      credentialFindings.push({ source, credentialLines });
+    }
+  }
+
+  if (credentialFindings.length > 0) {
+    const locations = credentialFindings.map(({ source, credentialLines }) => {
+      const lineLabel = credentialLines.length === 1
+        ? `line ${credentialLines[0]}`
+        : `lines ${credentialLines.join(", ")}`;
+      return `${source} (${lineLabel})`;
+    });
+    const hasMultipleLocations = credentialFindings.some(
+      ({ credentialLines }) => credentialLines.length > 1,
+    ) || credentialFindings.length > 1;
+    const removalGuidance = credentialFindings.length > 1
+      ? "Remove the values from these staged files"
+      : hasMultipleLocations
+        ? "Remove the values from this staged file"
+        : "Remove the value from this staged file";
+    const rotationGuidance = hasMultipleLocations
+      ? "Rotate them only if they were already shared or published elsewhere."
+      : "Rotate it only if it was already shared or published elsewhere.";
+    throw new Error(
+      `Refusing to commit staged source files containing a credential-like value: ${locations.join("; ")}. ` +
+      `${removalGuidance} and stage the fix; use Replit Secrets for runtime credentials. ` +
+      `${rotationGuidance} No GitHub requests were made.`,
+    );
+  }
+
+  const fileLabel = stagedSources.length === 1 ? "file" : "files";
+  console.log(
+    `Credential check passed: no credential-like values found in ${stagedSources.length} staged allowlisted source ${fileLabel}.`,
+  );
+}
+
 async function githubRequest(token, route, method = "GET", body = undefined, { allowNotFound = false } = {}) {
   let response;
   try {
@@ -475,15 +623,18 @@ async function previewSource(token, files) {
 }
 
 function parseArguments(args) {
-  if (args.length === 0) return { dryRun: false, checkCredentials: false };
+  if (args.length === 0) return { dryRun: false, checkCredentials: false, checkStagedCredentials: false };
   if (args.length === 1 && args[0] === "--dry-run") {
-    return { dryRun: true, checkCredentials: false };
+    return { dryRun: true, checkCredentials: false, checkStagedCredentials: false };
   }
   if (args.length === 1 && args[0] === "--check-credentials") {
-    return { dryRun: false, checkCredentials: true };
+    return { dryRun: false, checkCredentials: true, checkStagedCredentials: false };
+  }
+  if (args.length === 1 && args[0] === "--check-staged-credentials") {
+    return { dryRun: false, checkCredentials: false, checkStagedCredentials: true };
   }
   throw new Error(
-    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials].",
+    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-staged-credentials].",
   );
 }
 
@@ -550,7 +701,9 @@ async function syncSource({ dryRun }) {
 
 try {
   const options = parseArguments(process.argv.slice(2));
-  if (options.checkCredentials) {
+  if (options.checkStagedCredentials) {
+    checkStagedCredentials();
+  } else if (options.checkCredentials) {
     checkLocalCredentials();
   } else {
     syncSource(options).catch((error) => {
