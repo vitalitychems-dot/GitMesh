@@ -588,7 +588,7 @@ process.on("exit", saveCapture);
             (
                 "symlink",
                 lambda: source_path.symlink_to(symlink_target),
-                "invalid or oversized source file",
+                "invalid, linked, or oversized source file",
                 (b"PRIVATE_SIGIL_FILE_SENTINEL",),
                 [("lstatSync", str(source_path))],
             ),
@@ -597,7 +597,7 @@ process.on("exit", saveCapture);
                 lambda: source_path.write_bytes(
                     b"OVERSIZED_LOCAL_CONTENT_SENTINEL" + b"x" * (512 * 1024)
                 ),
-                "invalid or oversized source file",
+                "invalid, linked, or oversized source file",
                 (b"OVERSIZED_LOCAL_CONTENT_SENTINEL",),
                 [("lstatSync", str(source_path))],
             ),
@@ -643,6 +643,29 @@ process.on("exit", saveCapture);
                     if event["path"] == str(source_path)
                 ]
                 self.assertEqual(observed_source_reads, expected_reads)
+
+    def test_hard_linked_private_source_is_rejected_before_read_or_github_request(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        private_path = self.source_root / "SovereignMeshVault/ledger_matrix/private-record.json"
+        source_path.unlink()
+        os.link(private_path, source_path)
+        self.assertEqual(os.stat(source_path).st_nlink, 2)
+
+        result = self.run_sync()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("linked", result.stderr)
+        self.assertIn(source_path.name, result.stderr)
+        self.assertNotIn("PRIVATE_RECORD_SENTINEL", result.stdout + result.stderr)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        observed_source_reads = [
+            (event["method"], event["path"])
+            for event in capture["filesystemReads"]
+            if event["path"] == str(source_path)
+        ]
+        self.assertEqual(observed_source_reads, [("lstatSync", str(source_path))])
 
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()

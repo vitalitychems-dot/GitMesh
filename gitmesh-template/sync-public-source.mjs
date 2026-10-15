@@ -43,8 +43,8 @@ function readSourceFiles() {
   return ALLOWED_FILES.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
     const fileInfo = fs.lstatSync(sourcePath);
-    if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.size > MAX_SOURCE_BYTES) {
-      throw new Error(`Refusing to sync an invalid or oversized source file: ${source}`);
+    if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.nlink > 1 || fileInfo.size > MAX_SOURCE_BYTES) {
+      throw new Error(`Refusing to sync an invalid, linked, or oversized source file: ${source}`);
     }
     const content = fs.readFileSync(sourcePath);
     if (content.includes(0)) {
