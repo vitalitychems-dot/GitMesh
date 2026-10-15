@@ -23,6 +23,8 @@ const INTERNAL_GITIGNORE = [
 const MAX_RECORDS = 1000;
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
+const MAX_AUTH_BYTES = 70 * 1024 * 1024;
+const MAX_SIGIL_HISTORY = 1_000_000;
 const SCRYPT_OPTIONS = { N: 32_768, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
 
 function ensureDirectory(directory) {
@@ -152,7 +154,7 @@ function promptLine(promptText) {
       process.stdin.resume();
       process.stdin.on("data", onData);
     } catch {
-      reject(new Error("This terminal does not support hidden passphrase input."));
+      reject(new Error("This terminal does not support hidden sigil input."));
     }
   });
 }
@@ -190,32 +192,57 @@ function promptText(promptTextValue) {
   });
 }
 
-function derivePassphrase(passphrase, salt) {
-  return crypto.scryptSync(passphrase, salt, 64, SCRYPT_OPTIONS).toString("hex");
+function deriveSigilVerifier(sigil, salt) {
+  return crypto.scryptSync(sigil, salt, 64, SCRYPT_OPTIONS).toString("hex");
+}
+
+function fingerprintSigil(sigil) {
+  return crypto.createHash("sha256").update(sigil, "utf8").digest("hex");
+}
+
+function makeAuthRecord(sigil, generation, usedSigilHashes) {
+  const auth = {
+    version: 2,
+    salt: crypto.randomBytes(16).toString("hex"),
+    verifier: "",
+    generation,
+    usedSigilHashes,
+  };
+  auth.verifier = deriveSigilVerifier(sigil, auth.salt);
+  return auth;
 }
 
 function readAuth() {
   if (!fs.existsSync(AUTH_FILE)) return null;
   const info = fs.lstatSync(AUTH_FILE);
-  if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) {
+  if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_AUTH_BYTES) {
     throw new Error("The local credential file is invalid.");
   }
-  const auth = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
-  if (auth.version !== 1 ||
+  let auth;
+  try {
+    auth = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
+  } catch {
+    throw new Error("The local credential file is invalid.");
+  }
+  if (!auth || typeof auth !== "object" ||
+      (auth.version !== 1 && auth.version !== 2) ||
       !/^[a-f0-9]{32}$/.test(auth.salt ?? "") ||
       !/^[a-f0-9]{128}$/.test(auth.verifier ?? "")) {
+    throw new Error("The local credential file is invalid.");
+  }
+  if (auth.version === 2 &&
+      (!Number.isSafeInteger(auth.generation) ||
+       auth.generation < 0 ||
+       !Array.isArray(auth.usedSigilHashes) ||
+       auth.usedSigilHashes.length > MAX_SIGIL_HISTORY ||
+       auth.usedSigilHashes.some((hash) => !/^[a-f0-9]{64}$/.test(hash)) ||
+       new Set(auth.usedSigilHashes).size !== auth.usedSigilHashes.length)) {
     throw new Error("The local credential file is invalid.");
   }
   return auth;
 }
 
-function saveAuth(passphrase) {
-  const auth = {
-    version: 1,
-    salt: crypto.randomBytes(16).toString("hex"),
-    verifier: "",
-  };
-  auth.verifier = derivePassphrase(passphrase, auth.salt);
+function saveAuth(auth) {
   const temporaryPath = path.join(VAULT, `.auth-${crypto.randomUUID()}.tmp`);
   fs.writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
   try {
@@ -226,25 +253,71 @@ function saveAuth(passphrase) {
   }
 }
 
+function verifySigil(sigil, auth) {
+  const actual = Buffer.from(deriveSigilVerifier(sigil, auth.salt), "hex");
+  const expected = Buffer.from(auth.verifier, "hex");
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function generateNextSigil(generation, currentSigil, usedHashes) {
+  if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw new Error("The sigil generation counter is invalid.");
+  }
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const sigil = `gm-${generation}-${crypto.randomBytes(32).toString("base64url")}`;
+    const fingerprint = fingerprintSigil(sigil);
+    if (sigil !== currentSigil && !usedHashes.has(fingerprint)) return sigil;
+  }
+  throw new Error("Could not generate a unique admin sigil.");
+}
+
 async function setupOrAuthenticate() {
   const auth = readAuth();
   if (!auth) {
-    console.log("First run: choose a passphrase of at least 12 characters.");
-    const first = await promptLine("New passphrase: ");
-    const confirmation = await promptLine("Confirm passphrase: ");
-    if (first.length < 12) throw new Error("Passphrase must contain at least 12 characters.");
-    if (first !== confirmation) throw new Error("Passphrases did not match.");
-    saveAuth(first);
-    console.log("Passphrase verifier saved locally. The passphrase itself was not saved.");
-    return;
+    console.log("First run: choose an initial admin sigil of at least 12 characters.");
+    const first = await promptLine("New admin sigil: ");
+    const confirmation = await promptLine("Confirm admin sigil: ");
+    if (first.length < 12) throw new Error("Admin sigil must contain at least 12 characters.");
+    if (first !== confirmation) throw new Error("Admin sigils did not match.");
+    const initialAuth = makeAuthRecord(first, 0, []);
+    saveAuth(initialAuth);
+    console.log("Admin sigil verifier saved locally. The sigil itself was not saved.");
+    console.log("On each later successful sign-in, GitMesh will issue a replacement sigil.");
+    return { auth: initialAuth, currentSigil: first };
   }
 
-  const attempt = await promptLine("Passphrase: ");
-  const actual = Buffer.from(derivePassphrase(attempt, auth.salt), "hex");
-  const expected = Buffer.from(auth.verifier, "hex");
-  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
-    throw new Error("Access denied.");
+  const attempt = await promptLine("Current admin sigil (hidden): ");
+  if (!verifySigil(attempt, auth)) throw new Error("Access denied.");
+
+  const usedSigilHashes = auth.version === 2 ? auth.usedSigilHashes : [];
+  const currentFingerprint = fingerprintSigil(attempt);
+  const usedHashes = new Set(usedSigilHashes);
+  if (usedHashes.has(currentFingerprint)) {
+    throw new Error("The local credential history is inconsistent; access was not granted.");
   }
+  if (usedSigilHashes.length >= MAX_SIGIL_HISTORY) {
+    throw new Error("The sigil history limit has been reached; no sigil was consumed.");
+  }
+
+  const nextGeneration = (auth.version === 2 ? auth.generation : 0) + 1;
+  if (!Number.isSafeInteger(nextGeneration)) {
+    throw new Error("The sigil generation limit has been reached; no sigil was consumed.");
+  }
+  usedHashes.add(currentFingerprint);
+  const nextSigil = generateNextSigil(nextGeneration, attempt, usedHashes);
+  const nextAuth = makeAuthRecord(nextSigil, nextGeneration, [...usedHashes]);
+
+  console.log("\nYour previous sigil will be invalidated when you confirm saving this replacement.");
+  console.log("Copy and store this new admin sigil securely; it is shown only once:");
+  console.log(`\n${nextSigil}\n`);
+  const confirmation = await promptText("Type SAVED to activate it and open the console: ");
+  if (confirmation !== "SAVED") {
+    throw new Error("Rotation cancelled. The previous sigil remains valid; access was not granted.");
+  }
+
+  saveAuth(nextAuth);
+  console.log("Sigil rotated. The previous sigil is now invalid.");
+  return { auth: nextAuth, currentSigil: nextSigil };
 }
 
 function cleanText(value, label, maxLength) {
@@ -470,23 +543,38 @@ async function importFromMenu() {
   importBundle(bundles[index]);
 }
 
-async function changePassphrase() {
-  const first = await promptLine("New passphrase: ");
-  const confirmation = await promptLine("Confirm new passphrase: ");
-  if (first.length < 12) throw new Error("Passphrase must contain at least 12 characters.");
-  if (first !== confirmation) throw new Error("Passphrases did not match.");
-  saveAuth(first);
-  console.log("Passphrase verifier updated.");
+async function changeSigil(session) {
+  const first = await promptLine("New admin sigil: ");
+  const confirmation = await promptLine("Confirm new admin sigil: ");
+  if (first.length < 12) throw new Error("Admin sigil must contain at least 12 characters.");
+  if (first !== confirmation) throw new Error("Admin sigils did not match.");
+
+  const usedSigilHashes = [...session.auth.usedSigilHashes];
+  const currentFingerprint = fingerprintSigil(session.currentSigil);
+  const newFingerprint = fingerprintSigil(first);
+  if (usedSigilHashes.length >= MAX_SIGIL_HISTORY) {
+    throw new Error("The sigil history limit has been reached; the current sigil was not changed.");
+  }
+  if (newFingerprint === currentFingerprint || usedSigilHashes.includes(newFingerprint)) {
+    throw new Error("Choose a sigil that has never been used before.");
+  }
+
+  usedSigilHashes.push(currentFingerprint);
+  const updatedAuth = makeAuthRecord(first, session.auth.generation, usedSigilHashes);
+  saveAuth(updatedAuth);
+  session.auth = updatedAuth;
+  session.currentSigil = first;
+  console.log("Admin sigil updated. The previous sigil is now invalid.");
 }
 
-async function runMenu() {
+async function runMenu(session) {
   while (true) {
     console.log("\nGitMesh local console");
     console.log("1. Add a local record");
     console.log("2. Verify and list records");
     console.log("3. Export a Git bundle");
     console.log("4. Import a bundle from drops_inbound");
-    console.log("5. Change passphrase");
+    console.log("5. Change admin sigil");
     console.log("0. Exit");
     const choice = await promptText("Select: ");
     try {
@@ -494,7 +582,7 @@ async function runMenu() {
       else if (choice === "2") verifyLedger();
       else if (choice === "3") exportBundle();
       else if (choice === "4") await importFromMenu();
-      else if (choice === "5") await changePassphrase();
+      else if (choice === "5") await changeSigil(session);
       else if (choice === "0") return;
       else console.log("Choose one of the listed menu numbers.");
     } catch (error) {
@@ -511,8 +599,8 @@ async function main() {
   }
   try {
     ensureVault();
-    await setupOrAuthenticate();
-    await runMenu();
+    const session = await setupOrAuthenticate();
+    await runMenu(session);
   } catch (error) {
     console.error(error instanceof Error ? error.message : "The program could not continue.");
     process.exitCode = 1;
