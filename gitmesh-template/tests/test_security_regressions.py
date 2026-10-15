@@ -322,12 +322,22 @@ globalThis.fetch = async (input, init = {}) => {
     data = { tree: { sha: "b".repeat(40) } };
   } else if (method === "GET" && url.pathname.startsWith(base + "/contents/")) {
     const target = url.pathname.slice((base + "/contents/").length);
-    const content = remoteContents[target];
-    if (typeof content !== "string") {
+    const remoteEntry = remoteContents[target];
+    if (remoteEntry === undefined) {
       saveCapture();
       return { ok: false, status: 404, json: async () => ({ message: "not found" }) };
     }
-    data = { type: "file", encoding: "base64", content };
+    if (remoteEntry?.fixture === "oversized") {
+      data = {
+        type: "file",
+        encoding: "base64",
+        content: Buffer.alloc(512 * 1024 + 1).toString("base64"),
+      };
+    } else if (typeof remoteEntry === "string") {
+      data = { type: "file", encoding: "base64", content: remoteEntry };
+    } else {
+      data = remoteEntry;
+    }
   } else if (method === "POST" && url.pathname === base + "/git/blobs") {
     data = { sha: "1".repeat(40) };
   } else if (method === "POST" && url.pathname === base + "/git/trees") {
@@ -467,6 +477,40 @@ process.on("exit", saveCapture);
                 for request in capture["requests"]),
             3,
         )
+
+    def test_malformed_remote_files_stop_before_any_github_write(self):
+        target = "projects/local-vault/gitmesh-ultimate-core.mjs"
+        malformed_cases = (
+            (
+                "invalid base64",
+                {target: {"type": "file", "encoding": "base64", "content": "@@not-base64!!"}},
+                "invalid or oversized source content",
+            ),
+            (
+                "unexpected file type",
+                {target: {"type": "symlink", "encoding": "base64", "content": "YQ=="}},
+                "invalid source file",
+            ),
+            (
+                "oversized remote file",
+                {target: {"fixture": "oversized"}},
+                "invalid or oversized source content",
+            ),
+        )
+        for case_name, overrides, expected_error in malformed_cases:
+            with self.subTest(case=case_name):
+                self.set_remote_snapshot(overrides)
+                result = self.run_sync()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
+                self.assert_safe_failure_output(result)
+                capture = json.loads(self.capture.read_text())
+                self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
+                writes = [
+                    request for request in capture["requests"]
+                    if request["method"] in ("POST", "PATCH")
+                ]
+                self.assertEqual(writes, [])
 
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()
