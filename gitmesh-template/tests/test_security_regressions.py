@@ -233,6 +233,7 @@ class GitHubSyncTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="gitmesh-sync-test-")
         self.temp_path = pathlib.Path(self.temp.name)
         self.capture = self.temp_path / "requests.json"
+        self.remote_contents = self.temp_path / "remote-contents.json"
         self.preload = self.temp_path / "mock-github.mjs"
         self.source_root = self.temp_path / "isolated-source"
         self.source_root.mkdir()
@@ -254,6 +255,7 @@ class GitHubSyncTests(unittest.TestCase):
             target = self.source_root / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
+        self.remote_contents.write_text("{}")
 
         self.preload.write_text(
             """
@@ -262,6 +264,7 @@ import path from "node:path";
 const requests = [];
 const filesystemReads = [];
 const capture = process.env.GITMESH_TEST_CAPTURE;
+const remoteContents = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REMOTE_CONTENTS, "utf8"));
 const base = "/repos/vitalitychems-dot/GitMesh";
 for (const name of ["lstatSync", "readFileSync"]) {
   const original = fs[name].bind(fs);
@@ -304,6 +307,14 @@ globalThis.fetch = async (input, init = {}) => {
     data = { object: { sha: "a".repeat(40) } };
   } else if (method === "GET" && url.pathname === base + "/git/commits/" + "a".repeat(40)) {
     data = { tree: { sha: "b".repeat(40) } };
+  } else if (method === "GET" && url.pathname.startsWith(base + "/contents/")) {
+    const target = url.pathname.slice((base + "/contents/").length);
+    const content = remoteContents[target];
+    if (typeof content !== "string") {
+      saveCapture();
+      return { ok: false, status: 404, json: async () => ({ message: "not found" }) };
+    }
+    data = { type: "file", encoding: "base64", content };
   } else if (method === "POST" && url.pathname === base + "/git/blobs") {
     data = { sha: "1".repeat(40) };
   } else if (method === "POST" && url.pathname === base + "/git/trees") {
@@ -328,6 +339,7 @@ process.on("exit", saveCapture);
     def run_sync(self, token_value=FAKE_GITHUB_TOKEN, fail_at=None, fail_mode=None, fail_status=None):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
+        env["GITMESH_TEST_REMOTE_CONTENTS"] = str(self.remote_contents)
         if token_value is not None:
             env["GITHUB_TOKEN"] = token_value
         else:
@@ -350,6 +362,16 @@ process.on("exit", saveCapture);
             timeout=30,
             check=False,
         )
+
+    def set_remote_snapshot(self, overrides=None):
+        contents = {
+            f"projects/local-vault/{name}": base64.b64encode(
+                (self.source_root / name).read_bytes()
+            ).decode("ascii")
+            for name in ALLOWED_SOURCE_NAMES
+        }
+        contents.update(overrides or {})
+        self.remote_contents.write_text(json.dumps(contents))
 
     def test_sync_publishes_only_the_fixed_source_allowlist(self):
         result = self.run_sync()
@@ -397,6 +419,55 @@ process.on("exit", saveCapture);
             b"PRIVATE_WORKSPACE_SENTINEL",
         ):
             self.assertNotIn(sentinel, uploaded_contents)
+
+    def test_unchanged_source_skips_blob_tree_commit_and_branch_update(self):
+        self.set_remote_snapshot()
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("already match", result.stdout)
+        self.assertIn("no commit created", result.stdout)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+        capture = json.loads(self.capture.read_text())
+        self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
+        writes = [
+            request for request in capture["requests"]
+            if request["method"] in ("POST", "PATCH")
+        ]
+        self.assertEqual(writes, [])
+        self.assertEqual(
+            sum(request["method"] == "GET" and "/contents/" in request["path"]
+                for request in capture["requests"]),
+            3,
+        )
+
+    def test_changed_source_updates_only_the_changed_allowlisted_file(self):
+        self.set_remote_snapshot()
+        readme = self.source_root / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nLocal-only regression marker.\n")
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Synced 1 changed allowlisted source files", result.stdout)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+        capture = json.loads(self.capture.read_text())
+        blobs = [
+            request for request in capture["requests"]
+            if request["method"] == "POST" and request["path"].endswith("/git/blobs")
+        ]
+        self.assertEqual(len(blobs), 1)
+        self.assertEqual(
+            base64.b64decode(blobs[0]["body"]["content"]),
+            readme.read_bytes(),
+        )
+        tree_updates = [
+            request for request in capture["requests"]
+            if request["method"] == "POST" and request["path"].endswith("/git/trees")
+        ]
+        self.assertEqual(len(tree_updates), 1)
+        self.assertEqual(
+            [item["path"] for item in tree_updates[0]["body"]["tree"]],
+            ["projects/local-vault/README.md"],
+        )
+        self.assertIs(capture["requests"][-1]["body"]["force"], False)
 
     def test_missing_secret_fails_before_any_github_request(self):
         result = self.run_sync(token_value=None)
