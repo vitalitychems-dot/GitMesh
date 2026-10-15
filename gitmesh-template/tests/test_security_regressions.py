@@ -27,6 +27,7 @@ CUSTOM_SIGIL = "fixture-admin-sigil-custom"
 FAKE_GITHUB_TOKEN = "test-only-not-a-real-token"
 FAKE_REQUEST_BODY = "MOCK_REQUEST_BODY_SENTINEL"
 FAKE_AUTHORIZATION = f"Bearer {FAKE_GITHUB_TOKEN}"
+INITIAL_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 ALLOWED_GITHUB_PATHS = {
     "projects/local-vault/gitmesh-ultimate-core.mjs",
     "projects/local-vault/README.md",
@@ -282,6 +283,7 @@ let replacementTriggered = false;
 const capture = process.env.GITMESH_TEST_CAPTURE;
 const remoteContents = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REMOTE_CONTENTS, "utf8"));
 const base = "/repos/vitalitychems-dot/GitMesh";
+const initialCommitSha = process.env.GITMESH_TEST_INITIAL_SHA;
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
 childProcess.spawnSync = (command, ...args) => {
   if (command === "python3") {
@@ -382,8 +384,8 @@ globalThis.fetch = async (input, init = {}) => {
   }
   let data;
   if (method === "GET" && url.pathname === base + "/git/ref/heads/main") {
-    data = { object: { sha: "a".repeat(40) } };
-  } else if (method === "GET" && url.pathname === base + "/git/commits/" + "a".repeat(40)) {
+    data = { object: { sha: initialCommitSha } };
+  } else if (method === "GET" && url.pathname === base + "/git/commits/" + initialCommitSha) {
     data = { tree: { sha: "b".repeat(40) } };
   } else if (method === "GET" && url.pathname.startsWith(base + "/contents/")) {
     const target = url.pathname.slice((base + "/contents/").length);
@@ -441,6 +443,7 @@ process.on("exit", saveCapture);
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
         env["GITMESH_TEST_REMOTE_CONTENTS"] = str(self.remote_contents)
+        env["GITMESH_TEST_INITIAL_SHA"] = INITIAL_COMMIT_SHA
         if token_value is not None:
             env["GITHUB_TOKEN"] = token_value
         else:
@@ -487,7 +490,22 @@ process.on("exit", saveCapture);
             if request["method"] == "GET" and "/contents/" in request["path"]
         ]
         self.assertTrue(content_reads)
-        self.assertTrue(all(request["ref"] == "a" * 40 for request in content_reads))
+        self.assertTrue(all(request["ref"] == INITIAL_COMMIT_SHA for request in content_reads))
+        return content_reads[0]["ref"]
+
+    def assert_preview_snapshot_matches_content_reads(self, output, capture):
+        snapshot = self.assert_content_reads_use_initial_snapshot(capture)
+        displayed_snapshot = re.search(
+            r"(?:compared with commit |\(commit )([a-f0-9]{7})",
+            output,
+        )
+        self.assertIsNotNone(displayed_snapshot)
+        self.assertEqual(displayed_snapshot.group(1), snapshot[:7])
+
+    def assert_no_source_contents_in_output(self, output):
+        for source in ALLOWED_SOURCE_NAMES:
+            content = (self.source_root / source).read_text()
+            self.assertNotIn(content, output)
 
     def set_remote_snapshot(self, overrides=None):
         contents = {
@@ -581,11 +599,12 @@ process.on("exit", saveCapture);
         self.assertIn("no commit was created", result.stdout)
         self.assertEqual(reported_changed_paths(result.stdout), [])
         self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(result.stdout + result.stderr)
 
         capture = json.loads(self.capture.read_text())
         self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
         self.assertTrue(all(request["method"] == "GET" for request in capture["requests"]))
-        self.assert_content_reads_use_initial_snapshot(capture)
+        self.assert_preview_snapshot_matches_content_reads(result.stdout, capture)
         self.assertFalse(any("/git/commits/" in request["path"] for request in capture["requests"]))
 
     def test_dry_run_lists_only_changed_paths_without_contents_or_writes(self):
@@ -603,11 +622,12 @@ process.on("exit", saveCapture);
         )
         self.assertNotIn(private_file_content.decode(), result.stdout + result.stderr)
         self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(result.stdout + result.stderr)
 
         capture = json.loads(self.capture.read_text())
         self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
         self.assertTrue(all(request["method"] == "GET" for request in capture["requests"]))
-        self.assert_content_reads_use_initial_snapshot(capture)
+        self.assert_preview_snapshot_matches_content_reads(result.stdout, capture)
         self.assertEqual(
             sum("/contents/" in request["path"] for request in capture["requests"]),
             3,
@@ -925,7 +945,7 @@ process.on("exit", saveCapture);
     def test_http_and_network_failures_stop_without_printing_token(self):
         failure_cases = (
             ("GET /git/ref/heads/main", "http", 401),
-            ("GET /git/commits/" + "a" * 40, "network", None),
+            ("GET /git/commits/" + INITIAL_COMMIT_SHA, "network", None),
         )
         for route, mode, status in failure_cases:
             with self.subTest(route=route, mode=mode):
