@@ -3,4 +3,8 @@ set -eu
 
 HOOK_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 unset GITHUB_TOKEN
+if ! command -v node >/dev/null 2>&1; then
+  printf '%s\n' "GitMesh staged credential check could not start: Node.js 20 or newer is required. Install Node.js or make node available on PATH, then retry the commit. No GitHub requests were made." >&2
+  exit 1
+fi
 exec node "$HOOK_DIR/../sync-public-source.mjs" --check-staged-credentials
