@@ -56,6 +56,27 @@ function containsEmbeddedCredential(text) {
   return EMBEDDED_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function runSecurityPreflight() {
+  const result = spawnSync(
+    "python3",
+    [path.join(ROOT, "tests", "test_security_regressions.py")],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 180_000,
+      maxBuffer: 1024 * 1024,
+      env: {
+        PATH: process.env.PATH ?? "",
+        ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
+        ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+      },
+    },
+  );
+  if (result.error || result.status !== 0) {
+    throw new Error("Security regression preflight failed; no GitHub requests were made.");
+  }
+}
+
 function validateJavaScriptSyntax(content, source) {
   const result = spawnSync(process.execPath, ["--input-type=module", "--check"], {
     input: content,
@@ -264,6 +285,7 @@ function parseArguments(args) {
 async function syncSource({ dryRun }) {
   const token = getToken();
   const files = readSourceFiles();
+  runSecurityPreflight();
   const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
   const parentSha = requireSha(ref?.object?.sha, "main branch commit");
 

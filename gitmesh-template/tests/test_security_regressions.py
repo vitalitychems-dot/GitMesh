@@ -272,13 +272,38 @@ class GitHubSyncTests(unittest.TestCase):
             """
 import fs from "node:fs";
 import path from "node:path";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 const requests = [];
 const filesystemReads = [];
+const preflightCalls = [];
 const openedFiles = new Map();
 let replacementTriggered = false;
 const capture = process.env.GITMESH_TEST_CAPTURE;
 const remoteContents = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REMOTE_CONTENTS, "utf8"));
 const base = "/repos/vitalitychems-dot/GitMesh";
+const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
+childProcess.spawnSync = (command, ...args) => {
+  if (command === "python3") {
+    preflightCalls.push({
+      command,
+      args: args[0],
+      hasGitHubToken: Boolean(args[1]?.env?.GITHUB_TOKEN),
+    });
+    const failed = process.env.GITMESH_TEST_PREFLIGHT_FAIL === "1";
+    return {
+      error: undefined,
+      status: failed ? 1 : 0,
+      signal: null,
+      stdout: "",
+      stderr: failed ? "PREFLIGHT_PRIVATE_OUTPUT_SENTINEL" : "",
+      pid: 123,
+      output: [],
+    };
+  }
+  return originalSpawnSync(command, ...args);
+};
+syncBuiltinESMExports();
 for (const name of ["lstatSync", "openSync", "readFileSync"]) {
   const original = fs[name].bind(fs);
   fs[name] = (target, ...args) => {
@@ -318,7 +343,7 @@ for (const name of ["lstatSync", "openSync", "readFileSync"]) {
 }
 const saveCapture = () => fs.writeFileSync(
   capture,
-  JSON.stringify({ requests, filesystemReads }),
+  JSON.stringify({ requests, filesystemReads, preflightCalls }),
 );
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
@@ -411,6 +436,7 @@ process.on("exit", saveCapture);
         replace_after_lstat=None,
         replace_target=None,
         replace_kind=None,
+        fail_preflight=False,
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -428,6 +454,7 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_REPLACE_AFTER_LSTAT", replace_after_lstat),
             ("GITMESH_TEST_REPLACE_TARGET", replace_target),
             ("GITMESH_TEST_REPLACE_KIND", replace_kind),
+            ("GITMESH_TEST_PREFLIGHT_FAIL", "1" if fail_preflight else None),
         ):
             if value is None:
                 env.pop(key, None)
@@ -845,6 +872,43 @@ process.on("exit", saveCapture);
         capture = json.loads(self.capture.read_text())
         self.assertEqual(capture["requests"], [])
         self.assertEqual(capture["filesystemReads"], [])
+
+    def test_failed_security_preflight_stops_before_github_without_leaking_output(self):
+        expected_source_reads = Counter(
+            (method, str((self.source_root / source).resolve()))
+            for source in ALLOWED_SOURCE_NAMES
+            for method in ("lstatSync", "openSync", "readFileSync")
+        )
+        for mode, args in (("publish", ()), ("dry run", ("--dry-run",))):
+            with self.subTest(mode=mode):
+                result = self.run_sync(
+                    args=args,
+                    fail_preflight=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Security regression preflight failed", result.stderr)
+                self.assertIn("no GitHub requests were made", result.stderr)
+                self.assertNotIn("PREFLIGHT_PRIVATE_OUTPUT_SENTINEL", result.stdout + result.stderr)
+                self.assert_safe_failure_output(result)
+
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+                self.assertEqual(len(capture["preflightCalls"]), 1)
+                self.assertEqual(capture["preflightCalls"][0]["command"], "python3")
+                self.assertFalse(capture["preflightCalls"][0]["hasGitHubToken"])
+                self.assertEqual(
+                    capture["preflightCalls"][0]["args"],
+                    [str(self.source_root / "tests" / "test_security_regressions.py")],
+                )
+                observed_source_reads = Counter(
+                    (event["method"], event["path"])
+                    for event in capture["filesystemReads"]
+                )
+                self.assertEqual(observed_source_reads, expected_source_reads)
+                self.assertFalse(any(
+                    "SovereignMeshVault" in event["path"]
+                    for event in capture["filesystemReads"]
+                ))
 
     def test_malformed_credentials_fail_before_reading_sources_or_requesting_github(self):
         for bad_value in ("", "bad\ntoken", "x" * 4097):
