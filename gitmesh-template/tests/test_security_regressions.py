@@ -279,6 +279,7 @@ const requests = [];
 const filesystemReads = [];
 const preflightCalls = [];
 const openedFiles = new Map();
+const mutationWriters = new Map();
 let replacementTriggered = false;
 const capture = process.env.GITMESH_TEST_CAPTURE;
 const remoteContents = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REMOTE_CONTENTS, "utf8"));
@@ -331,12 +332,34 @@ for (const name of ["lstatSync", "openSync", "readFileSync"]) {
     if (name === "openSync") {
       if (isPath) filesystemReads.push({ method: name, path: resolvedPath });
       const descriptor = original(target, ...args);
-      if (isPath) openedFiles.set(descriptor, resolvedPath);
+      if (isPath) {
+        openedFiles.set(descriptor, resolvedPath);
+        const mutatePath = process.env.GITMESH_TEST_MUTATE_DURING_READ_PATH;
+        if (mutatePath && resolvedPath === path.resolve(mutatePath)) {
+          const writer = original(
+            resolvedPath,
+            fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+          );
+          mutationWriters.set(descriptor, writer);
+        }
+      }
       return descriptor;
     }
     if (typeof target === "number") {
       const openedPath = openedFiles.get(target);
       if (openedPath) filesystemReads.push({ method: name, path: openedPath });
+      const content = original(target, ...args);
+      const writer = mutationWriters.get(target);
+      if (writer !== undefined) {
+        const changedContent = Buffer.from(
+          process.env.GITMESH_TEST_MUTATE_DURING_READ_CONTENT ?? "",
+        );
+        fs.ftruncateSync(writer, 0);
+        fs.writeSync(writer, changedContent, 0, changedContent.length, 0);
+        fs.closeSync(writer);
+        mutationWriters.delete(target);
+      }
+      return content;
     } else if (isPath) {
       filesystemReads.push({ method: name, path: resolvedPath });
     }
@@ -438,6 +461,8 @@ process.on("exit", saveCapture);
         replace_after_lstat=None,
         replace_target=None,
         replace_kind=None,
+        mutate_during_read_path=None,
+        mutate_during_read_content=None,
         fail_preflight=False,
     ):
         env = os.environ.copy()
@@ -457,6 +482,8 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_REPLACE_AFTER_LSTAT", replace_after_lstat),
             ("GITMESH_TEST_REPLACE_TARGET", replace_target),
             ("GITMESH_TEST_REPLACE_KIND", replace_kind),
+            ("GITMESH_TEST_MUTATE_DURING_READ_PATH", mutate_during_read_path),
+            ("GITMESH_TEST_MUTATE_DURING_READ_CONTENT", mutate_during_read_content),
             ("GITMESH_TEST_PREFLIGHT_FAIL", "1" if fail_preflight else None),
         ):
             if value is None:
@@ -798,6 +825,44 @@ process.on("exit", saveCapture);
                     event["path"] == str(private_path)
                     for event in capture["filesystemReads"]
                 ))
+
+    def test_in_place_source_edit_during_read_is_rejected_before_github(self):
+        source_path = self.source_root / "README.md"
+        original_content = source_path.read_bytes()
+        original_info = source_path.stat()
+        changed_secret = "ghp_" + "M" * 36
+        secret_bytes = changed_secret.encode("ascii")
+        self.assertGreater(len(original_content), len(secret_bytes))
+        changed_content = (
+            secret_bytes + b"X" * (len(original_content) - len(secret_bytes))
+        ).decode("ascii")
+
+        result = self.run_sync(
+            mutate_during_read_path=str(source_path),
+            mutate_during_read_content=changed_content,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("changed or could not be safely opened", result.stderr)
+        self.assertIn(source_path.name, result.stderr)
+        self.assertNotIn(changed_secret, result.stdout + result.stderr)
+        self.assertNotIn(changed_content, result.stdout + result.stderr)
+        self.assert_safe_failure_output(result)
+        self.assertEqual(source_path.stat().st_ino, original_info.st_ino)
+        self.assertEqual(source_path.stat().st_size, original_info.st_size)
+        self.assertEqual(source_path.read_text(), changed_content)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        source_reads = [
+            (event["method"], event["path"])
+            for event in capture["filesystemReads"]
+            if event["path"] == str(source_path)
+        ]
+        self.assertEqual(source_reads, [
+            ("lstatSync", str(source_path)),
+            ("openSync", str(source_path)),
+            ("readFileSync", str(source_path)),
+        ])
 
     def test_invalid_javascript_stops_before_github_without_printing_source(self):
         source_path = self.source_root / "gitmesh-ultimate-core.mjs"
