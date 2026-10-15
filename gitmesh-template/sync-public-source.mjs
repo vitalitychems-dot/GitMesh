@@ -165,7 +165,11 @@ function readSourceFiles() {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
     if (containsEmbeddedCredential(text)) {
-      throw new Error(`Refusing to sync a source file containing a credential-like value: ${source}`);
+      throw new Error(
+        `Refusing to sync a source file containing a credential-like value: ${source}. ` +
+        "Remove the value from this file; use Replit Secrets for runtime credentials. " +
+        "Rotate it only if it was already shared or published elsewhere. No GitHub requests were made.",
+      );
     }
     if (path.extname(source) === ".mjs") {
       validateJavaScriptSyntax(content, source);
