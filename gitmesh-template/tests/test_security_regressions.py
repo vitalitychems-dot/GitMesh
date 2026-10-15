@@ -580,6 +580,70 @@ process.on("exit", saveCapture);
                 ]
                 self.assertEqual(writes, [])
 
+    def test_unsafe_local_sources_stop_before_github_and_do_not_leak_contents(self):
+        source_name = "gitmesh-ultimate-core.mjs"
+        source_path = self.source_root / source_name
+        symlink_target = self.source_root / "SovereignMeshVault/active_sigil.hash"
+        unsafe_cases = (
+            (
+                "symlink",
+                lambda: source_path.symlink_to(symlink_target),
+                "invalid or oversized source file",
+                (b"PRIVATE_SIGIL_FILE_SENTINEL",),
+                [("lstatSync", str(source_path))],
+            ),
+            (
+                "oversized",
+                lambda: source_path.write_bytes(
+                    b"OVERSIZED_LOCAL_CONTENT_SENTINEL" + b"x" * (512 * 1024)
+                ),
+                "invalid or oversized source file",
+                (b"OVERSIZED_LOCAL_CONTENT_SENTINEL",),
+                [("lstatSync", str(source_path))],
+            ),
+            (
+                "binary invalid utf-8",
+                lambda: source_path.write_bytes(b"\xffBINARY_LOCAL_CONTENT_SENTINEL"),
+                "non-text source file",
+                (b"BINARY_LOCAL_CONTENT_SENTINEL",),
+                [
+                    ("lstatSync", str(source_path)),
+                    ("readFileSync", str(source_path)),
+                ],
+            ),
+            (
+                "binary containing nul",
+                lambda: source_path.write_bytes(b"\x00BINARY_NUL_LOCAL_CONTENT_SENTINEL"),
+                "non-text source file",
+                (b"BINARY_NUL_LOCAL_CONTENT_SENTINEL",),
+                [
+                    ("lstatSync", str(source_path)),
+                    ("readFileSync", str(source_path)),
+                ],
+            ),
+        )
+        for case_name, create_unsafe_source, expected_error, sentinels, expected_reads in unsafe_cases:
+            with self.subTest(source_type=case_name):
+                source_path.unlink(missing_ok=True)
+                create_unsafe_source()
+
+                result = self.run_sync()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
+                self.assertIn(source_name, result.stderr)
+                self.assert_safe_failure_output(result)
+                for sentinel in sentinels:
+                    self.assertNotIn(sentinel.decode(), result.stdout + result.stderr)
+
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+                observed_source_reads = [
+                    (event["method"], event["path"])
+                    for event in capture["filesystemReads"]
+                    if event["path"] == str(source_path)
+                ]
+                self.assertEqual(observed_source_reads, expected_reads)
+
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"

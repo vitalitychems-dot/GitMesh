@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -47,6 +48,11 @@ function readSourceFiles() {
     }
     const content = fs.readFileSync(sourcePath);
     if (content.includes(0)) {
+      throw new Error(`Refusing to sync a non-text source file: ${source}`);
+    }
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(content);
+    } catch {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
     return { target, content };
