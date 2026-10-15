@@ -842,6 +842,7 @@ process.on("exit", saveCapture);
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("credential-like value", result.stderr)
                     self.assertIn(source_path.name, result.stderr)
+                    self.assertIn("(line 1)", result.stderr)
                     self.assertIn("Remove the value from this file", result.stderr)
                     self.assertIn("Replit Secrets", result.stderr)
                     self.assertIn(
@@ -856,6 +857,33 @@ process.on("exit", saveCapture);
 
                     capture = json.loads(self.capture.read_text())
                     self.assertEqual(capture["requests"], [])
+
+            first_secret = "ghp_" + "J" * 36
+            second_secret = "github_pat_" + "K" * 40
+            first_line = f"token={first_secret}"
+            second_line = f"private_key=-----BEGIN PRIVATE KEY-----{second_secret}"
+            source_path.write_text(
+                "SAFE_HEADER_CONTEXT\n"
+                f"{first_line}\n"
+                "SAFE_MIDDLE_CONTEXT\n"
+                f"{second_line}\n"
+            )
+            result = self.run_sync()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"{source_path.name} (lines 2, 4)", result.stderr)
+            for private_text in (
+                first_secret,
+                second_secret,
+                first_line,
+                second_line,
+                "SAFE_HEADER_CONTEXT",
+                "SAFE_MIDDLE_CONTEXT",
+            ):
+                self.assertNotIn(private_text, result.stdout + result.stderr)
+            self.assertIn("No GitHub requests were made", result.stderr)
+            self.assert_safe_failure_output(result)
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
         finally:
             source_path.write_bytes(original_content)
 

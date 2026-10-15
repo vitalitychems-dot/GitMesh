@@ -52,8 +52,14 @@ function requireSha(value, label) {
   return value;
 }
 
-function containsEmbeddedCredential(text) {
-  return EMBEDDED_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text));
+function findEmbeddedCredentialLines(text) {
+  return text
+    .split(/\r\n|\n|\r/)
+    .flatMap((line, index) =>
+      EMBEDDED_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(line))
+        ? [index + 1]
+        : [],
+    );
 }
 
 function runSecurityPreflight() {
@@ -164,9 +170,13 @@ function readSourceFiles() {
     } catch {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
-    if (containsEmbeddedCredential(text)) {
+    const credentialLines = findEmbeddedCredentialLines(text);
+    if (credentialLines.length > 0) {
+      const lineLabel = credentialLines.length === 1
+        ? `line ${credentialLines[0]}`
+        : `lines ${credentialLines.join(", ")}`;
       throw new Error(
-        `Refusing to sync a source file containing a credential-like value: ${source}. ` +
+        `Refusing to sync a source file containing a credential-like value: ${source} (${lineLabel}). ` +
         "Remove the value from this file; use Replit Secrets for runtime credentials. " +
         "Rotate it only if it was already shared or published elsewhere. No GitHub requests were made.",
       );
