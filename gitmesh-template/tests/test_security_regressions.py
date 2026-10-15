@@ -667,6 +667,22 @@ process.on("exit", saveCapture);
         ]
         self.assertEqual(observed_source_reads, [("lstatSync", str(source_path))])
 
+    def test_invalid_javascript_stops_before_github_without_printing_source(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        invalid_source = "const INVALID_JS_SOURCE_SENTINEL = ;\n"
+        source_path.write_text(invalid_source)
+
+        result = self.run_sync()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Node syntax validation", result.stderr)
+        self.assertIn(source_path.name, result.stderr)
+        self.assertNotIn(invalid_source.strip(), result.stdout + result.stderr)
+        self.assertNotIn("INVALID_JS_SOURCE_SENTINEL", result.stdout + result.stderr)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"
