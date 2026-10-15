@@ -307,13 +307,14 @@ childProcess.spawnSync = (command, ...args) => {
     });
     const mode = process.env.GITMESH_TEST_PREFLIGHT_MODE ?? "success";
     const childOutput = process.env.GITMESH_TEST_PREFLIGHT_OUTPUT ?? "";
+    const childStderr = process.env.GITMESH_TEST_PREFLIGHT_STDERR ?? childOutput;
     if (mode === "start") {
       return {
         error: { code: "ENOENT", message: childOutput },
         status: null,
         signal: null,
         stdout: childOutput,
-        stderr: childOutput,
+        stderr: childStderr,
         pid: null,
         output: [],
       };
@@ -324,7 +325,7 @@ childProcess.spawnSync = (command, ...args) => {
         status: null,
         signal: "SIGTERM",
         stdout: childOutput,
-        stderr: childOutput,
+        stderr: childStderr,
         pid: 123,
         output: [],
       };
@@ -335,7 +336,7 @@ childProcess.spawnSync = (command, ...args) => {
         status: null,
         signal: null,
         stdout: childOutput,
-        stderr: childOutput,
+        stderr: childStderr,
         pid: 123,
         output: [],
       };
@@ -346,7 +347,7 @@ childProcess.spawnSync = (command, ...args) => {
       status: failed ? 1 : 0,
       signal: null,
       stdout: failed ? childOutput : "",
-      stderr: failed ? childOutput : "",
+      stderr: failed ? childStderr : "",
       pid: 123,
       output: [],
     };
@@ -524,6 +525,7 @@ process.on("exit", saveCapture);
         mutate_during_read_content=None,
         preflight_mode=None,
         preflight_output=None,
+        preflight_stderr=None,
         moved_head_sha=None,
         second_moved_head_sha=None,
         fail_ref=None,
@@ -549,6 +551,7 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_MUTATE_DURING_READ_CONTENT", mutate_during_read_content),
             ("GITMESH_TEST_PREFLIGHT_MODE", preflight_mode),
             ("GITMESH_TEST_PREFLIGHT_OUTPUT", preflight_output),
+            ("GITMESH_TEST_PREFLIGHT_STDERR", preflight_stderr),
             ("GITMESH_TEST_MOVED_HEAD_SHA", moved_head_sha),
             ("GITMESH_TEST_SECOND_MOVED_HEAD_SHA", second_moved_head_sha),
             ("GITMESH_TEST_FAIL_REF", fail_ref),
@@ -1486,17 +1489,28 @@ process.on("exit", saveCapture);
             for method in ("lstatSync", "openSync", "readFileSync")
         )
         safe_test_name = "test_sync_publishes_only_the_fixed_source_allowlist"
+        second_safe_test_name = "test_invalid_javascript_stops_before_github_without_printing_source"
+        expected_multiple_summary = (
+            f"Security regression preflight failed in: "
+            f"{safe_test_name}, {second_safe_test_name}"
+        )
         source_sentinel = "PREFLIGHT_SOURCE_CONTENT_SENTINEL"
         credential_sentinel = "ghp_" + "Q" * 36
         unlisted_test_name = f"test_{credential_sentinel}"
-        injected_output = (
+        stdout_output = (
             f"FAIL: {safe_test_name} (__main__.GitHubSyncTests.{safe_test_name})\n"
             f"FAIL: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})\n"
-            f"{source_sentinel}\n{credential_sentinel}"
+            f"{source_sentinel}"
         )
+        stderr_output = (
+            f"ERROR: {second_safe_test_name} (__main__.GitHubSyncTests.{second_safe_test_name})\n"
+            f"FAIL: {safe_test_name} (__main__.GitHubSyncTests.{safe_test_name})\n"
+            f"{credential_sentinel}"
+        )
+        injected_output = f"{stdout_output}\n{stderr_output}"
         cases = (
-            ("failure", "publish", (), safe_test_name),
-            ("failure", "dry run", ("--dry-run",), safe_test_name),
+            ("failure", "publish", (), expected_multiple_summary),
+            ("failure", "dry run", ("--dry-run",), expected_multiple_summary),
             ("start", "python start", (), "Python could not start"),
             ("timeout", "python timeout", (), "preflight timed out"),
             ("output-limit", "large output", (), "exceeded its output limit"),
@@ -1506,7 +1520,8 @@ process.on("exit", saveCapture);
                 result = self.run_sync(
                     args=args,
                     preflight_mode=preflight_mode,
-                    preflight_output=injected_output,
+                    preflight_output=stdout_output if preflight_mode == "failure" else injected_output,
+                    preflight_stderr=stderr_output if preflight_mode == "failure" else None,
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected_summary, result.stderr)
@@ -1519,6 +1534,9 @@ process.on("exit", saveCapture);
                 self.assertNotIn(credential_sentinel, result.stdout + result.stderr)
                 self.assertNotIn(unlisted_test_name, result.stdout + result.stderr)
                 self.assertNotIn(injected_output, result.stdout + result.stderr)
+                if preflight_mode == "failure":
+                    for recognized_name in (safe_test_name, second_safe_test_name):
+                        self.assertEqual(result.stderr.count(recognized_name), 1)
                 self.assert_safe_failure_output(result)
 
                 capture = json.loads(self.capture.read_text())
