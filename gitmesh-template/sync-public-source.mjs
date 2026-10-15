@@ -288,12 +288,13 @@ async function syncSource({ dryRun }) {
   runSecurityPreflight();
   const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
   const parentSha = requireSha(ref?.object?.sha, "main branch commit");
+  const shortParentSha = parentSha.slice(0, 7);
 
   const changedFiles = await findChangedFiles(token, files, parentSha);
   if (changedFiles.length === 0) {
     if (dryRun) {
       console.log(
-        `Dry run: all ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH}; no changes would be published and no commit was created.`,
+        `Dry run: all ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH} (commit ${shortParentSha}); no changes would be published and no commit was created.`,
       );
       return;
     }
@@ -303,7 +304,7 @@ async function syncSource({ dryRun }) {
 
   if (dryRun) {
     console.log(
-      `Dry run: ${changedFiles.length} allowlisted source files would be published to ${OWNER}/${REPOSITORY}@${BRANCH}; no GitHub changes were made.`,
+      `Dry run: ${changedFiles.length} allowlisted source files would be published to ${OWNER}/${REPOSITORY}@${BRANCH}, compared with commit ${shortParentSha}; no GitHub changes were made.`,
     );
     console.log("Changed files:");
     for (const { target } of changedFiles) {
