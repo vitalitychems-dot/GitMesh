@@ -40,8 +40,9 @@ function requireSha(value, label) {
   return value;
 }
 
-function validateJavaScriptSyntax(sourcePath, source) {
-  const result = spawnSync(process.execPath, ["--check", sourcePath], {
+function validateJavaScriptSyntax(content, source) {
+  const result = spawnSync(process.execPath, ["--check"], {
+    input: content,
     encoding: "utf8",
     timeout: 10_000,
     maxBuffer: 64 * 1024,
@@ -52,14 +53,71 @@ function validateJavaScriptSyntax(sourcePath, source) {
   }
 }
 
+function validateSourceFileInfo(fileInfo, source) {
+  if (!fileInfo.isFile() ||
+      fileInfo.isSymbolicLink() ||
+      fileInfo.nlink > 1n ||
+      fileInfo.size > BigInt(MAX_SOURCE_BYTES)) {
+    throw new Error(`Refusing to sync an invalid, linked, or oversized source file: ${source}`);
+  }
+}
+
+function sameFileSnapshot(left, right) {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+}
+
+function readSourceContent(sourcePath, source) {
+  let pathInfo;
+  try {
+    pathInfo = fs.lstatSync(sourcePath, { bigint: true });
+  } catch {
+    throw new Error(`Refusing to sync an unavailable source file: ${source}`);
+  }
+  validateSourceFileInfo(pathInfo, source);
+
+  let descriptor;
+  try {
+    if (typeof fs.constants.O_NOFOLLOW !== "number") {
+      throw new Error("No-follow file opening is unavailable.");
+    }
+    descriptor = fs.openSync(
+      sourcePath,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+    );
+    const openedInfo = fs.fstatSync(descriptor, { bigint: true });
+    validateSourceFileInfo(openedInfo, source);
+    if (!sameFileSnapshot(pathInfo, openedInfo)) {
+      throw new Error("The source file changed after its metadata check.");
+    }
+
+    const content = fs.readFileSync(descriptor);
+    const finalInfo = fs.fstatSync(descriptor, { bigint: true });
+    if (!sameFileSnapshot(openedInfo, finalInfo)) {
+      throw new Error("The source file changed while it was being read.");
+    }
+    return content;
+  } catch {
+    throw new Error(`Refusing to sync a source file that changed or could not be safely opened: ${source}`);
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // Keep raw filesystem diagnostics out of sync output.
+      }
+    }
+  }
+}
+
 function readSourceFiles() {
   return ALLOWED_FILES.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
-    const fileInfo = fs.lstatSync(sourcePath);
-    if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.nlink > 1 || fileInfo.size > MAX_SOURCE_BYTES) {
-      throw new Error(`Refusing to sync an invalid, linked, or oversized source file: ${source}`);
-    }
-    const content = fs.readFileSync(sourcePath);
+    const content = readSourceContent(sourcePath, source);
     if (content.includes(0)) {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
@@ -69,7 +127,7 @@ function readSourceFiles() {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
     if (path.extname(source) === ".mjs") {
-      validateJavaScriptSyntax(sourcePath, source);
+      validateJavaScriptSyntax(content, source);
     }
     return { target, content };
   });
