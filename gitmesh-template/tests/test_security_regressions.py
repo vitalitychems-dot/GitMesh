@@ -28,6 +28,7 @@ FAKE_GITHUB_TOKEN = "test-only-not-a-real-token"
 FAKE_REQUEST_BODY = "MOCK_REQUEST_BODY_SENTINEL"
 FAKE_AUTHORIZATION = f"Bearer {FAKE_GITHUB_TOKEN}"
 INITIAL_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
+MOVED_COMMIT_SHA = "0123456" + "f" * 33
 ALLOWED_GITHUB_PATHS = {
     "projects/local-vault/gitmesh-ultimate-core.mjs",
     "projects/local-vault/README.md",
@@ -285,6 +286,7 @@ const capture = process.env.GITMESH_TEST_CAPTURE;
 const remoteContents = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REMOTE_CONTENTS, "utf8"));
 const base = "/repos/vitalitychems-dot/GitMesh";
 const initialCommitSha = process.env.GITMESH_TEST_INITIAL_SHA;
+let mainRefReadCount = 0;
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
 childProcess.spawnSync = (command, ...args) => {
   if (command === "python3") {
@@ -442,7 +444,13 @@ globalThis.fetch = async (input, init = {}) => {
   }
   let data;
   if (method === "GET" && url.pathname === base + "/git/ref/heads/main") {
-    data = { object: { sha: initialCommitSha } };
+    mainRefReadCount += 1;
+    const movedHeadSha = process.env.GITMESH_TEST_MOVED_HEAD_SHA;
+    data = {
+      object: {
+        sha: movedHeadSha && mainRefReadCount > 1 ? movedHeadSha : initialCommitSha,
+      },
+    };
   } else if (method === "GET" && url.pathname === base + "/git/commits/" + initialCommitSha) {
     data = { tree: { sha: "b".repeat(40) } };
   } else if (method === "GET" && url.pathname.startsWith(base + "/contents/")) {
@@ -500,6 +508,7 @@ process.on("exit", saveCapture);
         mutate_during_read_content=None,
         preflight_mode=None,
         preflight_output=None,
+        moved_head_sha=None,
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -522,6 +531,7 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_MUTATE_DURING_READ_CONTENT", mutate_during_read_content),
             ("GITMESH_TEST_PREFLIGHT_MODE", preflight_mode),
             ("GITMESH_TEST_PREFLIGHT_OUTPUT", preflight_output),
+            ("GITMESH_TEST_MOVED_HEAD_SHA", moved_head_sha),
         ):
             if value is None:
                 env.pop(key, None)
@@ -661,6 +671,7 @@ process.on("exit", saveCapture);
         self.assertIn("Dry run:", result.stdout)
         self.assertIn("already match", result.stdout)
         self.assertIn("no commit was created", result.stdout)
+        self.assertNotIn("Warning:", result.stdout + result.stderr)
         self.assertEqual(reported_changed_paths(result.stdout), [])
         self.assert_safe_failure_output(result)
         self.assert_no_source_contents_in_output(result.stdout + result.stderr)
@@ -670,6 +681,11 @@ process.on("exit", saveCapture);
         self.assertTrue(all(request["method"] == "GET" for request in capture["requests"]))
         self.assert_preview_snapshot_matches_content_reads(result.stdout, capture)
         self.assertFalse(any("/git/commits/" in request["path"] for request in capture["requests"]))
+        self.assertEqual(
+            sum(request["path"] == "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
+                for request in capture["requests"]),
+            2,
+        )
 
     def test_dry_run_lists_only_changed_paths_without_contents_or_writes(self):
         self.set_remote_snapshot()
@@ -680,6 +696,7 @@ process.on("exit", saveCapture);
         self.assertEqual(result.returncode, 0)
         self.assertIn("would be published", result.stdout)
         self.assertIn("no GitHub changes were made", result.stdout)
+        self.assertNotIn("Warning:", result.stdout + result.stderr)
         self.assertEqual(
             reported_changed_paths(result.stdout),
             ["projects/local-vault/README.md"],
@@ -696,6 +713,46 @@ process.on("exit", saveCapture);
             sum("/contents/" in request["path"] for request in capture["requests"]),
             3,
         )
+
+    def test_dry_run_warns_when_main_advances_during_comparison(self):
+        result = self.run_sync(
+            args=("--dry-run",),
+            moved_head_sha=MOVED_COMMIT_SHA,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("compared with commit " + INITIAL_COMMIT_SHA[:7], result.stdout)
+        self.assertIn("advanced during this preview", result.stderr)
+        self.assertIn("comparison against commit " + INITIAL_COMMIT_SHA[:7], result.stderr)
+        self.assertIn("Rerun the dry run before publishing", result.stderr)
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(result.stdout + result.stderr)
+
+        capture = json.loads(self.capture.read_text())
+        self.assert_preview_snapshot_matches_content_reads(result.stdout, capture)
+        self.assertEqual(
+            sum(request["path"] == "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
+                for request in capture["requests"]),
+            2,
+        )
+        request_paths = [request["path"] for request in capture["requests"]]
+        self.assertEqual(
+            request_paths,
+            [
+                "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main",
+                "/repos/vitalitychems-dot/GitMesh/contents/projects/local-vault/gitmesh-ultimate-core.mjs",
+                "/repos/vitalitychems-dot/GitMesh/contents/projects/local-vault/README.md",
+                "/repos/vitalitychems-dot/GitMesh/contents/projects/local-vault/sync-public-source.mjs",
+                "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main",
+            ],
+        )
+        self.assertEqual(
+            sum("/contents/" in request["path"] for request in capture["requests"]),
+            3,
+        )
+        self.assertFalse(any(
+            request["method"] != "GET"
+            for request in capture["requests"]
+        ))
 
     def test_unknown_sync_option_stops_before_github_request(self):
         result = self.run_sync(args=("--unexpected-option",))

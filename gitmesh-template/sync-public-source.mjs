@@ -367,11 +367,25 @@ async function syncSource({ dryRun }) {
   const shortParentSha = parentSha.slice(0, 7);
 
   const changedFiles = await findChangedFiles(token, files, parentSha);
+  let latestPreviewSha;
+  if (dryRun) {
+    const latestRef = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
+    latestPreviewSha = requireSha(latestRef?.object?.sha, "main branch commit");
+  }
+  const warnIfPreviewIsStale = () => {
+    if (dryRun && latestPreviewSha !== parentSha) {
+      console.warn(
+        `Warning: ${OWNER}/${REPOSITORY}@${BRANCH} advanced during this preview after comparison against commit ${shortParentSha}. ` +
+        "Rerun the dry run before publishing.",
+      );
+    }
+  };
   if (changedFiles.length === 0) {
     if (dryRun) {
       console.log(
         `Dry run: all ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH} (commit ${shortParentSha}); no changes would be published and no commit was created.`,
       );
+      warnIfPreviewIsStale();
       return;
     }
     console.log(`All ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH}; no commit created.`);
@@ -386,6 +400,7 @@ async function syncSource({ dryRun }) {
     for (const { target } of changedFiles) {
       console.log(`- ${target}`);
     }
+    warnIfPreviewIsStale();
     return;
   }
 
