@@ -1499,7 +1499,7 @@ process.on("exit", saveCapture);
         unlisted_test_name = f"test_{credential_sentinel}"
         stdout_output = (
             f"FAIL: {safe_test_name} (__main__.GitHubSyncTests.{safe_test_name})\n"
-            f"FAIL: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})\n"
+            f"ERROR: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})\n"
             f"{source_sentinel}"
         )
         stderr_output = (
@@ -1559,7 +1559,7 @@ process.on("exit", saveCapture);
                 ))
 
         unknown_only_output = (
-            f"FAIL: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})\n"
+            f"ERROR: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})\n"
             f"{source_sentinel}\n{credential_sentinel}"
         )
         with self.subTest(mode="unknown test only"):
