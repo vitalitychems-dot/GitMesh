@@ -768,6 +768,41 @@ process.on("exit", saveCapture);
         capture = json.loads(self.capture.read_text())
         self.assertEqual(capture["requests"], [])
 
+    def test_embedded_credentials_stop_before_github_without_leaking_values(self):
+        source_path = self.source_root / "README.md"
+        credential_samples = (
+            ("GitHub classic token", "ghp_" + "A" * 36),
+            ("GitHub fine-grained token", "github_pat_" + "B" * 40),
+            ("GitLab token", "glpat-" + "F" * 24),
+            ("npm token", "npm_" + "G" * 36),
+            ("Slack token", "xoxb-" + "C" * 24),
+            ("Google API key", "AIza" + "D" * 35),
+            ("OpenAI project key", "sk-proj-" + "H" * 40),
+            ("OpenAI legacy key", "sk-" + "I" * 48),
+            ("Stripe secret key", "sk_live_" + "E" * 24),
+            (
+                "PEM private key",
+                "-----BEGIN PRIVATE KEY-----\nPRIVATE_KEY_BODY_SENTINEL\n-----END PRIVATE KEY-----",
+            ),
+        )
+        original_content = source_path.read_bytes()
+        try:
+            for label, credential in credential_samples:
+                with self.subTest(credential_type=label):
+                    source_path.write_text(f"Example configuration value: {credential}\n")
+                    result = self.run_sync()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("credential-like value", result.stderr)
+                    self.assertIn(source_path.name, result.stderr)
+                    self.assertNotIn(credential, result.stdout + result.stderr)
+                    self.assertNotIn("PRIVATE_KEY_BODY_SENTINEL", result.stdout + result.stderr)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"

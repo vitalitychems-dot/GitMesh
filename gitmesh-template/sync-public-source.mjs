@@ -24,6 +24,18 @@ const ALLOWED_FILES = [
     target: "projects/local-vault/sync-public-source.mjs",
   },
 ];
+const EMBEDDED_CREDENTIAL_PATTERNS = [
+  /\bgh[pousr]_[A-Za-z0-9]{30,}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{30,}\b/,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/,
+  /\bnpm_[A-Za-z0-9]{30,}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/,
+  /\bAIza[0-9A-Za-z_-]{35}\b/,
+  /\bsk-(?:proj|admin|svcacct)-[A-Za-z0-9_-]{20,}\b/,
+  /\bsk-[A-Za-z0-9]{40,}\b/,
+  /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/,
+  /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/,
+];
 
 function getToken() {
   const token = process.env.GITHUB_TOKEN;
@@ -38,6 +50,10 @@ function requireSha(value, label) {
     throw new Error(`GitHub returned an invalid ${label}; sync stopped.`);
   }
   return value;
+}
+
+function containsEmbeddedCredential(text) {
+  return EMBEDDED_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 function validateJavaScriptSyntax(content, source) {
@@ -121,10 +137,14 @@ function readSourceFiles() {
     if (content.includes(0)) {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
+    let text;
     try {
-      new TextDecoder("utf-8", { fatal: true }).decode(content);
+      text = new TextDecoder("utf-8", { fatal: true }).decode(content);
     } catch {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
+    }
+    if (containsEmbeddedCredential(text)) {
+      throw new Error(`Refusing to sync a source file containing a credential-like value: ${source}`);
     }
     if (path.extname(source) === ".mjs") {
       validateJavaScriptSyntax(content, source);
