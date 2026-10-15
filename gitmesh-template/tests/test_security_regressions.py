@@ -757,10 +757,53 @@ process.on("exit", saveCapture);
     def test_unknown_sync_option_stops_before_github_request(self):
         result = self.run_sync(args=("--unexpected-option",))
         self.assertEqual(result.returncode, 2)
-        self.assertIn("Usage: node ./sync-public-source.mjs [--dry-run].", result.stderr)
+        self.assertIn(
+            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials].",
+            result.stderr,
+        )
         self.assert_safe_failure_output(result)
         capture = json.loads(self.capture.read_text())
         self.assertEqual(capture["requests"], [])
+
+    def test_local_credential_check_passes_without_token_or_github_requests(self):
+        result = self.run_sync(token_value=None, args=("--check-credentials",))
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Credential check passed", result.stdout)
+        self.assertIn("3 allowlisted source files", result.stdout)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(capture["preflightCalls"], [])
+        expected_reads = Counter(
+            (method, str((self.source_root / source).resolve()))
+            for source in ALLOWED_SOURCE_NAMES
+            for method in ("lstatSync", "openSync", "readFileSync")
+        )
+        observed_reads = Counter(
+            (event["method"], event["path"])
+            for event in capture["filesystemReads"]
+        )
+        self.assertEqual(observed_reads, expected_reads)
+
+    def test_local_credential_check_reports_location_without_exposing_value(self):
+        source_path = self.source_root / "README.md"
+        credential = "ghp_" + "R" * 36
+        source_line = f"Example configuration value: {credential}"
+        source_path.write_text(source_line + "\n")
+
+        result = self.run_sync(token_value=None, args=("--check-credentials",))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"{source_path.name} (line 1)", result.stderr)
+        self.assertIn("Remove the value from this file", result.stderr)
+        self.assertIn("No GitHub requests were made", result.stderr)
+        self.assertNotIn(credential, result.stdout + result.stderr)
+        self.assertNotIn(source_line, result.stdout + result.stderr)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(capture["preflightCalls"], [])
 
     def test_malformed_remote_files_stop_before_any_github_write(self):
         target = "projects/local-vault/gitmesh-ultimate-core.mjs"

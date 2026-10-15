@@ -52,6 +52,8 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_embedded_credentials_stop_before_github_without_leaking_values",
   "test_changed_source_updates_only_the_changed_allowlisted_file",
   "test_missing_secret_fails_before_any_github_request",
+  "test_local_credential_check_passes_without_token_or_github_requests",
+  "test_local_credential_check_reports_location_without_exposing_value",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
   "test_malformed_credentials_fail_before_reading_sources_or_requesting_github",
   "test_http_and_network_failures_stop_without_printing_token",
@@ -219,7 +221,7 @@ function readSourceContent(sourcePath, source) {
   }
 }
 
-function readSourceFiles() {
+function readSourceFiles({ validateSyntax = true } = {}) {
   return ALLOWED_FILES.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
     const content = readSourceContent(sourcePath, source);
@@ -243,11 +245,18 @@ function readSourceFiles() {
         "Rotate it only if it was already shared or published elsewhere. No GitHub requests were made.",
       );
     }
-    if (path.extname(source) === ".mjs") {
+    if (validateSyntax && path.extname(source) === ".mjs") {
       validateJavaScriptSyntax(content, source);
     }
     return { target, content };
   });
+}
+
+function checkLocalCredentials() {
+  const files = readSourceFiles({ validateSyntax: false });
+  console.log(
+    `Credential check passed: no credential-like values found in ${files.length} allowlisted source files.`,
+  );
 }
 
 async function githubRequest(token, route, method = "GET", body = undefined, { allowNotFound = false } = {}) {
@@ -353,9 +362,16 @@ async function findChangedFiles(token, files, refSha) {
 }
 
 function parseArguments(args) {
-  if (args.length === 0) return { dryRun: false };
-  if (args.length === 1 && args[0] === "--dry-run") return { dryRun: true };
-  throw new Error("Usage: node ./sync-public-source.mjs [--dry-run].");
+  if (args.length === 0) return { dryRun: false, checkCredentials: false };
+  if (args.length === 1 && args[0] === "--dry-run") {
+    return { dryRun: true, checkCredentials: false };
+  }
+  if (args.length === 1 && args[0] === "--check-credentials") {
+    return { dryRun: false, checkCredentials: true };
+  }
+  throw new Error(
+    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials].",
+  );
 }
 
 async function syncSource({ dryRun }) {
@@ -450,10 +466,14 @@ async function syncSource({ dryRun }) {
 
 try {
   const options = parseArguments(process.argv.slice(2));
-  syncSource(options).catch((error) => {
-    console.error(error instanceof Error ? error.message : "Source sync failed.");
-    process.exitCode = 1;
-  });
+  if (options.checkCredentials) {
+    checkLocalCredentials();
+  } else {
+    syncSource(options).catch((error) => {
+      console.error(error instanceof Error ? error.message : "Source sync failed.");
+      process.exitCode = 1;
+    });
+  }
 } catch (error) {
   console.error(error instanceof Error ? error.message : "Source sync failed.");
   process.exitCode = 2;
