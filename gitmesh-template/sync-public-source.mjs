@@ -59,6 +59,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_reports_location_without_exposing_value",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
   "test_preflight_safe_name_allowlist_matches_regression_tests",
+  "test_missing_preflight_harness_has_safe_recovery_guidance",
   "test_malformed_credentials_fail_before_reading_sources_or_requesting_github",
   "test_http_and_network_failures_stop_without_printing_token",
   "test_branch_conflict_uses_non_force_update_and_stops",
@@ -127,9 +128,24 @@ function summarizePreflightFailure(result) {
 }
 
 function runSecurityPreflight() {
+  const preflightPath = path.join(ROOT, "tests", "test_security_regressions.py");
+  let preflightHarnessExists = false;
+  try {
+    preflightHarnessExists = fs.statSync(preflightPath).isFile();
+  } catch {
+    // Report a safe repair step instead of forwarding Python's missing-file output.
+  }
+  if (!preflightHarnessExists) {
+    throw new Error(
+      "Security regression preflight harness is missing: tests/test_security_regressions.py. " +
+      "Restore it from the complete GitMesh workspace, then rerun sync. " +
+      `Run locally from the workspace root: ${PREFLIGHT_REPRO_COMMAND}. No GitHub requests were made.`,
+    );
+  }
+
   const result = spawnSync(
     "python3",
-    [path.join(ROOT, "tests", "test_security_regressions.py")],
+    [preflightPath],
     {
       cwd: ROOT,
       encoding: "utf8",

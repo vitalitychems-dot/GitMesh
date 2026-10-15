@@ -252,6 +252,9 @@ class GitHubSyncTests(unittest.TestCase):
         self.source_root.mkdir()
         for name in ALLOWED_SOURCE_NAMES:
             shutil.copy2(ROOT / name, self.source_root / name)
+        self.preflight_harness = self.source_root / "tests" / "test_security_regressions.py"
+        self.preflight_harness.parent.mkdir()
+        shutil.copy2(pathlib.Path(__file__), self.preflight_harness)
 
         # Private sentinels prove the sync process neither reads nor uploads
         # records, credentials, bundles, assets, or arbitrary workspace files.
@@ -1288,6 +1291,50 @@ process.on("exit", saveCapture);
             regression_test_names,
             "Keep the safe preflight names in sync with all regression tests.",
         )
+
+    def test_missing_preflight_harness_has_safe_recovery_guidance(self):
+        readme = self.source_root / "README.md"
+        original_readme = readme.read_bytes()
+        source_sentinel = "PREFLIGHT_SOURCE_CONTENT_SENTINEL"
+        credential_sentinel = "ghp_" + "V" * 36
+        safe_test_name = "test_sync_publishes_only_the_fixed_source_allowlist"
+        mocked_python_output = (
+            f"FAIL: {safe_test_name} (__main__.GitHubSyncTests.{safe_test_name})\n"
+            f"{source_sentinel}\n{credential_sentinel}"
+        )
+        readme.write_text(f"{source_sentinel}\n")
+        self.preflight_harness.unlink()
+
+        try:
+            result = self.run_sync(
+                preflight_mode="failure",
+                preflight_output=mocked_python_output,
+            )
+            output = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Security regression preflight harness is missing: tests/test_security_regressions.py",
+                result.stderr,
+            )
+            self.assertIn("Restore it from the complete GitMesh workspace, then rerun sync.", result.stderr)
+            self.assertIn(
+                "python3 gitmesh-template/tests/test_security_regressions.py",
+                result.stderr,
+            )
+            self.assertIn("No GitHub requests were made", result.stderr)
+            for private_text in (
+                source_sentinel,
+                credential_sentinel,
+                mocked_python_output,
+            ):
+                self.assertNotIn(private_text, output)
+            self.assert_safe_failure_output(result)
+
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
+            self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            readme.write_bytes(original_readme)
 
     def test_failed_security_preflight_stops_before_github_without_leaking_output(self):
         expected_source_reads = Counter(
