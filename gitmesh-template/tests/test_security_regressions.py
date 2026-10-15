@@ -1089,6 +1089,56 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_credentials_in_multiple_sources_are_all_reported_without_leaking(self):
+        readme = self.source_root / "README.md"
+        console = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_contents = {
+            source_path: source_path.read_bytes()
+            for source_path in (readme, console)
+        }
+        readme_secret = "ghp_" + "N" * 36
+        console_secret = "github_pat_" + "P" * 40
+        readme_line = f"README_TOKEN={readme_secret}"
+        console_line = f"CONSOLE_TOKEN={console_secret}"
+        readme.write_text(f"SAFE_README_CONTEXT\n{readme_line}\n")
+        console.write_text(
+            "SAFE_CONSOLE_HEADER\n"
+            "SAFE_CONSOLE_CONTEXT\n"
+            f"{console_line}\n"
+        )
+
+        try:
+            for mode, args, token_value in (
+                ("sync", (), FAKE_GITHUB_TOKEN),
+                ("local check without token", ("--check-credentials",), None),
+            ):
+                with self.subTest(mode=mode):
+                    result = self.run_sync(args=args, token_value=token_value)
+                    output = result.stdout + result.stderr
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("README.md (line 2)", result.stderr)
+                    self.assertIn("gitmesh-ultimate-core.mjs (line 3)", result.stderr)
+                    self.assertIn("; ", result.stderr)
+                    self.assertIn("No GitHub requests were made", result.stderr)
+                    for private_text in (
+                        readme_secret,
+                        console_secret,
+                        readme_line,
+                        console_line,
+                        "SAFE_README_CONTEXT",
+                        "SAFE_CONSOLE_HEADER",
+                        "SAFE_CONSOLE_CONTEXT",
+                    ):
+                        self.assertNotIn(private_text, output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+                    self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            for source_path, content in original_contents.items():
+                source_path.write_bytes(content)
+
     def test_embedded_credentials_report_lines_for_crlf_and_bare_cr_without_leaking(self):
         source_path = self.source_root / "README.md"
         original_content = source_path.read_bytes()
