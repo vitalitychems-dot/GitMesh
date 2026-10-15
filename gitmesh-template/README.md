@@ -47,6 +47,14 @@ This is separate from vault data transfer and makes an outbound HTTPS request to
 
 Run from this folder with `node ./sync-public-source.mjs`. It compares the three fixed source paths listed in the script with `main`, creates no commit if they already match, and uses a non-force ref update when changes are needed. It does not stage, read, or upload local vault data, bundles, or other workspace files. Do not put the token in a `.env` file, source file, Git remote URL, or command-line argument.
 
+If GitHub rejects a sync, the error message gives a safe next step without printing the token, authorization header, or request body:
+
+- **Authentication rejected:** Check that the `GITHUB_TOKEN` Secret is current and has access to `vitalitychems-dot/GitMesh`.
+- **Access denied:** Check repository access and the required Contents permission (read for lookups, write for updates).
+- **Rate limit:** Wait for the limit to reset, then retry.
+- **Network or temporary GitHub error:** Check the connection, wait briefly, and retry.
+- **Branch conflict:** Review `main` and retry after resolving the conflict. Sync never force-updates the branch.
+
 ## Security regression checks
 
 The regression harness is maintained in the Replit workspace and is not included in the GitHub source sync. From the Replit workspace root, run `python3 gitmesh-template/tests/test_security_regressions.py`. The checks use a disposable fixture and a mocked GitHub API; they do not read the active vault or make network requests. Python 3, Node.js, and Git must be available.
