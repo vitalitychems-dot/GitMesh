@@ -274,14 +274,44 @@ import fs from "node:fs";
 import path from "node:path";
 const requests = [];
 const filesystemReads = [];
+const openedFiles = new Map();
+let replacementTriggered = false;
 const capture = process.env.GITMESH_TEST_CAPTURE;
 const remoteContents = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REMOTE_CONTENTS, "utf8"));
 const base = "/repos/vitalitychems-dot/GitMesh";
-for (const name of ["lstatSync", "readFileSync"]) {
+for (const name of ["lstatSync", "openSync", "readFileSync"]) {
   const original = fs[name].bind(fs);
   fs[name] = (target, ...args) => {
-    if (typeof target === "string" || target instanceof URL) {
-      filesystemReads.push({ method: name, path: path.resolve(String(target)) });
+    const isPath = typeof target === "string" && !target.startsWith("file:");
+    const resolvedPath = isPath ? path.resolve(String(target)) : null;
+    if (name === "lstatSync") {
+      const result = original(target, ...args);
+      if (isPath) filesystemReads.push({ method: name, path: resolvedPath });
+      const replaceAfter = process.env.GITMESH_TEST_REPLACE_AFTER_LSTAT;
+      const replaceTarget = process.env.GITMESH_TEST_REPLACE_TARGET;
+      if (!replacementTriggered && replaceAfter && replaceTarget &&
+          resolvedPath === path.resolve(replaceAfter)) {
+        replacementTriggered = true;
+        fs.unlinkSync(target);
+        if (process.env.GITMESH_TEST_REPLACE_KIND === "regular") {
+          fs.writeFileSync(target, "PRIVATE_RECORD_SENTINEL");
+        } else {
+          fs.symlinkSync(replaceTarget, target);
+        }
+      }
+      return result;
+    }
+    if (name === "openSync") {
+      if (isPath) filesystemReads.push({ method: name, path: resolvedPath });
+      const descriptor = original(target, ...args);
+      if (isPath) openedFiles.set(descriptor, resolvedPath);
+      return descriptor;
+    }
+    if (typeof target === "number") {
+      const openedPath = openedFiles.get(target);
+      if (openedPath) filesystemReads.push({ method: name, path: openedPath });
+    } else if (isPath) {
+      filesystemReads.push({ method: name, path: resolvedPath });
     }
     return original(target, ...args);
   };
@@ -378,6 +408,9 @@ process.on("exit", saveCapture);
         retry_after=None,
         rate_remaining=None,
         args=(),
+        replace_after_lstat=None,
+        replace_target=None,
+        replace_kind=None,
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -392,6 +425,9 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_FAIL_STATUS", str(fail_status) if fail_status is not None else None),
             ("GITMESH_TEST_RETRY_AFTER", retry_after),
             ("GITMESH_TEST_RATE_REMAINING", rate_remaining),
+            ("GITMESH_TEST_REPLACE_AFTER_LSTAT", replace_after_lstat),
+            ("GITMESH_TEST_REPLACE_TARGET", replace_target),
+            ("GITMESH_TEST_REPLACE_KIND", replace_kind),
         ):
             if value is None:
                 env.pop(key, None)
@@ -471,7 +507,7 @@ process.on("exit", saveCapture);
         expected_reads = Counter(
             (method, str((self.source_root / source).resolve()))
             for source in ALLOWED_SOURCE_NAMES
-            for method in ("lstatSync", "readFileSync")
+            for method in ("lstatSync", "openSync", "readFileSync")
         )
         observed_reads = Counter(
             (event["method"], event["path"]) for event in capture["filesystemReads"]
@@ -620,6 +656,7 @@ process.on("exit", saveCapture);
                 (b"BINARY_LOCAL_CONTENT_SENTINEL",),
                 [
                     ("lstatSync", str(source_path)),
+                    ("openSync", str(source_path)),
                     ("readFileSync", str(source_path)),
                 ],
             ),
@@ -630,6 +667,7 @@ process.on("exit", saveCapture);
                 (b"BINARY_NUL_LOCAL_CONTENT_SENTINEL",),
                 [
                     ("lstatSync", str(source_path)),
+                    ("openSync", str(source_path)),
                     ("readFileSync", str(source_path)),
                 ],
             ),
@@ -678,6 +716,41 @@ process.on("exit", saveCapture);
             if event["path"] == str(source_path)
         ]
         self.assertEqual(observed_source_reads, [("lstatSync", str(source_path))])
+
+    def test_source_replaced_after_metadata_check_is_not_followed_or_read(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        private_path = self.source_root / "SovereignMeshVault/ledger_matrix/private-record.json"
+
+        for replacement_kind in ("symlink", "regular"):
+            with self.subTest(replacement_kind=replacement_kind):
+                source_path.unlink(missing_ok=True)
+                shutil.copy2(ROOT / source_path.name, source_path)
+                result = self.run_sync(
+                    replace_after_lstat=str(source_path),
+                    replace_target=str(private_path),
+                    replace_kind=replacement_kind,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("changed or could not be safely opened", result.stderr)
+                self.assertIn(source_path.name, result.stderr)
+                self.assertNotIn("PRIVATE_RECORD_SENTINEL", result.stdout + result.stderr)
+                self.assert_safe_failure_output(result)
+
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+                source_reads = [
+                    (event["method"], event["path"])
+                    for event in capture["filesystemReads"]
+                    if event["path"] == str(source_path)
+                ]
+                self.assertEqual(source_reads, [
+                    ("lstatSync", str(source_path)),
+                    ("openSync", str(source_path)),
+                ])
+                self.assertFalse(any(
+                    event["path"] == str(private_path)
+                    for event in capture["filesystemReads"]
+                ))
 
     def test_invalid_javascript_stops_before_github_without_printing_source(self):
         source_path = self.source_root / "gitmesh-ultimate-core.mjs"
