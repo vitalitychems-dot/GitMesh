@@ -101,6 +101,12 @@
       "path": "projects/tie",
       "run": "node tie.mjs --approved",
       "does": "Joins the git mesh to the paired spin. Refuses without approval."
+    },
+    {
+      "name": "local-vault",
+      "path": "projects/local-vault",
+      "run": "node gitmesh-ultimate-core.mjs",
+      "does": "Keeps local JSON records and moves snapshots in unencrypted Git bundles between trusted machines."
     }
   ]
 }

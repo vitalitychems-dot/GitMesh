@@ -1,0 +1,10 @@
+# Local records, credentials, and transfer bundles never belong in this repo.
+SovereignMeshVault/
+
+# Local development files
+node_modules/
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
