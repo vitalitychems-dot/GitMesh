@@ -25,6 +25,8 @@ SYNC = ROOT / "sync-public-source.mjs"
 INITIAL_SIGIL = "fixture-admin-sigil-one"
 CUSTOM_SIGIL = "fixture-admin-sigil-custom"
 FAKE_GITHUB_TOKEN = "test-only-not-a-real-token"
+FAKE_REQUEST_BODY = "MOCK_REQUEST_BODY_SENTINEL"
+FAKE_AUTHORIZATION = f"Bearer {FAKE_GITHUB_TOKEN}"
 ALLOWED_GITHUB_PATHS = {
     "projects/local-vault/gitmesh-ultimate-core.mjs",
     "projects/local-vault/README.md",
@@ -294,12 +296,23 @@ globalThis.fetch = async (input, init = {}) => {
   if (failAt === method + " " + route) {
     saveCapture();
     if (process.env.GITMESH_TEST_FAIL_MODE === "network") {
-      throw new Error("mock connection failure");
+      throw new Error("mock connection failure " + process.env.GITHUB_TOKEN + " MOCK_REQUEST_BODY_SENTINEL");
     }
     return {
       ok: false,
       status: Number(process.env.GITMESH_TEST_FAIL_STATUS ?? "500"),
-      json: async () => ({ message: "mock failure" }),
+      headers: {
+        get: name => {
+          if (name.toLowerCase() === "retry-after") return process.env.GITMESH_TEST_RETRY_AFTER ?? null;
+          if (name.toLowerCase() === "x-ratelimit-remaining") return process.env.GITMESH_TEST_RATE_REMAINING ?? null;
+          return null;
+        },
+      },
+      json: async () => ({
+        message: "mock failure " + process.env.GITHUB_TOKEN,
+        authorization: "Bearer " + process.env.GITHUB_TOKEN,
+        requestBody: "MOCK_REQUEST_BODY_SENTINEL",
+      }),
     };
   }
   let data;
@@ -336,7 +349,15 @@ process.on("exit", saveCapture);
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_sync(self, token_value=FAKE_GITHUB_TOKEN, fail_at=None, fail_mode=None, fail_status=None):
+    def run_sync(
+        self,
+        token_value=FAKE_GITHUB_TOKEN,
+        fail_at=None,
+        fail_mode=None,
+        fail_status=None,
+        retry_after=None,
+        rate_remaining=None,
+    ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
         env["GITMESH_TEST_REMOTE_CONTENTS"] = str(self.remote_contents)
@@ -348,6 +369,8 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_FAIL_AT", fail_at),
             ("GITMESH_TEST_FAIL_MODE", fail_mode),
             ("GITMESH_TEST_FAIL_STATUS", str(fail_status) if fail_status is not None else None),
+            ("GITMESH_TEST_RETRY_AFTER", retry_after),
+            ("GITMESH_TEST_RATE_REMAINING", rate_remaining),
         ):
             if value is None:
                 env.pop(key, None)
@@ -362,6 +385,11 @@ process.on("exit", saveCapture);
             timeout=30,
             check=False,
         )
+
+    def assert_safe_failure_output(self, result):
+        combined = result.stdout + result.stderr
+        for sensitive in (FAKE_GITHUB_TOKEN, FAKE_AUTHORIZATION, FAKE_REQUEST_BODY):
+            self.assertNotIn(sensitive, combined)
 
     def set_remote_snapshot(self, overrides=None):
         contents = {
@@ -503,7 +531,10 @@ process.on("exit", saveCapture);
                     fail_status=status,
                 )
                 self.assertNotEqual(result.returncode, 0)
-                self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+                if mode == "network":
+                    self.assertIn("Could not reach GitHub", result.stderr)
+                    self.assertIn("retry", result.stderr)
+                self.assert_safe_failure_output(result)
                 capture = json.loads(self.capture.read_text())
                 self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
                 self.assertEqual(capture["requests"][-1]["path"], "/repos/vitalitychems-dot/GitMesh" + route.split(" ", 1)[1])
@@ -516,11 +547,58 @@ process.on("exit", saveCapture);
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("HTTP 409", result.stderr)
-        self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
+        self.assertIn("branch changed while syncing", result.stderr)
+        self.assertIn("No force update was attempted.", result.stderr)
+        self.assert_safe_failure_output(result)
         capture = json.loads(self.capture.read_text())
         update = capture["requests"][-1]
         self.assertEqual(update["method"], "PATCH")
         self.assertIs(update["body"]["force"], False)
+
+    def test_authentication_and_permission_errors_give_safe_recovery_guidance(self):
+        auth_result = self.run_sync(
+            fail_at="GET /git/ref/heads/main",
+            fail_mode="http",
+            fail_status=401,
+        )
+        self.assertNotEqual(auth_result.returncode, 0)
+        self.assertIn("GITHUB_TOKEN Secret", auth_result.stderr)
+        self.assertIn("current", auth_result.stderr)
+        self.assert_safe_failure_output(auth_result)
+
+        permission_result = self.run_sync(
+            fail_at="GET /git/ref/heads/main",
+            fail_mode="http",
+            fail_status=403,
+        )
+        self.assertNotEqual(permission_result.returncode, 0)
+        self.assertIn("GitHub denied access", permission_result.stderr)
+        self.assertIn("Contents:read", permission_result.stderr)
+        self.assert_safe_failure_output(permission_result)
+
+    def test_rate_limit_and_transient_errors_give_safe_retry_guidance(self):
+        for status, retry_after in ((403, "30"), (429, None)):
+            with self.subTest(status=status, retry_after=retry_after):
+                rate_result = self.run_sync(
+                    fail_at="GET /git/ref/heads/main",
+                    fail_mode="http",
+                    fail_status=status,
+                    retry_after=retry_after,
+                )
+                self.assertNotEqual(rate_result.returncode, 0)
+                self.assertIn("rate limit", rate_result.stderr)
+                self.assertIn("then retry", rate_result.stderr)
+                self.assert_safe_failure_output(rate_result)
+
+        transient_result = self.run_sync(
+            fail_at="GET /git/ref/heads/main",
+            fail_mode="http",
+            fail_status=503,
+        )
+        self.assertNotEqual(transient_result.returncode, 0)
+        self.assertIn("temporarily unavailable", transient_result.stderr)
+        self.assertIn("Wait briefly and retry", transient_result.stderr)
+        self.assert_safe_failure_output(transient_result)
 
     def test_gitignore_excludes_local_vault_from_normal_git_operations(self):
         patterns = (ROOT / ".gitignore").read_text().splitlines()

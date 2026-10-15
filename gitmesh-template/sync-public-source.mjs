@@ -69,11 +69,51 @@ async function githubRequest(token, route, method = "GET", body = undefined, { a
       signal: AbortSignal.timeout(20_000),
     });
   } catch {
-    throw new Error(`GitHub request failed during ${method} ${route}.`);
+    throw new Error(
+      `Could not reach GitHub during ${method} ${route}. Check the connection and retry; no force update is attempted.`,
+    );
   }
   if (allowNotFound && response.status === 404) return null;
   if (!response.ok) {
-    throw new Error(`GitHub request failed with HTTP ${response.status} during ${method} ${route}.`);
+    const context = `${method} ${route} (HTTP ${response.status})`;
+    if (response.status === 401) {
+      throw new Error(
+        `GitHub rejected authentication during ${context}. Check that the GITHUB_TOKEN Secret is current and grants access to ${OWNER}/${REPOSITORY}.`,
+      );
+    }
+    if (response.status === 403 || response.status === 429) {
+      const retryAfter = response.headers?.get("retry-after");
+      const remaining = response.headers?.get("x-ratelimit-remaining");
+      if (response.status === 429 ||
+          (typeof retryAfter === "string" && retryAfter.length > 0) ||
+          remaining === "0") {
+        throw new Error(
+          `GitHub rate limit reached during ${context}. Wait for the limit to reset, then retry.`,
+        );
+      }
+      const contentsPermission = method === "GET" ? "Contents:read" : "Contents:write";
+      throw new Error(
+        `GitHub denied access during ${context}. Check repository access and the token's ${contentsPermission} permission.`,
+      );
+    }
+    if (response.status === 409 && method === "PATCH" && route.startsWith("/git/refs/heads/")) {
+      throw new Error(
+        `GitHub rejected the non-force branch update during ${context}. The branch changed while syncing; review it and retry. No force update was attempted.`,
+      );
+    }
+    if (response.status === 404) {
+      throw new Error(
+        `GitHub could not find the target during ${context}. Check the repository, branch, and token access.`,
+      );
+    }
+    if (response.status >= 500) {
+      throw new Error(
+        `GitHub is temporarily unavailable during ${context}. Wait briefly and retry; no force update was attempted.`,
+      );
+    }
+    throw new Error(
+      `GitHub rejected the request during ${context}. Check repository permissions and source-sync configuration, then retry.`,
+    );
   }
   try {
     return await response.json();
