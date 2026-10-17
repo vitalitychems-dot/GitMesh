@@ -1,3 +1,4 @@
 - [Hidden terminal input](hidden-terminal-input.md) — enter no-echo mode before showing credential prompts; test with immediate PTY input to catch echo races.
 - [Node stdin syntax checks](node-stdin-syntax-check.md) — syntax-check ES module snapshots from stdin with module mode; keep diagnostics captured because they can include source.
 - [Security preflight boundary](security-preflight-boundary.md) — keep the publish preflight unconditional; mock its Python subprocess in tests instead of adding a runtime bypass.
+- [Git hook subprocess context](git-hook-subprocess-context.md) — clear inherited Git location variables in hook subprocesses while preserving the active worktree index.
