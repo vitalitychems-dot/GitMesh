@@ -71,6 +71,8 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_hook_setup_preserves_existing_global_hooks_path",
   "test_hook_setup_preserves_existing_default_hooks",
   "test_hook_setup_refuses_linked_worktree_without_changing_config",
+  "test_hook_setup_enables_only_selected_linked_worktree_when_supported",
+  "test_hook_setup_refuses_worktree_opt_in_without_worktree_config_support",
   "test_embedded_credentials_report_lines_for_unicode_separators_without_leaking",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
   "test_preflight_safe_name_allowlist_matches_regression_tests",
@@ -345,6 +347,9 @@ function checkLocalCredentials() {
 function runStagedGitCommand(args, cwd, failureMessage) {
   const env = { ...process.env };
   delete env.GITHUB_TOKEN;
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_PREFIX"]) {
+    delete env[name];
+  }
   const result = spawnSync("git", args, {
     cwd,
     encoding: null,

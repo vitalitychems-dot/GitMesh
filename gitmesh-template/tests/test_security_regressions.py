@@ -2033,20 +2033,24 @@ class HookInstallerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_git(self, args):
+    def run_git_at(self, cwd, args):
         return subprocess.run(
             ["git", *args],
-            cwd=self.repo_root,
+            cwd=cwd,
             env=self.env,
             capture_output=True,
             text=True,
             timeout=30,
         )
 
-    def run_installer(self):
+    def run_git(self, args):
+        return self.run_git_at(self.repo_root, args)
+
+    def run_installer(self, cwd=None, args=()):
+        cwd = cwd or self.repo_root
         return subprocess.run(
-            ["node", str(self.template_root / HOOK_INSTALLER.name)],
-            cwd=self.repo_root,
+            ["node", str(cwd / "gitmesh-template" / HOOK_INSTALLER.name), *args],
+            cwd=cwd,
             env=self.env,
             capture_output=True,
             text=True,
@@ -2144,6 +2148,110 @@ class HookInstallerTests(unittest.TestCase):
         self.assertIn("No Git configuration was changed", output)
         self.assertEqual(self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode, 1)
         self.assertTrue((default_hooks / "pre-commit").exists())
+
+    def test_hook_setup_enables_only_selected_linked_worktree_when_supported(self):
+        self.run_git(["config", "--local", "extensions.worktreeConfig", "true"])
+        worktree_root = self.repo_root / "linked-worktree"
+        sibling_root = self.repo_root / "sibling-worktree"
+        added = self.run_git(["worktree", "add", "--detach", str(worktree_root), "HEAD"])
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        added_sibling = self.run_git(["worktree", "add", "--detach", str(sibling_root), "HEAD"])
+        self.assertEqual(added_sibling.returncode, 0, added_sibling.stdout + added_sibling.stderr)
+
+        result = self.run_installer(
+            cwd=worktree_root,
+            args=("--worktree-local",),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("for this worktree only", result.stdout)
+        self.assertIn("git config --worktree --unset core.hooksPath", result.stdout)
+        self.assertEqual(
+            self.run_git_at(
+                worktree_root,
+                ["config", "--worktree", "--get", "core.hooksPath"],
+            ).stdout.strip(),
+            "gitmesh-template/hooks",
+        )
+        for sibling in (self.repo_root, sibling_root):
+            self.assertEqual(
+                self.run_git_at(
+                    sibling,
+                    ["config", "--worktree", "--get", "core.hooksPath"],
+                ).returncode,
+                1,
+            )
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode,
+            1,
+        )
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "extensions.worktreeConfig"]).stdout.strip(),
+            "true",
+        )
+        self.assertEqual(self.global_config.read_text(), "")
+
+        repeated = self.run_installer(
+            cwd=worktree_root,
+            args=("--worktree-local",),
+        )
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertIn("already enabled for this worktree", repeated.stdout)
+
+        credential = "ghp_" + "W" * 36
+        readme = worktree_root / "gitmesh-template" / "README.md"
+        readme.write_text(f"staged_secret={credential}\n")
+        self.run_git_at(worktree_root, ["add", "gitmesh-template/README.md"])
+        original_head = self.run_git_at(worktree_root, ["rev-parse", "HEAD"]).stdout.strip()
+        commit = self.run_git_at(worktree_root, ["commit", "-m", "linked worktree hook check"])
+        output = commit.stdout + commit.stderr
+        self.assertNotEqual(commit.returncode, 0, output.replace(credential, "[redacted test credential]"))
+        self.assertIn("README.md (line 1)", output)
+        self.assertNotIn(credential, output)
+        self.assertEqual(
+            self.run_git_at(worktree_root, ["rev-parse", "HEAD"]).stdout.strip(),
+            original_head,
+        )
+        self.assertEqual(self.global_config.read_text(), "")
+
+    def test_hook_setup_refuses_worktree_opt_in_without_worktree_config_support(self):
+        nonlinked = self.run_installer(args=("--worktree-local",))
+        self.assertNotEqual(nonlinked.returncode, 0)
+        self.assertIn("only available in a linked Git worktree", nonlinked.stderr)
+        self.assertIn("No Git configuration was changed", nonlinked.stderr)
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode,
+            1,
+        )
+
+        worktree_root = self.repo_root / "linked-worktree"
+        added = self.run_git(["worktree", "add", "--detach", str(worktree_root), "HEAD"])
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        config_path_result = self.run_git_at(
+            worktree_root,
+            ["rev-parse", "--git-path", "config.worktree"],
+        )
+        self.assertEqual(config_path_result.returncode, 0)
+        config_path = pathlib.Path(config_path_result.stdout.strip())
+        if not config_path.is_absolute():
+            config_path = worktree_root / config_path
+        original_worktree_config = config_path.read_bytes() if config_path.exists() else None
+
+        result = self.run_installer(
+            cwd=worktree_root,
+            args=("--worktree-local",),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires extensions.worktreeConfig=true", result.stderr)
+        self.assertIn("No Git configuration was changed", result.stderr)
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode,
+            1,
+        )
+        self.assertEqual(
+            config_path.read_bytes() if config_path.exists() else None,
+            original_worktree_config,
+        )
+        self.assertEqual(self.global_config.read_text(), "")
 
     def test_hook_setup_refuses_linked_worktree_without_changing_config(self):
         worktree_root = self.repo_root / "linked-worktree"

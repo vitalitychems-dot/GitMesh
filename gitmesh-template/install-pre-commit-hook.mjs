@@ -136,7 +136,124 @@ function refuseSharedWorktreeSettings(repoRoot) {
   }
 }
 
-function installHook() {
+function parseOptions(args) {
+  if (args.length === 0) return { worktreeLocal: false };
+  if (args.length === 1 && args[0] === "--worktree-local") {
+    return { worktreeLocal: true };
+  }
+  throw new Error(
+    "Usage: node install-pre-commit-hook.mjs [--worktree-local]. No Git configuration was changed.",
+  );
+}
+
+function isLinkedWorktree(repoRoot) {
+  const gitDirResult = runGit(["rev-parse", "--absolute-git-dir"], repoRoot);
+  const commonDirResult = runGit(["rev-parse", "--git-common-dir"], repoRoot);
+  if (gitDirResult.status !== 0 || commonDirResult.status !== 0) {
+    throw new Error("Could not determine the Git worktree scope; no Git configuration was changed.");
+  }
+  const gitDir = path.resolve(repoRoot, decodeGitOutput(
+    gitDirResult.stdout,
+    "Could not determine the Git worktree scope; no Git configuration was changed.",
+  ));
+  const commonDir = path.resolve(repoRoot, decodeGitOutput(
+    commonDirResult.stdout,
+    "Could not determine the Git worktree scope; no Git configuration was changed.",
+  ));
+  return gitDir !== commonDir;
+}
+
+function worktreeConfigIsEnabled(repoRoot) {
+  const result = runGit(
+    ["config", "--bool", "--local", "--get", "extensions.worktreeConfig"],
+    repoRoot,
+  );
+  if (result.status === 1) return false;
+  if (result.status !== 0) {
+    throw new Error(
+      "Could not verify Git's worktree configuration support; no Git configuration was changed.",
+    );
+  }
+  const value = decodeGitOutput(
+    result.stdout,
+    "Could not safely inspect Git's worktree configuration support; no Git configuration was changed.",
+  );
+  return value.toLowerCase() === "true";
+}
+
+function readWorktreeHookPathValues(repoRoot) {
+  try {
+    return readHookPathValues(["--worktree"], repoRoot);
+  } catch {
+    throw new Error(
+      "Git could not safely inspect worktree-local hook settings. Confirm Git supports worktree configuration; no Git configuration was changed.",
+    );
+  }
+}
+
+function installWorktreeLocalHook(repoRoot, desiredHooksPath) {
+  if (!isLinkedWorktree(repoRoot)) {
+    throw new Error(
+      "The --worktree-local option is only available in a linked Git worktree. No Git configuration was changed.",
+    );
+  }
+  if (!worktreeConfigIsEnabled(repoRoot)) {
+    throw new Error(
+      "Worktree-local setup requires extensions.worktreeConfig=true in this repository. " +
+      "The setting is not enabled. No Git configuration was changed.",
+    );
+  }
+
+  const worktreeValues = readWorktreeHookPathValues(repoRoot);
+  if (worktreeValues.length > 0) {
+    if (
+      worktreeValues.length === 1 &&
+      worktreeValues[0] &&
+      path.resolve(repoRoot, worktreeValues[0]) === path.resolve(repoRoot, desiredHooksPath)
+    ) {
+      console.log("The GitMesh pre-commit check is already enabled for this worktree.");
+      return;
+    }
+    throw existingHookGuidance(
+      repoRoot,
+      "A worktree-local Git hooks path is already configured.",
+    );
+  }
+
+  const localValues = readHookPathValues(["--local"], repoRoot);
+  if (localValues.length > 0) {
+    throw existingHookGuidance(
+      repoRoot,
+      "A repository-local Git hooks path is already configured.",
+    );
+  }
+  const effectiveValues = readHookPathValues([], repoRoot);
+  if (effectiveValues.length > 0) {
+    throw existingHookGuidance(
+      repoRoot,
+      "A Git hooks path is configured outside this worktree.",
+      true,
+    );
+  }
+
+  inspectDefaultHooks(repoRoot);
+  const result = runGit(
+    ["config", "--worktree", "core.hooksPath", desiredHooksPath],
+    repoRoot,
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      "Could not enable the GitMesh pre-commit check for this worktree; no global Git settings were changed.",
+    );
+  }
+  console.log(
+    "Enabled the GitMesh pre-commit check for this worktree only. " +
+    "To disable it, run: git config --worktree --unset core.hooksPath",
+  );
+}
+
+function installHook(args = process.argv.slice(2)) {
+  const { worktreeLocal } = parseOptions(args);
   requireHookFile();
   const rootResult = runGit(["rev-parse", "--show-toplevel"], ROOT);
   if (rootResult.status !== 0) {
@@ -156,6 +273,11 @@ function installHook() {
     );
   }
   const desiredHooksPath = path.relative(repoRoot, HOOK_DIRECTORY).split(path.sep).join("/");
+  if (worktreeLocal) {
+    installWorktreeLocalHook(repoRoot, desiredHooksPath);
+    return;
+  }
+
   const localValues = readHookPathValues(["--local"], repoRoot);
   if (localValues.length > 0) {
     if (
