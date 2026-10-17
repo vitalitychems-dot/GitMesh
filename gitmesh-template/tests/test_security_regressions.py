@@ -2839,6 +2839,56 @@ process.on("exit", saveCapture);
                 capture = json.loads(self.capture.read_text())
                 self.assertEqual(capture["requests"], [])
 
+    def test_security_preflight_multiple_subcases_are_counted_safely(self):
+        parent_test_name = "test_sync_publishes_only_the_fixed_source_allowlist"
+        first_subcase = "PRIVATE_SUBCASE_DESCRIPTION_ALPHA"
+        second_subcase = "PRIVATE_SUBCASE_DESCRIPTION_BETA"
+        source_sentinel = "PREFLIGHT_SUBCASE_SOURCE_CONTENT_SENTINEL"
+        credential_sentinel = "ghp_" + "V" * 36
+        stdout_output = (
+            f"FAIL: {parent_test_name} (__main__.GitHubSyncTests.{parent_test_name}) "
+            f"(case='{first_subcase}')\n"
+            f"ERROR: {parent_test_name} (__main__.GitHubSyncTests.{parent_test_name}) "
+            f"(case='{second_subcase}')\n"
+            f"{source_sentinel}\n{credential_sentinel}"
+        )
+        stderr_output = "PREFLIGHT_SUBCASE_PRIVATE_DIAGNOSTIC_SENTINEL"
+        result = self.run_sync(
+            preflight_mode="failure",
+            preflight_output=stdout_output,
+            preflight_stderr=stderr_output,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Security regression preflight failed in: "
+            f"{parent_test_name} (2 failing subcases)",
+            result.stderr,
+        )
+        self.assertIn(
+            "Rerun only the named checks from the workspace root: "
+            "python3 gitmesh-template/tests/test_security_regressions.py "
+            f"GitHubSyncTests.{parent_test_name}.",
+            result.stderr,
+        )
+        for private_output in (
+            first_subcase,
+            second_subcase,
+            source_sentinel,
+            credential_sentinel,
+            stderr_output,
+            stdout_output,
+            FAKE_GITHUB_TOKEN,
+        ):
+            self.assertNotIn(private_output, output)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(len(capture["preflightCalls"]), 2)
+        self.assertFalse(any(call["hasGitHubToken"] for call in capture["preflightCalls"]))
+
     def test_security_preflight_timeout_and_interruption_are_clear_and_private(self):
         stdout_output = (
             "PREFLIGHT_CHILD_STDOUT_SENTINEL\n"
