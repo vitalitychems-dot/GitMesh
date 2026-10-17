@@ -383,7 +383,7 @@ childProcess.spawnSync = (command, ...args) => {
         error: undefined,
         status: 0,
         signal: null,
-        stdout: `${version}\n`,
+        stdout: process.env.GITMESH_TEST_PREFLIGHT_VERSION_STDOUT ?? `${version}\n`,
         stderr: process.env.GITMESH_TEST_PREFLIGHT_VERSION_STDERR ?? "",
         pid: 123,
         output: [],
@@ -642,6 +642,7 @@ process.on("exit", saveCapture);
         preflight_output=None,
         preflight_stderr=None,
         preflight_python_version=None,
+        preflight_version_stdout=None,
         preflight_version_stderr=None,
         moved_head_sha=None,
         second_moved_head_sha=None,
@@ -675,6 +676,7 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_PREFLIGHT_OUTPUT", preflight_output),
             ("GITMESH_TEST_PREFLIGHT_STDERR", preflight_stderr),
             ("GITMESH_TEST_PREFLIGHT_PYTHON_VERSION", preflight_python_version),
+            ("GITMESH_TEST_PREFLIGHT_VERSION_STDOUT", preflight_version_stdout),
             ("GITMESH_TEST_PREFLIGHT_VERSION_STDERR", preflight_version_stderr),
             ("GITMESH_TEST_MOVED_HEAD_SHA", moved_head_sha),
             ("GITMESH_TEST_SECOND_MOVED_HEAD_SHA", second_moved_head_sha),
@@ -2658,6 +2660,58 @@ process.on("exit", saveCapture);
             ],
         )
         self.assertFalse(capture["preflightCalls"][0]["hasGitHubToken"])
+
+    def test_invalid_python_version_output_stops_before_preflight_and_github_without_leaking(self):
+        source_sentinel = "PYTHON_VERSION_STDOUT_SOURCE_SENTINEL"
+        extra_text_sentinel = "PYTHON_VERSION_EXTRA_TEXT_SENTINEL"
+        credential_sentinel = "ghp_" + "S" * 36
+        version_stderr = f"PYTHON_VERSION_STDERR_PRIVATE_SENTINEL\n{credential_sentinel}"
+        cases = (
+            ("empty", ""),
+            ("malformed", f"not-a-version {source_sentinel}"),
+            ("extra text", f"3.13 {extra_text_sentinel}"),
+            ("extra line", f"3.13\n{extra_text_sentinel}"),
+        )
+        for label, version_stdout in cases:
+            with self.subTest(response=label):
+                result = self.run_sync(
+                    preflight_mode="success",
+                    preflight_version_stdout=version_stdout,
+                    preflight_version_stderr=version_stderr,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "Could not safely determine the python3 version for the security regression preflight.",
+                    result.stderr,
+                )
+                self.assertIn(
+                    "Python 3.9 or newer is required for the security regression preflight.",
+                    result.stderr,
+                )
+                for private_text in (
+                    source_sentinel,
+                    extra_text_sentinel,
+                    credential_sentinel,
+                    version_stderr,
+                ):
+                    self.assertNotIn(private_text, output)
+                if version_stdout:
+                    self.assertNotIn(version_stdout, output)
+                self.assert_safe_failure_output(result)
+
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+                self.assertEqual(len(capture["preflightCalls"]), 1)
+                self.assertEqual(
+                    capture["preflightCalls"][0]["args"],
+                    [
+                        "-c",
+                        "import sys; print('%s.%s' % (sys.version_info[0], sys.version_info[1]))",
+                    ],
+                )
+                self.assertFalse(capture["preflightCalls"][0]["hasGitHubToken"])
 
     def test_failed_security_preflight_stops_before_github_without_leaking_output(self):
         expected_source_reads = Counter(
