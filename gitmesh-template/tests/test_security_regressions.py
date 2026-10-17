@@ -1836,6 +1836,90 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking(self):
+        source_path = self.source_root / "README.md"
+        original_content = source_path.read_bytes()
+        cases = (
+            (
+                "leading separators",
+                "\r\n\u2028\r",
+                ("ghp_" + "A" * 36,),
+                (),
+                "\n",
+                (4,),
+            ),
+            (
+                "trailing separators",
+                "SAFE_TRAILING_HEADER\r\n",
+                ("github_pat_" + "B" * 40,),
+                (),
+                "\r\n\u2028\u2029\r\r",
+                (2,),
+            ),
+            (
+                "repeated separators",
+                "SAFE_REPEATED_HEADER\u2028\u2028",
+                ("npm_" + "C" * 36, "xoxb-" + "D" * 24, "sk_live_" + "E" * 24),
+                ("\r\r", "\u2029\u2029"),
+                "",
+                (3, 5, 7),
+            ),
+        )
+
+        try:
+            for label, prefix, credentials, separators, suffix, expected_lines in cases:
+                credential_lines = tuple(
+                    f"token_{index}={credential}"
+                    for index, credential in enumerate(credentials, start=1)
+                )
+                source_text = prefix + credential_lines[0]
+                for separator, credential_line in zip(separators, credential_lines[1:]):
+                    source_text += separator + credential_line
+                source_text += suffix
+                source_path.write_bytes(source_text.encode("utf-8"))
+
+                expected_line_label = (
+                    f"line {expected_lines[0]}"
+                    if len(expected_lines) == 1
+                    else f"lines {', '.join(str(line) for line in expected_lines)}"
+                )
+                for mode, args, token_value in (
+                    ("sync", (), FAKE_GITHUB_TOKEN),
+                    ("local check without token", ("--check-credentials",), None),
+                ):
+                    with self.subTest(case=label, mode=mode):
+                        result = self.run_sync(args=args, token_value=token_value)
+                        output = result.stdout + result.stderr
+                        safe_output = output
+                        private_texts = [
+                            *credentials,
+                            *credential_lines,
+                            "SAFE_TRAILING_HEADER",
+                            "SAFE_REPEATED_HEADER",
+                            FAKE_GITHUB_TOKEN,
+                        ]
+                        for private_text in private_texts:
+                            safe_output = safe_output.replace(
+                                private_text,
+                                "[redacted test content]",
+                            )
+
+                        self.assertNotEqual(result.returncode, 0, safe_output)
+                        self.assertIn(
+                            f"{source_path.name} ({expected_line_label})",
+                            result.stderr,
+                            safe_output,
+                        )
+                        self.assertIn("No GitHub requests were made", result.stderr, safe_output)
+                        for private_text in private_texts:
+                            self.assertFalse(private_text in output, safe_output)
+                        self.assert_safe_failure_output(result)
+
+                        capture = json.loads(self.capture.read_text())
+                        self.assertEqual(capture["requests"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"
