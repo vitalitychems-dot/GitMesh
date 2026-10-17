@@ -963,7 +963,7 @@ process.on("exit", saveCapture);
         result = self.run_sync(args=("--unexpected-option",))
         self.assertEqual(result.returncode, 2)
         self.assertIn(
-            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-staged-credentials].",
+            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-staged-credentials | --check-syntax].",
             result.stderr,
         )
         self.assert_safe_failure_output(result)
@@ -990,6 +990,73 @@ process.on("exit", saveCapture);
             for event in capture["filesystemReads"]
         )
         self.assertEqual(observed_reads, expected_reads)
+
+    def test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely(self):
+        javascript_sources = [
+            source for source in ALLOWED_SOURCE_NAMES if source.endswith(".mjs")
+        ]
+        expected_reads = Counter(
+            (method, str((self.source_root / source).resolve()))
+            for source in javascript_sources
+            for method in ("lstatSync", "openSync", "readFileSync")
+        )
+
+        success = self.run_sync(token_value=None, args=("--check-syntax",))
+        self.assertEqual(success.returncode, 0)
+        self.assertIn(
+            "JavaScript syntax check passed for 2 allowlisted JavaScript source files",
+            success.stdout,
+        )
+        self.assertNotIn("Credential check passed", success.stdout)
+        self.assert_safe_failure_output(success)
+        success_capture = json.loads(self.capture.read_text())
+        self.assertEqual(success_capture["requests"], [])
+        self.assertEqual(success_capture["preflightCalls"], [])
+        success_reads = Counter(
+            (event["method"], event["path"])
+            for event in success_capture["filesystemReads"]
+        )
+        self.assertEqual(success_reads, expected_reads)
+
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_content = source_path.read_bytes()
+        invalid_line = "const INVALID_LOCAL_SYNTAX_SENTINEL = ;"
+        invalid_source = f"const SAFE_SYNTAX_CONTEXT = 1;\n{invalid_line}\n"
+        try:
+            source_path.write_text(invalid_source)
+            failure = self.run_sync(token_value=None, args=("--check-syntax",))
+            output = failure.stdout + failure.stderr
+
+            self.assertNotEqual(failure.returncode, 0)
+            self.assertIn(
+                f"{source_path.name} (line 2, column {invalid_line.index(';') + 1})",
+                failure.stderr,
+            )
+            self.assertIn(
+                "Review and correct this file, save it, then rerun the local syntax check with --check-syntax.",
+                failure.stderr,
+            )
+            self.assertIn("No GitHub requests were made", failure.stderr)
+            self.assertNotIn(invalid_source, output)
+            self.assertNotIn(invalid_line, output)
+            self.assertNotIn("SAFE_SYNTAX_CONTEXT", output)
+            self.assertNotIn("INVALID_LOCAL_SYNTAX_SENTINEL", output)
+            self.assertNotIn("SyntaxError", output)
+            self.assertNotIn("Unexpected token", output)
+            self.assertNotIn("[stdin]", output)
+            self.assertNotIn("Node.js v", output)
+            self.assert_safe_failure_output(failure)
+
+            failure_capture = json.loads(self.capture.read_text())
+            self.assertEqual(failure_capture["requests"], [])
+            self.assertEqual(failure_capture["preflightCalls"], [])
+            failure_reads = Counter(
+                (event["method"], event["path"])
+                for event in failure_capture["filesystemReads"]
+            )
+            self.assertEqual(failure_reads, expected_reads)
+        finally:
+            source_path.write_bytes(original_content)
 
     def test_local_credential_check_reports_location_without_exposing_value(self):
         source_path = self.source_root / "README.md"

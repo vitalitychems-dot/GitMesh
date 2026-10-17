@@ -60,6 +60,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_changed_source_updates_only_the_changed_allowlisted_file",
   "test_missing_secret_fails_before_any_github_request",
   "test_local_credential_check_passes_without_token_or_github_requests",
+  "test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely",
   "test_local_credential_check_reports_location_without_exposing_value",
   "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
@@ -118,12 +119,17 @@ function findEmbeddedCredentialLines(text) {
 
 function nonTextSourceError(source, operation = "sync") {
   const isLocalCheck = operation === "local-check";
+  const isSyntaxCheck = operation === "syntax-check";
   return new Error(
-    `Refusing to ${isLocalCheck ? "check" : "sync"} a non-text source file: ${source}. ` +
+    `Refusing to ${
+      isSyntaxCheck ? "check JavaScript in" : isLocalCheck ? "check" : "sync"
+    } a non-text source file: ${source}. ` +
       "Save the intended source as valid UTF-8 plain text, then " +
-      (isLocalCheck
-        ? "rerun the local credential check with --check-credentials. "
-        : "rerun sync. ") +
+      (isSyntaxCheck
+        ? "rerun the local syntax check with --check-syntax. "
+        : isLocalCheck
+          ? "rerun the local credential check with --check-credentials. "
+          : "rerun sync. ") +
       "No GitHub requests were made.",
   );
 }
@@ -202,7 +208,7 @@ function runSecurityPreflight() {
   }
 }
 
-function validateJavaScriptSyntax(content, source) {
+function validateJavaScriptSyntax(content, source, operation = "sync") {
   const result = spawnSync(process.execPath, ["--input-type=module", "--check"], {
     input: content,
     encoding: "utf8",
@@ -211,13 +217,17 @@ function validateJavaScriptSyntax(content, source) {
     env: { PATH: process.env.PATH ?? "" },
   });
   if (result.error || result.status !== 0) {
+    const isSyntaxCheck = operation === "syntax-check";
     const location = syntaxErrorLocation(result.stderr);
     const locationText = location
       ? ` (line ${location.line}, column ${location.column})`
       : "";
     throw new Error(
-      `Refusing to sync JavaScript that fails Node syntax validation: ${source}${locationText}. ` +
-      "Review and correct this file, save it, then rerun sync. No GitHub requests were made.",
+      `Refusing to ${isSyntaxCheck ? "check" : "sync"} JavaScript that fails Node syntax validation: ${source}${locationText}. ` +
+      (isSyntaxCheck
+        ? "Review and correct this file, save it, then rerun the local syntax check with --check-syntax. "
+        : "Review and correct this file, save it, then rerun sync. ") +
+      "No GitHub requests were made.",
     );
   }
 }
@@ -244,11 +254,18 @@ function syntaxErrorLocation(nodeDiagnostics) {
   return null;
 }
 
-function validateSourceFileInfo(fileInfo, source) {
+function validateSourceFileInfo(fileInfo, source, operation = "sync") {
   if (!fileInfo.isFile() ||
       fileInfo.isSymbolicLink() ||
       fileInfo.nlink > 1n ||
       fileInfo.size > BigInt(MAX_SOURCE_BYTES)) {
+    if (operation === "syntax-check") {
+      throw new Error(
+        `Refusing to check an invalid, linked, or oversized JavaScript source file: ${source}. ` +
+        "Save it as a regular file within the size limit, then rerun the local syntax check with --check-syntax. " +
+        "No GitHub requests were made.",
+      );
+    }
     throw new Error(
       `Refusing to sync an invalid, linked, or oversized source file: ${source}. ` +
       "Review and save the intended file as a regular file within the size limit, then rerun sync. " +
@@ -266,17 +283,23 @@ function sameFileSnapshot(left, right) {
     left.ctimeNs === right.ctimeNs;
 }
 
-function readSourceContent(sourcePath, source) {
+function readSourceContent(sourcePath, source, operation = "sync") {
   let pathInfo;
   try {
     pathInfo = fs.lstatSync(sourcePath, { bigint: true });
   } catch {
+    if (operation === "syntax-check") {
+      throw new Error(
+        `Refusing to check an unavailable JavaScript source file: ${source}. ` +
+        "Review and save the intended file state, then rerun the local syntax check with --check-syntax. No GitHub requests were made.",
+      );
+    }
     throw new Error(
       `Refusing to sync an unavailable source file: ${source}. ` +
       "Review and save the intended file state, then rerun sync. No GitHub requests were made.",
     );
   }
-  validateSourceFileInfo(pathInfo, source);
+  validateSourceFileInfo(pathInfo, source, operation);
 
   let descriptor;
   try {
@@ -288,7 +311,7 @@ function readSourceContent(sourcePath, source) {
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
     );
     const openedInfo = fs.fstatSync(descriptor, { bigint: true });
-    validateSourceFileInfo(openedInfo, source);
+    validateSourceFileInfo(openedInfo, source, operation);
     if (!sameFileSnapshot(pathInfo, openedInfo)) {
       throw new Error("The source file changed after its metadata check.");
     }
@@ -300,6 +323,12 @@ function readSourceContent(sourcePath, source) {
     }
     return content;
   } catch {
+    if (operation === "syntax-check") {
+      throw new Error(
+        `Refusing to check a JavaScript source file that changed or could not be safely opened: ${source}. ` +
+        "Review and save the intended file state, then rerun the local syntax check with --check-syntax. No GitHub requests were made.",
+      );
+    }
     throw new Error(
       `Refusing to sync a source file that changed or could not be safely opened: ${source}. ` +
       "Review and save the intended file state, then rerun sync. No GitHub requests were made.",
@@ -315,10 +344,18 @@ function readSourceContent(sourcePath, source) {
   }
 }
 
-function readSourceFiles({ validateSyntax = true, operation = "sync" } = {}) {
-  const sourceFiles = ALLOWED_FILES.map(({ source, target }) => {
+function readSourceFiles({
+  validateSyntax = true,
+  validateCredentials = true,
+  javascriptOnly = false,
+  operation = "sync",
+} = {}) {
+  const allowlistedFiles = javascriptOnly
+    ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
+    : ALLOWED_FILES;
+  const sourceFiles = allowlistedFiles.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
-    const content = readSourceContent(sourcePath, source);
+    const content = readSourceContent(sourcePath, source, operation);
     if (content.includes(0)) {
       throw nonTextSourceError(source, operation);
     }
@@ -332,13 +369,13 @@ function readSourceFiles({ validateSyntax = true, operation = "sync" } = {}) {
       source,
       target,
       content,
-      credentialLines: findEmbeddedCredentialLines(text),
+      credentialLines: validateCredentials ? findEmbeddedCredentialLines(text) : [],
     };
   });
   const credentialFindings = sourceFiles.filter(({ credentialLines }) =>
     credentialLines.length > 0
   );
-  if (credentialFindings.length > 0) {
+  if (validateCredentials && credentialFindings.length > 0) {
     const locations = credentialFindings.map(({ source, credentialLines }) => {
       const lineLabel = credentialLines.length === 1
         ? `line ${credentialLines[0]}`
@@ -365,7 +402,7 @@ function readSourceFiles({ validateSyntax = true, operation = "sync" } = {}) {
   if (validateSyntax) {
     for (const { source, content } of sourceFiles) {
       if (path.extname(source) === ".mjs") {
-        validateJavaScriptSyntax(content, source);
+        validateJavaScriptSyntax(content, source, operation);
       }
     }
   }
@@ -379,6 +416,18 @@ function checkLocalCredentials() {
   });
   console.log(
     `Credential check passed: no credential-like values found in ${files.length} allowlisted source files.`,
+  );
+}
+
+function checkLocalJavaScriptSyntax() {
+  const files = readSourceFiles({
+    validateSyntax: true,
+    validateCredentials: false,
+    javascriptOnly: true,
+    operation: "syntax-check",
+  });
+  console.log(
+    `JavaScript syntax check passed for ${files.length} allowlisted JavaScript source files. No GitHub requests were made.`,
   );
 }
 
@@ -689,18 +738,48 @@ async function previewSource(token, files) {
 }
 
 function parseArguments(args) {
-  if (args.length === 0) return { dryRun: false, checkCredentials: false, checkStagedCredentials: false };
+  if (args.length === 0) {
+    return {
+      dryRun: false,
+      checkCredentials: false,
+      checkStagedCredentials: false,
+      checkSyntax: false,
+    };
+  }
   if (args.length === 1 && args[0] === "--dry-run") {
-    return { dryRun: true, checkCredentials: false, checkStagedCredentials: false };
+    return {
+      dryRun: true,
+      checkCredentials: false,
+      checkStagedCredentials: false,
+      checkSyntax: false,
+    };
   }
   if (args.length === 1 && args[0] === "--check-credentials") {
-    return { dryRun: false, checkCredentials: true, checkStagedCredentials: false };
+    return {
+      dryRun: false,
+      checkCredentials: true,
+      checkStagedCredentials: false,
+      checkSyntax: false,
+    };
   }
   if (args.length === 1 && args[0] === "--check-staged-credentials") {
-    return { dryRun: false, checkCredentials: false, checkStagedCredentials: true };
+    return {
+      dryRun: false,
+      checkCredentials: false,
+      checkStagedCredentials: true,
+      checkSyntax: false,
+    };
+  }
+  if (args.length === 1 && args[0] === "--check-syntax") {
+    return {
+      dryRun: false,
+      checkCredentials: false,
+      checkStagedCredentials: false,
+      checkSyntax: true,
+    };
   }
   throw new Error(
-    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-staged-credentials].",
+    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-staged-credentials | --check-syntax].",
   );
 }
 
@@ -771,6 +850,8 @@ try {
     checkStagedCredentials();
   } else if (options.checkCredentials) {
     checkLocalCredentials();
+  } else if (options.checkSyntax) {
+    checkLocalJavaScriptSyntax();
   } else {
     syncSource(options).catch((error) => {
       console.error(error instanceof Error ? error.message : "Source sync failed.");
