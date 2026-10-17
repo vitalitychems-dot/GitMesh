@@ -1279,22 +1279,30 @@ process.on("exit", saveCapture);
 
     def test_invalid_javascript_stops_before_github_without_printing_source(self):
         source_path = self.source_root / "gitmesh-ultimate-core.mjs"
-        invalid_source = "const INVALID_JS_SOURCE_SENTINEL = ;\n"
+        invalid_line = "const INVALID_JS_SOURCE_SENTINEL = ;"
+        invalid_source = f"const SAFE_SYNTAX_CONTEXT = 1;\n{invalid_line}\n"
         source_path.write_text(invalid_source)
 
         result = self.run_sync()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Node syntax validation", result.stderr)
-        self.assertIn(source_path.name, result.stderr)
+        self.assertIn(
+            f"{source_path.name} (line 2, column {invalid_line.index(';') + 1})",
+            result.stderr,
+        )
         self.assertIn(
             "Review and correct this file, save it, then rerun sync. No GitHub requests were made.",
             result.stderr,
         )
-        self.assertNotIn(invalid_source.strip(), result.stdout + result.stderr)
-        self.assertNotIn("INVALID_JS_SOURCE_SENTINEL", result.stdout + result.stderr)
-        self.assertNotIn("SyntaxError", result.stdout + result.stderr)
-        self.assertNotIn("Unexpected token", result.stdout + result.stderr)
-        self.assertNotIn("Node.js v", result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        self.assertNotIn(invalid_source, output)
+        self.assertNotIn(invalid_line, output)
+        self.assertNotIn("SAFE_SYNTAX_CONTEXT", output)
+        self.assertNotIn("INVALID_JS_SOURCE_SENTINEL", output)
+        self.assertNotIn("SyntaxError", output)
+        self.assertNotIn("Unexpected token", output)
+        self.assertNotIn("[stdin]", output)
+        self.assertNotIn("Node.js v", output)
         self.assert_safe_failure_output(result)
 
         capture = json.loads(self.capture.read_text())

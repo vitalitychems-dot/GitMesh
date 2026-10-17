@@ -211,11 +211,37 @@ function validateJavaScriptSyntax(content, source) {
     env: { PATH: process.env.PATH ?? "" },
   });
   if (result.error || result.status !== 0) {
+    const location = syntaxErrorLocation(result.stderr);
+    const locationText = location
+      ? ` (line ${location.line}, column ${location.column})`
+      : "";
     throw new Error(
-      `Refusing to sync JavaScript that fails Node syntax validation: ${source}. ` +
+      `Refusing to sync JavaScript that fails Node syntax validation: ${source}${locationText}. ` +
       "Review and correct this file, save it, then rerun sync. No GitHub requests were made.",
     );
   }
+}
+
+function syntaxErrorLocation(nodeDiagnostics) {
+  if (typeof nodeDiagnostics !== "string") return null;
+  const lines = nodeDiagnostics.split(/\r\n|\n|\r/);
+  for (let index = 0; index < lines.length - 2; index += 1) {
+    const header = /^\[stdin\]:(\d+)(?::(\d+))?$/.exec(lines[index]);
+    if (!header) continue;
+
+    const line = Number(header[1]);
+    const caret = /^[\t ]*\^/.exec(lines[index + 2]);
+    const column = header[2] ? Number(header[2]) : caret?.[0].length;
+    if (
+      Number.isSafeInteger(line) &&
+      line > 0 &&
+      Number.isSafeInteger(column) &&
+      column > 0
+    ) {
+      return { line, column };
+    }
+  }
+  return null;
 }
 
 function validateSourceFileInfo(fileInfo, source) {
