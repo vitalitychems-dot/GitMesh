@@ -25,16 +25,19 @@ const ALLOWED_FILES = [
   },
 ];
 const EMBEDDED_CREDENTIAL_PATTERNS = [
-  /\bgh[pousr]_[A-Za-z0-9]{30,}\b/,
-  /\bgithub_pat_[A-Za-z0-9_]{30,}\b/,
-  /\bglpat-[A-Za-z0-9_-]{20,}\b/,
-  /\bnpm_[A-Za-z0-9]{30,}\b/,
-  /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/,
-  /\bAIza[0-9A-Za-z_-]{35}\b/,
-  /\bsk-(?:proj|admin|svcacct)-[A-Za-z0-9_-]{20,}\b/,
-  /\bsk-[A-Za-z0-9]{40,}\b/,
-  /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/,
-  /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/,
+  { id: "github-prefixed-token", pattern: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/ },
+  { id: "github-fine-grained-token", pattern: /\bgithub_pat_[A-Za-z0-9_]{30,}\b/ },
+  { id: "gitlab-token", pattern: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
+  { id: "npm-token", pattern: /\bnpm_[A-Za-z0-9]{30,}\b/ },
+  { id: "slack-token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/ },
+  { id: "google-api-key", pattern: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+  { id: "openai-prefixed-key", pattern: /\bsk-(?:proj|admin|svcacct)-[A-Za-z0-9_-]{20,}\b/ },
+  { id: "openai-legacy-key", pattern: /\bsk-[A-Za-z0-9]{40,}\b/ },
+  { id: "stripe-secret-key", pattern: /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/ },
+  {
+    id: "private-key-header",
+    pattern: /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/,
+  },
 ];
 const SAFE_PREFLIGHT_TEST_CLASSES = new Set([
   "SigilRotationTests",
@@ -73,6 +76,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
   "test_precommit_hook_blocks_every_supported_credential_pattern",
+  "test_precommit_hook_vectors_cover_every_scanner_pattern",
   "test_precommit_hook_reports_credentials_from_every_staged_source_file",
   "test_precommit_hook_blocks_when_node_is_too_old_without_leaking_output",
   "test_precommit_hook_rejects_non_text_staged_files_without_leaking_contents",
@@ -138,7 +142,7 @@ function findEmbeddedCredentialLines(text) {
   return text
     .split(/\r\n|[\n\r\u2028\u2029]/)
     .flatMap((line, index) =>
-      EMBEDDED_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(line))
+      EMBEDDED_CREDENTIAL_PATTERNS.some(({ pattern }) => pattern.test(line))
         ? [index + 1]
         : [],
     );
