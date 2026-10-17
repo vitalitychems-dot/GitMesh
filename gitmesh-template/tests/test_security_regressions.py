@@ -2689,7 +2689,6 @@ process.on("exit", saveCapture);
                 "Install or upgrade Python to 3.9 or newer, make python3 available on PATH, then rerun the regression checks and sync",
             ),
             ("timeout", "python timeout", (), "preflight timed out"),
-            ("output-limit", "large output", (), "exceeded its output limit"),
         )
         recognized_failure_stderr = None
         for preflight_mode, mode, args, expected_summary in cases:
@@ -2829,6 +2828,62 @@ process.on("exit", saveCapture);
                 self.assert_safe_failure_output(result)
                 capture = json.loads(self.capture.read_text())
                 self.assertEqual(capture["requests"], [])
+
+    def test_security_preflight_output_limit_hides_child_output_and_stops_before_github(self):
+        stdout_output = (
+            "PREFLIGHT_CHILD_STDOUT_SENTINEL\n"
+            "PREFLIGHT_SOURCE_CONTENT_SENTINEL\n"
+            "ghp_" + "Q" * 36
+        )
+        stderr_output = (
+            "PREFLIGHT_CHILD_STDERR_SENTINEL\n"
+            "PREFLIGHT_PRIVATE_DIAGNOSTIC_SENTINEL\n"
+        )
+        for args in ((), ("--dry-run",)):
+            with self.subTest(args=args):
+                result = self.run_sync(
+                    args=args,
+                    preflight_mode="output-limit",
+                    preflight_output=stdout_output,
+                    preflight_stderr=stderr_output,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(
+                    "Security regression preflight exceeded its output limit",
+                    result.stderr,
+                )
+                self.assertIn(
+                    "Run locally from the workspace root: "
+                    "python3 gitmesh-template/tests/test_security_regressions.py.",
+                    result.stderr,
+                )
+                self.assertIn("No GitHub requests were made", result.stderr)
+                for private_output in (
+                    stdout_output,
+                    stderr_output,
+                    "PREFLIGHT_CHILD_STDOUT_SENTINEL",
+                    "PREFLIGHT_SOURCE_CONTENT_SENTINEL",
+                    "PREFLIGHT_CHILD_STDERR_SENTINEL",
+                    "PREFLIGHT_PRIVATE_DIAGNOSTIC_SENTINEL",
+                    "ghp_" + "Q" * 36,
+                    FAKE_GITHUB_TOKEN,
+                ):
+                    self.assertNotIn(private_output, output)
+                self.assert_safe_failure_output(result)
+
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+                self.assertEqual(len(capture["preflightCalls"]), 2)
+                self.assertFalse(
+                    any(call["hasGitHubToken"] for call in capture["preflightCalls"])
+                )
+                self.assertEqual(
+                    capture["preflightCalls"][1]["args"],
+                    [str(self.source_root / "tests" / "test_security_regressions.py")],
+                )
 
     def test_malformed_credentials_fail_before_reading_sources_or_requesting_github(self):
         for bad_value in ("", "bad\ntoken", "x" * 4097):
