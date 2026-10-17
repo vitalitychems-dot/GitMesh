@@ -1838,6 +1838,52 @@ process.on("exit", saveCapture);
         capture = json.loads(self.capture.read_text())
         self.assertEqual(capture["requests"], [])
 
+    def test_javascript_syntax_locations_are_accurate_with_tabs_and_crlf_without_leaking_source(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_content = source_path.read_bytes()
+        cases = (
+            (
+                "tab",
+                b"const SAFE_SYNTAX_CONTEXT = 1;\n\tconst TAB_SYNTAX_SOURCE_SENTINEL = ;\n",
+                "\tconst TAB_SYNTAX_SOURCE_SENTINEL = ;",
+            ),
+            (
+                "CRLF",
+                b"const SAFE_SYNTAX_CONTEXT = 1;\r\nconst CRLF_SYNTAX_SOURCE_SENTINEL = ;\r\n",
+                "const CRLF_SYNTAX_SOURCE_SENTINEL = ;",
+            ),
+        )
+        try:
+            for case_name, invalid_source, invalid_line in cases:
+                with self.subTest(case=case_name):
+                    source_path.write_bytes(invalid_source)
+                    result = self.run_sync()
+                    output = result.stdout + result.stderr
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        f"{source_path.name} (line 2, column {invalid_line.index(';') + 1})",
+                        result.stderr,
+                    )
+                    self.assertIn(
+                        "Review and correct this file, save it, then rerun sync. No GitHub requests were made.",
+                        result.stderr,
+                    )
+                    self.assertNotIn(invalid_source.decode(), output)
+                    self.assertNotIn(invalid_line, output)
+                    self.assertNotIn("TAB_SYNTAX_SOURCE_SENTINEL", output)
+                    self.assertNotIn("CRLF_SYNTAX_SOURCE_SENTINEL", output)
+                    self.assertNotIn("SyntaxError", output)
+                    self.assertNotIn("[stdin]", output)
+                    self.assertNotIn("Node.js v", output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+                    self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_embedded_credentials_stop_before_github_without_leaking_values(self):
         source_path = self.source_root / "README.md"
         credential_samples = (
