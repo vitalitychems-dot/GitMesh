@@ -10,6 +10,7 @@ import pathlib
 import pty
 import re
 import select
+import shlex
 import shutil
 import signal
 import stat
@@ -2734,6 +2735,12 @@ class HookInstallerTests(unittest.TestCase):
             timeout=30,
         )
 
+    def make_executable_hook(self, hook_path, contents):
+        hook_path.parent.mkdir(parents=True, exist_ok=True)
+        hook_path.write_text(contents)
+        hook_path.chmod(0o755)
+        return hook_path.read_bytes()
+
     def test_hook_setup_uses_local_hooks_path_when_gitmesh_is_repository_root(self):
         standalone_root = self.repo_root / "standalone-gitmesh"
         standalone_root.mkdir()
@@ -2849,6 +2856,207 @@ class HookInstallerTests(unittest.TestCase):
         self.assertNotEqual(commit.returncode, 0)
         self.assertIn("README.md (line 1)", output)
         self.assertNotIn(credential, output)
+
+    def test_chain_existing_hooks_run_first_and_preserve_configuration(self):
+        existing_hooks = self.repo_root / "existing-local-hooks"
+        pre_commit = existing_hooks / "pre-commit"
+        post_commit = existing_hooks / "post-commit"
+        post_commit_marker = self.repo_root / "existing-post-commit-marker"
+        original_pre_commit = self.make_executable_hook(
+            pre_commit,
+            "#!/bin/sh\nprintf 'existing-pre-commit-ran\\n'\n",
+        )
+        original_post_commit = self.make_executable_hook(
+            post_commit,
+            "#!/bin/sh\n"
+            f"printf '%s\\n' 'existing-post-commit-ran' > {shlex.quote(str(post_commit_marker))}\n",
+        )
+        self.run_git(["config", "--global", "core.hooksPath", "existing-global-hooks"])
+        self.run_git(["config", "--local", "--add", "core.hooksPath", "existing-local-hooks"])
+
+        enabled = self.run_installer(args=("--chain-existing",))
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+        self.assertIn("existing pre-commit hook, if present, runs first, then GitMesh", enabled.stdout)
+        self.assertIn("No global or sibling-worktree settings were changed", enabled.stdout)
+        self.assertIn("git config --local --unset core.hooksPath", enabled.stdout)
+
+        local_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
+        self.assertEqual(local_paths.returncode, 0)
+        path_values = local_paths.stdout.splitlines()
+        self.assertEqual(path_values[0], "existing-local-hooks")
+        self.assertEqual(len(path_values), 2)
+        dispatch_directory = pathlib.Path(path_values[1])
+        self.assertTrue(dispatch_directory.is_dir())
+        self.assertEqual(
+            self.run_git(["config", "--global", "--get", "core.hooksPath"]).stdout.strip(),
+            "existing-global-hooks",
+        )
+        self.assertEqual(pre_commit.read_bytes(), original_pre_commit)
+        self.assertEqual(post_commit.read_bytes(), original_post_commit)
+
+        unrelated = self.repo_root / "unrelated-chain-test.txt"
+        unrelated.write_text("Both hooks should pass.\n")
+        self.run_git(["add", unrelated.name])
+        commit = self.run_git(["commit", "-m", "chained hooks pass"])
+        output = commit.stdout + commit.stderr
+        self.assertEqual(commit.returncode, 0, output)
+        existing_index = output.index("existing-pre-commit-ran")
+        gitmesh_index = output.index("Credential check passed: no allowlisted source files are staged.")
+        self.assertLess(existing_index, gitmesh_index)
+        self.assertTrue(post_commit_marker.exists())
+        self.assertEqual(post_commit.read_bytes(), original_post_commit)
+        self.assertEqual(pre_commit.read_bytes(), original_pre_commit)
+        self.assertEqual(
+            self.run_git(["config", "--global", "--get", "core.hooksPath"]).stdout.strip(),
+            "existing-global-hooks",
+        )
+        disable_command = enabled.stdout.split("To disable it, run: ", 1)[1].strip()
+        disabled = subprocess.run(
+            shlex.split(disable_command),
+            cwd=self.repo_root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        restored_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
+        self.assertEqual(restored_paths.stdout.splitlines(), ["existing-local-hooks"])
+        reenabled = self.run_installer(args=("--chain-existing",))
+        self.assertEqual(reenabled.returncode, 0, reenabled.stdout + reenabled.stderr)
+        reenabled_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
+        self.assertEqual(len(reenabled_paths.stdout.splitlines()), 2)
+
+    def test_chain_existing_hook_failure_stops_before_gitmesh(self):
+        existing_hooks = self.repo_root / "failing-local-hooks"
+        pre_commit = existing_hooks / "pre-commit"
+        original_pre_commit = self.make_executable_hook(
+            pre_commit,
+            "#!/bin/sh\nprintf 'existing-pre-commit-failed\\n'\nexit 7\n",
+        )
+        self.run_git(["config", "--local", "--add", "core.hooksPath", "failing-local-hooks"])
+        enabled = self.run_installer(args=("--chain-existing",))
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+
+        credential = "ghp_" + "Z" * 36
+        readme = self.template_root / "README.md"
+        readme.write_text(f"staged_secret={credential}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        commit = self.run_git(["commit", "-m", "existing hook must block"])
+        output = commit.stdout + commit.stderr
+
+        self.assertNotEqual(commit.returncode, 0)
+        self.assertIn("existing-pre-commit-failed", output)
+        self.assertNotIn("Refusing to commit staged source files", output)
+        self.assertNotIn("README.md (line 1)", output)
+        self.assertNotIn(credential, output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(pre_commit.read_bytes(), original_pre_commit)
+
+    def test_chain_existing_gitmesh_failure_happens_after_existing_hook(self):
+        existing_hooks = self.repo_root / "passing-local-hooks"
+        pre_commit = existing_hooks / "pre-commit"
+        original_pre_commit = self.make_executable_hook(
+            pre_commit,
+            "#!/bin/sh\nprintf 'existing-pre-commit-ran\\n'\n",
+        )
+        self.run_git(["config", "--local", "--add", "core.hooksPath", "passing-local-hooks"])
+        enabled = self.run_installer(args=("--chain-existing",))
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+
+        credential = "ghp_" + "R" * 36
+        readme = self.template_root / "README.md"
+        readme.write_text(f"staged_secret={credential}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        commit = self.run_git(["commit", "-m", "GitMesh credential check must block"])
+        output = commit.stdout + commit.stderr
+
+        self.assertNotEqual(commit.returncode, 0)
+        self.assertIn("existing-pre-commit-ran", output)
+        self.assertIn("Refusing to commit staged source files containing a credential-like value", output)
+        self.assertLess(
+            output.index("existing-pre-commit-ran"),
+            output.index("Refusing to commit staged source files"),
+        )
+        self.assertNotIn(credential, output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(pre_commit.read_bytes(), original_pre_commit)
+
+    def test_chain_existing_worktree_scope_does_not_change_sibling_settings(self):
+        self.run_git(["config", "--local", "extensions.worktreeConfig", "true"])
+        worktree_root = self.repo_root / "chain-worktree"
+        sibling_root = self.repo_root / "chain-sibling-worktree"
+        added = self.run_git(["worktree", "add", "--detach", str(worktree_root), "HEAD"])
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        added_sibling = self.run_git(["worktree", "add", "--detach", str(sibling_root), "HEAD"])
+        self.assertEqual(added_sibling.returncode, 0, added_sibling.stdout + added_sibling.stderr)
+
+        hooks_path_result = self.run_git(["rev-parse", "--git-path", "hooks"])
+        self.assertEqual(hooks_path_result.returncode, 0)
+        hooks_directory = pathlib.Path(hooks_path_result.stdout.strip())
+        if not hooks_directory.is_absolute():
+            hooks_directory = self.repo_root / hooks_directory
+        pre_commit = hooks_directory / "pre-commit"
+        original_pre_commit = self.make_executable_hook(
+            pre_commit,
+            "#!/bin/sh\nprintf 'shared-existing-pre-commit-ran\\n'\n",
+        )
+
+        unscoped = self.run_installer(
+            cwd=worktree_root,
+            args=("--chain-existing",),
+        )
+        self.assertNotEqual(unscoped.returncode, 0)
+        self.assertIn("linked Git worktree", unscoped.stderr)
+        self.assertIn("No Git configuration was changed", unscoped.stderr)
+        self.assertEqual(
+            self.run_git_at(worktree_root, ["config", "--worktree", "--get", "core.hooksPath"]).returncode,
+            1,
+        )
+
+        enabled = self.run_installer(
+            cwd=worktree_root,
+            args=("--worktree-local", "--chain-existing"),
+        )
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+        self.assertIn("this worktree only", enabled.stdout)
+        self.assertIn("git config --worktree --unset core.hooksPath", enabled.stdout)
+        worktree_path = self.run_git_at(
+            worktree_root,
+            ["config", "--worktree", "--get", "core.hooksPath"],
+        )
+        self.assertEqual(worktree_path.returncode, 0)
+        self.assertTrue(pathlib.Path(worktree_path.stdout.strip()).is_dir())
+        self.assertEqual(
+            self.run_git_at(sibling_root, ["config", "--worktree", "--get", "core.hooksPath"]).returncode,
+            1,
+        )
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode,
+            1,
+        )
+
+        readme = worktree_root / "gitmesh-template" / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nWorktree-local chained hook test.\n")
+        self.run_git_at(worktree_root, ["add", "gitmesh-template/README.md"])
+        commit = self.run_git_at(
+            worktree_root,
+            ["commit", "-m", "worktree-local hooks run in order"],
+        )
+        output = commit.stdout + commit.stderr
+        self.assertEqual(commit.returncode, 0, output)
+        self.assertLess(
+            output.index("shared-existing-pre-commit-ran"),
+            output.index("Credential check passed:"),
+        )
+        self.assertEqual(pre_commit.read_bytes(), original_pre_commit)
+        self.assertEqual(self.global_config.read_text(), "")
+        self.assertEqual(
+            self.run_git_at(sibling_root, ["config", "--worktree", "--get", "core.hooksPath"]).returncode,
+            1,
+        )
 
     def test_hook_setup_preserves_existing_local_hooks_path(self):
         existing_hooks = self.repo_root / "existing-local-hooks"

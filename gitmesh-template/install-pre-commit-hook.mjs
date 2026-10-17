@@ -8,6 +8,9 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_DIRECTORY = path.join(ROOT, "hooks");
 const HOOK_FILE = path.join(HOOK_DIRECTORY, "pre-commit");
 const SYNC_SCRIPT = path.join(ROOT, "sync-public-source.mjs");
+const DISPATCH_DIRECTORY_NAME = "gitmesh-hooks";
+const DISPATCH_MARKER_NAME = ".gitmesh-dispatch";
+const DISPATCH_MARKER = "GitMesh hook dispatcher v1\n";
 
 function runGit(args, cwd) {
   const env = { ...process.env };
@@ -137,12 +140,19 @@ function refuseSharedWorktreeSettings(repoRoot) {
 }
 
 function parseOptions(args) {
-  if (args.length === 0) return { worktreeLocal: false };
-  if (args.length === 1 && args[0] === "--worktree-local") {
-    return { worktreeLocal: true };
+  const acceptedOptions = new Set(["--worktree-local", "--chain-existing"]);
+  if (
+    args.length <= acceptedOptions.size &&
+    new Set(args).size === args.length &&
+    args.every((argument) => acceptedOptions.has(argument))
+  ) {
+    return {
+      worktreeLocal: args.includes("--worktree-local"),
+      chainExisting: args.includes("--chain-existing"),
+    };
   }
   throw new Error(
-    "Usage: node install-pre-commit-hook.mjs [--worktree-local]. No Git configuration was changed.",
+    "Usage: node install-pre-commit-hook.mjs [--worktree-local] [--chain-existing]. No Git configuration was changed.",
   );
 }
 
@@ -161,6 +171,321 @@ function isLinkedWorktree(repoRoot) {
     "Could not determine the Git worktree scope; no Git configuration was changed.",
   ));
   return gitDir !== commonDir;
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function samePath(left, right) {
+  const resolve = candidate => {
+    try {
+      return fs.realpathSync(candidate);
+    } catch {
+      return path.resolve(candidate);
+    }
+  };
+  return resolve(left) === resolve(right);
+}
+
+function effectiveHooksDirectory(repoRoot) {
+  const configuredValues = readHookPathValues([], repoRoot);
+  let configuredPath;
+  if (configuredValues.length > 0) {
+    const result = runGit(
+      ["config", "--path", "--get", "core.hooksPath"],
+      repoRoot,
+    );
+    if (result.status !== 0) {
+      throw new Error("Could not safely locate the active Git hooks directory; no Git configuration was changed.");
+    }
+    configuredPath = decodeGitOutput(
+      result.stdout,
+      "Could not safely locate the active Git hooks directory; no Git configuration was changed.",
+    );
+  } else {
+    const result = runGit(["rev-parse", "--git-path", "hooks"], repoRoot);
+    if (result.status !== 0) {
+      throw new Error("Could not safely locate Git's default hooks directory; no Git configuration was changed.");
+    }
+    configuredPath = decodeGitOutput(
+      result.stdout,
+      "Could not safely locate Git's default hooks directory; no Git configuration was changed.",
+    );
+  }
+  if (!configuredPath || /[\r\n\0]/.test(configuredPath)) {
+    throw new Error("The active Git hooks directory is not a usable path; no Git configuration was changed.");
+  }
+  return path.resolve(repoRoot, configuredPath);
+}
+
+function absoluteGitDirectory(repoRoot) {
+  const result = runGit(["rev-parse", "--absolute-git-dir"], repoRoot);
+  if (result.status !== 0) {
+    throw new Error("Could not safely locate this worktree's Git directory; no Git configuration was changed.");
+  }
+  const gitDirectory = decodeGitOutput(
+    result.stdout,
+    "Could not safely locate this worktree's Git directory; no Git configuration was changed.",
+  );
+  if (!path.isAbsolute(gitDirectory) || /[\r\n\0]/.test(gitDirectory)) {
+    throw new Error("Could not safely locate this worktree's Git directory; no Git configuration was changed.");
+  }
+  return gitDirectory;
+}
+
+function inspectExecutableHook(hookPath) {
+  try {
+    const hookInfo = fs.statSync(hookPath);
+    return {
+      exists: true,
+      executable: hookInfo.isFile() &&
+        (process.platform === "win32" || (hookInfo.mode & 0o111) !== 0),
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+      return { exists: false, executable: false };
+    }
+    throw new Error("Could not safely inspect existing Git hooks; no Git configuration was changed.");
+  }
+}
+
+function writeExecutableHook(filePath, contents) {
+  fs.writeFileSync(filePath, contents, { mode: 0o755, flag: "wx" });
+  fs.chmodSync(filePath, 0o755);
+}
+
+function createPassThroughHook(originalHookPath) {
+  return `#!/bin/sh\n# ${DISPATCH_MARKER.trim()}\nexec ${shellQuote(originalHookPath)} "$@"\n`;
+}
+
+function createPreCommitDispatcher(originalHookPath) {
+  const lines = ["#!/bin/sh", `# ${DISPATCH_MARKER.trim()}`, "set -u"];
+  if (originalHookPath) {
+    lines.push("hook_status=0");
+    lines.push(`${shellQuote(originalHookPath)} "$@" || hook_status=$?`);
+    lines.push('if [ "$hook_status" -ne 0 ]; then');
+    lines.push('  exit "$hook_status"');
+    lines.push("fi");
+  }
+  lines.push(`exec ${shellQuote(HOOK_FILE)} "$@"`);
+  return `${lines.join("\n")}\n`;
+}
+
+function dispatcherIsManaged(dispatchDirectory) {
+  try {
+    const directoryInfo = fs.lstatSync(dispatchDirectory);
+    if (!directoryInfo.isDirectory()) return false;
+    const entries = fs.readdirSync(dispatchDirectory);
+    if (!entries.includes(DISPATCH_MARKER_NAME)) return false;
+    if (!fs.lstatSync(path.join(dispatchDirectory, DISPATCH_MARKER_NAME)).isFile()) {
+      return false;
+    }
+    if (
+      fs.readFileSync(path.join(dispatchDirectory, DISPATCH_MARKER_NAME), "utf8") !==
+      DISPATCH_MARKER
+    ) {
+      return false;
+    }
+    return entries.every((entry) => {
+      if (entry === DISPATCH_MARKER_NAME) return true;
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry)) return false;
+      const hookInfo = fs.lstatSync(path.join(dispatchDirectory, entry));
+      if (!hookInfo.isFile()) return false;
+      const contents = fs.readFileSync(path.join(dispatchDirectory, entry), "utf8");
+      return contents.startsWith(
+        `#!/bin/sh\n# ${DISPATCH_MARKER.trim()}\n`,
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
+function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
+  const dispatchDirectory = path.join(gitDirectory, DISPATCH_DIRECTORY_NAME);
+  const temporaryDirectoryPrefix = path.join(gitDirectory, ".gitmesh-hooks-");
+  let temporaryDirectory;
+  try {
+    temporaryDirectory = fs.mkdtempSync(temporaryDirectoryPrefix);
+    let originalPreCommitPath = null;
+    let entries;
+    try {
+      entries = fs.readdirSync(existingHooksDirectory);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        entries = [];
+      } else {
+        throw new Error("Could not safely inspect existing Git hooks; no Git configuration was changed.");
+      }
+    }
+
+    for (const entry of entries) {
+      if (
+        entry === "pre-commit" ||
+        entry.endsWith(".sample") ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry)
+      ) {
+        continue;
+      }
+      const originalHookPath = path.join(existingHooksDirectory, entry);
+      let hookStatus;
+      try {
+        hookStatus = inspectExecutableHook(originalHookPath);
+      } catch {
+        throw new Error("Could not safely inspect existing Git hooks; no Git configuration was changed.");
+      }
+      if (hookStatus.executable) {
+        writeExecutableHook(
+          path.join(temporaryDirectory, entry),
+          createPassThroughHook(originalHookPath),
+        );
+      }
+    }
+
+    const existingPreCommitPath = path.join(existingHooksDirectory, "pre-commit");
+    let preCommitStatus;
+    try {
+      preCommitStatus = inspectExecutableHook(existingPreCommitPath);
+    } catch {
+      throw new Error("Could not safely inspect the existing pre-commit hook; no Git configuration was changed.");
+    }
+    if (preCommitStatus.exists && !preCommitStatus.executable) {
+      throw new Error(
+        "The existing pre-commit hook is not an executable file. Make it executable or leave the hook settings unchanged; no Git configuration was changed.",
+      );
+    }
+    if (preCommitStatus.executable) {
+      if (samePath(existingPreCommitPath, HOOK_FILE)) {
+        throw new Error(
+          "The active pre-commit hook already points to GitMesh. No dispatcher or Git configuration was changed.",
+        );
+      }
+      originalPreCommitPath = existingPreCommitPath;
+    }
+    writeExecutableHook(
+      path.join(temporaryDirectory, "pre-commit"),
+      createPreCommitDispatcher(originalPreCommitPath),
+    );
+    fs.writeFileSync(
+      path.join(temporaryDirectory, DISPATCH_MARKER_NAME),
+      DISPATCH_MARKER,
+      { flag: "wx" },
+    );
+    fs.renameSync(temporaryDirectory, dispatchDirectory);
+    return dispatchDirectory;
+  } catch (error) {
+    if (temporaryDirectory) {
+      try {
+        fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+      } catch {
+        // Keep filesystem diagnostics out of installer output.
+      }
+    }
+    if (error instanceof Error && error.message.startsWith("The existing pre-commit hook")) {
+      throw error;
+    }
+    if (error instanceof Error && error.message.startsWith("The active pre-commit hook")) {
+      throw error;
+    }
+    throw new Error(
+      "Could not safely create the GitMesh hook dispatcher; no Git configuration was changed.",
+    );
+  }
+}
+
+function installChainedHook(repoRoot, worktreeLocal) {
+  const scopeArgs = worktreeLocal ? ["--worktree"] : ["--local"];
+  const scopeLabel = worktreeLocal ? "this worktree only" : "this repository only";
+  if (worktreeLocal) {
+    if (!isLinkedWorktree(repoRoot)) {
+      throw new Error(
+        "The --worktree-local option is only available in a linked Git worktree. No Git configuration was changed.",
+      );
+    }
+    if (!worktreeConfigIsEnabled(repoRoot)) {
+      throw new Error(
+        "Worktree-local setup requires extensions.worktreeConfig=true in this repository. " +
+        "The setting is not enabled. No Git configuration was changed.",
+      );
+    }
+  } else {
+    refuseSharedWorktreeSettings(repoRoot);
+  }
+
+  const existingHooksDirectory = effectiveHooksDirectory(repoRoot);
+  const gitDirectory = absoluteGitDirectory(repoRoot);
+  const dispatchDirectory = path.join(gitDirectory, DISPATCH_DIRECTORY_NAME);
+  if (samePath(existingHooksDirectory, HOOK_DIRECTORY)) {
+    console.log(
+      worktreeLocal
+        ? "The GitMesh pre-commit check is already enabled for this worktree."
+        : "The GitMesh pre-commit check is already enabled for this repository.",
+    );
+    return;
+  }
+  if (samePath(existingHooksDirectory, dispatchDirectory)) {
+    if (dispatcherIsManaged(dispatchDirectory)) {
+      console.log(
+        worktreeLocal
+          ? "The GitMesh dispatcher is already enabled for this worktree."
+          : "The GitMesh dispatcher is already enabled for this repository.",
+      );
+      return;
+    }
+    throw new Error(
+      "An unmanaged Git hooks directory already occupies the dispatcher path; no Git configuration was changed.",
+    );
+  }
+  try {
+    fs.lstatSync(dispatchDirectory);
+    if (!dispatcherIsManaged(dispatchDirectory)) {
+      throw new Error(
+        "An existing file or directory prevents creation of the GitMesh dispatcher; no Git configuration was changed.",
+      );
+    }
+    fs.rmSync(dispatchDirectory, { recursive: true, force: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      if (error instanceof Error &&
+          error.message.startsWith("An existing file or directory")) {
+        throw error;
+      }
+      throw new Error(
+        "Could not safely prepare the GitMesh dispatcher directory; no Git configuration was changed.",
+      );
+    }
+  }
+
+  const createdDirectory = createDispatcherDirectory(
+    existingHooksDirectory,
+    gitDirectory,
+  );
+  const result = runGit(
+    ["config", ...scopeArgs, "--add", "core.hooksPath", createdDirectory],
+    repoRoot,
+  );
+  if (result.status !== 0) {
+    try {
+      fs.rmSync(createdDirectory, { recursive: true, force: true });
+    } catch {
+      // Keep filesystem diagnostics out of installer output.
+    }
+    throw new Error(
+      `Could not enable the GitMesh dispatcher for ${scopeLabel}; no global or sibling-worktree settings were changed.`,
+    );
+  }
+
+  const removalPattern = `^${escapeRegex(createdDirectory)}$`;
+  const disableCommand = `git config ${scopeArgs.join(" ")} --unset core.hooksPath ${shellQuote(removalPattern)}`;
+  console.log(
+    `Enabled the GitMesh dispatcher for ${scopeLabel}. The existing pre-commit hook, if present, runs first, then GitMesh; other executable hooks are forwarded to their original files. ` +
+    `No global or sibling-worktree settings were changed. To disable it, run: ${disableCommand}`,
+  );
 }
 
 function worktreeConfigIsEnabled(repoRoot) {
@@ -253,7 +578,7 @@ function installWorktreeLocalHook(repoRoot, desiredHooksPath) {
 }
 
 function installHook(args = process.argv.slice(2)) {
-  const { worktreeLocal } = parseOptions(args);
+  const { worktreeLocal, chainExisting } = parseOptions(args);
   requireHookFile();
   const rootResult = runGit(["rev-parse", "--show-toplevel"], ROOT);
   if (rootResult.status !== 0) {
@@ -273,6 +598,10 @@ function installHook(args = process.argv.slice(2)) {
     );
   }
   const desiredHooksPath = path.relative(repoRoot, HOOK_DIRECTORY).split(path.sep).join("/");
+  if (chainExisting) {
+    installChainedHook(repoRoot, worktreeLocal);
+    return;
+  }
   if (worktreeLocal) {
     installWorktreeLocalHook(repoRoot, desiredHooksPath);
     return;
