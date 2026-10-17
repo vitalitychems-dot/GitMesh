@@ -2046,15 +2046,103 @@ class HookInstallerTests(unittest.TestCase):
     def run_git(self, args):
         return self.run_git_at(self.repo_root, args)
 
-    def run_installer(self, cwd=None, args=()):
+    def run_installer(self, cwd=None, args=(), installer_path=None):
         cwd = cwd or self.repo_root
+        installer_path = installer_path or cwd / "gitmesh-template" / HOOK_INSTALLER.name
         return subprocess.run(
-            ["node", str(cwd / "gitmesh-template" / HOOK_INSTALLER.name), *args],
+            ["node", str(installer_path), *args],
             cwd=cwd,
             env=self.env,
             capture_output=True,
             text=True,
             timeout=30,
+        )
+
+    def test_hook_setup_uses_local_hooks_path_when_gitmesh_is_repository_root(self):
+        standalone_root = self.repo_root / "standalone-gitmesh"
+        standalone_root.mkdir()
+        for name in ALLOWED_SOURCE_NAMES:
+            shutil.copy2(ROOT / name, standalone_root / name)
+        installer_path = standalone_root / HOOK_INSTALLER.name
+        shutil.copy2(HOOK_INSTALLER, installer_path)
+        hook_dir = standalone_root / "hooks"
+        hook_dir.mkdir()
+        gitmesh_hook = hook_dir / "pre-commit"
+        shutil.copy2(PRE_COMMIT_HOOK, gitmesh_hook)
+        original_gitmesh_hook = gitmesh_hook.read_bytes()
+
+        initialized = self.run_git_at(standalone_root, ["init", "--quiet"])
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        for name, value in (
+            ("user.name", "GitMesh Standalone Test"),
+            ("user.email", "gitmesh-standalone-test@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ):
+            configured = self.run_git_at(
+                standalone_root,
+                ["config", "--local", name, value],
+            )
+            self.assertEqual(configured.returncode, 0, configured.stderr)
+        self.run_git_at(standalone_root, ["add", "."])
+        baseline = self.run_git_at(
+            standalone_root,
+            ["commit", "--quiet", "-m", "standalone fixture baseline"],
+        )
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+
+        default_hooks_result = self.run_git_at(
+            standalone_root,
+            ["rev-parse", "--git-path", "hooks"],
+        )
+        self.assertEqual(default_hooks_result.returncode, 0)
+        default_hooks = pathlib.Path(default_hooks_result.stdout.strip())
+        if not default_hooks.is_absolute():
+            default_hooks = standalone_root / default_hooks
+        existing_hook = default_hooks / "pre-commit"
+        existing_hook.parent.mkdir(parents=True, exist_ok=True)
+        existing_hook.write_text("#!/bin/sh\nexit 0\n")
+        existing_hook.chmod(0o755)
+        original_existing_hook = existing_hook.read_bytes()
+
+        refused = self.run_installer(
+            cwd=standalone_root,
+            installer_path=installer_path,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("Custom files already exist", refused.stderr)
+        self.assertIn("No Git configuration was changed", refused.stderr)
+        self.assertIn(
+            "node 'sync-public-source.mjs' --check-staged-credentials",
+            refused.stderr,
+        )
+        self.assertEqual(existing_hook.read_bytes(), original_existing_hook)
+        self.assertEqual(
+            self.run_git_at(
+                standalone_root,
+                ["config", "--local", "--get", "core.hooksPath"],
+            ).returncode,
+            1,
+        )
+
+        existing_hook.unlink()
+        enabled = self.run_installer(
+            cwd=standalone_root,
+            installer_path=installer_path,
+        )
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+        self.assertIn("for this repository only", enabled.stdout)
+        self.assertIn("git config --local --unset core.hooksPath", enabled.stdout)
+        configured_path = self.run_git_at(
+            standalone_root,
+            ["config", "--local", "--get", "core.hooksPath"],
+        )
+        self.assertEqual(configured_path.returncode, 0)
+        self.assertEqual(configured_path.stdout.strip(), "hooks")
+        self.assertEqual(gitmesh_hook.read_bytes(), original_gitmesh_hook)
+        self.assertEqual(self.global_config.read_text(), "")
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "core.hooksPath"]).returncode,
+            1,
         )
 
     def test_hook_setup_enables_only_repository_local_path_when_safe(self):
