@@ -5758,6 +5758,54 @@ class HookInstallerTests(unittest.TestCase):
             ),
             dispatch_directory,
         )
+        paths_before_rerun = self.run_git_at(
+            moved_root,
+            ["config", "--worktree", "--get-all", "core.hooksPath"],
+        )
+        self.assertEqual(paths_before_rerun.returncode, 0, paths_before_rerun.stderr)
+        self.assertEqual(
+            paths_before_rerun.stdout.splitlines(),
+            [custom_hooks_value, str(dispatch_directory)],
+        )
+        selected_config_before_rerun = self.git_config_snapshot(moved_root)
+        repository_config_before_rerun = self.git_config_snapshot(self.repo_root)
+        sibling_config_before_rerun = self.git_config_snapshot(sibling_root)
+
+        rerun = self.run_installer(
+            cwd=moved_root,
+            args=("--worktree-local", "--chain-existing"),
+        )
+        rerun_output = rerun.stdout + rerun.stderr
+        self.assertEqual(rerun.returncode, 0, rerun_output)
+        self.assertIn(
+            "The GitMesh dispatcher is already enabled for this worktree.",
+            rerun_output,
+        )
+        paths_after_rerun = self.run_git_at(
+            moved_root,
+            ["config", "--worktree", "--get-all", "core.hooksPath"],
+        )
+        self.assertEqual(paths_after_rerun.returncode, 0, paths_after_rerun.stderr)
+        self.assertEqual(
+            paths_after_rerun.stdout.splitlines(),
+            [custom_hooks_value, str(dispatch_directory)],
+        )
+        self.assertEqual(
+            paths_after_rerun.stdout.splitlines().count(str(dispatch_directory)),
+            1,
+        )
+        self.assertEqual(
+            self.git_config_snapshot(moved_root),
+            selected_config_before_rerun,
+        )
+        self.assertEqual(
+            self.git_config_snapshot(self.repo_root),
+            repository_config_before_rerun,
+        )
+        self.assertEqual(
+            self.git_config_snapshot(sibling_root),
+            sibling_config_before_rerun,
+        )
 
         credential = "ghp_" + "M" * 36
         readme = moved_root / "gitmesh-template" / "README.md"
