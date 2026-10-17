@@ -528,24 +528,65 @@ function writeExecutableHook(filePath, contents) {
   fs.chmodSync(filePath, 0o755);
 }
 
-function createPassThroughHook(originalHookPath) {
-  return `#!/bin/sh\n# ${DISPATCH_MARKER.trim()}\nexec ${shellQuote(originalHookPath)} "$@"\n`;
+function currentWorktreeRootLines() {
+  const message =
+    "GitMesh could not determine the current worktree root; hook stopped.";
+  return [
+    "gitmesh_repo_root=$(",
+    "  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_PREFIX",
+    "  git rev-parse --show-toplevel 2>/dev/null || exit 1",
+    "  printf '\\001'",
+    ") || {",
+    `  printf '%s\\n' ${shellQuote(message)} >&2`,
+    "  exit 1",
+    "}",
+    "gitmesh_repo_root=${gitmesh_repo_root%?}",
+    "gitmesh_repo_root=${gitmesh_repo_root%?}",
+    'case "$gitmesh_repo_root" in',
+    "  /*) ;;",
+    `  *) printf '%s\\n' ${shellQuote(message)} >&2; exit 1 ;;`,
+    "esac",
+  ];
 }
 
-function createPreCommitDispatcher(originalHookPath) {
-  const lines = ["#!/bin/sh", `# ${DISPATCH_MARKER.trim()}`, "set -u"];
+function hookPathExpression(hookPath, repoRoot) {
+  if (!pathIsInsideRoot(repoRoot, hookPath)) return shellQuote(hookPath);
+  const relativePath = path.relative(repoRoot, hookPath).split(path.sep).join("/");
+  return `"$gitmesh_repo_root"/${shellQuote(relativePath)}`;
+}
+
+function createPassThroughHook(originalHookPath, repoRoot) {
+  const lines = [
+    "#!/bin/sh",
+    `# ${DISPATCH_MARKER.trim()}`,
+    "set -u",
+    ...currentWorktreeRootLines(),
+    `exec ${hookPathExpression(originalHookPath, repoRoot)} "$@"`,
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function createPreCommitDispatcher(originalHookPath, repoRoot) {
+  const lines = [
+    "#!/bin/sh",
+    `# ${DISPATCH_MARKER.trim()}`,
+    "set -u",
+    ...currentWorktreeRootLines(),
+  ];
   if (originalHookPath) {
     lines.push("hook_status=0");
-    lines.push(`${shellQuote(originalHookPath)} "$@" || hook_status=$?`);
+    lines.push(
+      `${hookPathExpression(originalHookPath, repoRoot)} "$@" || hook_status=$?`,
+    );
     lines.push('if [ "$hook_status" -ne 0 ]; then');
     lines.push('  exit "$hook_status"');
     lines.push("fi");
   }
-  lines.push(`exec ${shellQuote(HOOK_FILE)} "$@"`);
+  lines.push(`exec ${hookPathExpression(HOOK_FILE, repoRoot)} "$@"`);
   return `${lines.join("\n")}\n`;
 }
 
-function createPrePushDispatcher(originalHookPath) {
+function createPrePushDispatcher(originalHookPath, repoRoot) {
   const lines = [
     "#!/bin/sh",
     `# ${DISPATCH_MARKER.trim()}`,
@@ -565,16 +606,21 @@ function createPrePushDispatcher(originalHookPath) {
     '  printf \'%s\\n\' "GitMesh could not safely read pre-push ref data; push stopped." >&2',
     "  exit 1",
     "fi",
+    ...currentWorktreeRootLines(),
   ];
   if (originalHookPath) {
     lines.push("hook_status=0");
-    lines.push(`${shellQuote(originalHookPath)} "$@" < "$hook_input" || hook_status=$?`);
+    lines.push(
+      `${hookPathExpression(originalHookPath, repoRoot)} "$@" < "$hook_input" || hook_status=$?`,
+    );
     lines.push('if [ "$hook_status" -ne 0 ]; then');
     lines.push('  exit "$hook_status"');
     lines.push("fi");
   }
   lines.push("hook_status=0");
-  lines.push(`${shellQuote(PRE_PUSH_HOOK_FILE)} "$@" < "$hook_input" || hook_status=$?`);
+  lines.push(
+    `${hookPathExpression(PRE_PUSH_HOOK_FILE, repoRoot)} "$@" < "$hook_input" || hook_status=$?`,
+  );
   lines.push('exit "$hook_status"');
   return `${lines.join("\n")}\n`;
 }
@@ -593,7 +639,7 @@ function hasCurrentPrePushDispatcher(dispatchDirectory) {
   }
 }
 
-function upgradeManagedPrePushDispatcher(dispatchDirectory) {
+function upgradeManagedPrePushDispatcher(dispatchDirectory, repoRoot) {
   const hookPath = path.join(dispatchDirectory, "pre-push");
   const existingStatus = inspectExecutableHook(hookPath);
   let originalPrePushPath = null;
@@ -658,7 +704,7 @@ function upgradeManagedPrePushDispatcher(dispatchDirectory) {
     const temporaryHookPath = path.join(temporaryDirectory, "pre-push");
     writeExecutableHook(
       temporaryHookPath,
-      createPrePushDispatcher(originalPrePushPath),
+      createPrePushDispatcher(originalPrePushPath, repoRoot),
     );
     fs.renameSync(temporaryHookPath, hookPath);
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
@@ -788,7 +834,7 @@ function dispatcherIsManaged(dispatchDirectory) {
   }
 }
 
-function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
+function createDispatcherDirectory(existingHooksDirectory, gitDirectory, repoRoot) {
   const dispatchDirectory = path.join(gitDirectory, DISPATCH_DIRECTORY_NAME);
   const temporaryDirectoryPrefix = path.join(gitDirectory, ".gitmesh-hooks-");
   let temporaryDirectory;
@@ -826,7 +872,7 @@ function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
       if (hookStatus.executable) {
         writeExecutableHook(
           path.join(temporaryDirectory, entry),
-          createPassThroughHook(originalHookPath),
+          createPassThroughHook(originalHookPath, repoRoot),
         );
       }
     }
@@ -879,11 +925,11 @@ function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
     }
     writeExecutableHook(
       path.join(temporaryDirectory, "pre-commit"),
-      createPreCommitDispatcher(originalPreCommitPath),
+      createPreCommitDispatcher(originalPreCommitPath, repoRoot),
     );
     writeExecutableHook(
       path.join(temporaryDirectory, "pre-push"),
-      createPrePushDispatcher(originalPrePushPath),
+      createPrePushDispatcher(originalPrePushPath, repoRoot),
     );
     writeDispatcherManifest(temporaryDirectory);
     fs.renameSync(temporaryDirectory, dispatchDirectory);
@@ -947,7 +993,7 @@ function installChainedHook(repoRoot, worktreeLocal) {
   if (samePath(existingHooksDirectory, dispatchDirectory)) {
     if (dispatcherIsManaged(dispatchDirectory)) {
       if (!hasCurrentPrePushDispatcher(dispatchDirectory)) {
-        upgradeManagedPrePushDispatcher(dispatchDirectory);
+        upgradeManagedPrePushDispatcher(dispatchDirectory, repoRoot);
         console.log(
           worktreeLocal
             ? "Updated the existing GitMesh dispatcher for this worktree with the optional pre-push check."
@@ -989,6 +1035,7 @@ function installChainedHook(repoRoot, worktreeLocal) {
   const createdDirectory = createDispatcherDirectory(
     existingHooksDirectory,
     gitDirectory,
+    repoRoot,
   );
   const result = runGit(
     ["config", ...scopeArgs, "--add", "core.hooksPath", createdDirectory],

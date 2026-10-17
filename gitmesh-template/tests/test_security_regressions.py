@@ -5654,6 +5654,170 @@ class HookInstallerTests(unittest.TestCase):
         )
         self.assertEqual(self.global_config.read_text(), "")
 
+    def test_chain_existing_custom_hook_stays_active_after_worktree_move(self):
+        self.run_git(["config", "--local", "extensions.worktreeConfig", "true"])
+        worktree_root = self.repo_root / "chain-movable-linked-worktree"
+        moved_root = self.repo_root / "chain-moved-linked-worktree"
+        sibling_root = self.repo_root / "chain-move-sibling-worktree"
+        added = self.run_git(["worktree", "add", "--detach", str(worktree_root), "HEAD"])
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        added_sibling = self.run_git(["worktree", "add", "--detach", str(sibling_root), "HEAD"])
+        self.assertEqual(added_sibling.returncode, 0, added_sibling.stdout + added_sibling.stderr)
+
+        custom_hooks_value = "selected-worktree-custom-hooks"
+        pre_commit = worktree_root / custom_hooks_value / "pre-commit"
+        original_pre_commit = self.make_executable_hook(
+            pre_commit,
+            "#!/bin/sh\nprintf 'custom-pre-commit-ran\\n'\n",
+        )
+        configured_custom_path = self.run_git_at(
+            worktree_root,
+            ["config", "--worktree", "core.hooksPath", custom_hooks_value],
+        )
+        self.assertEqual(configured_custom_path.returncode, 0, configured_custom_path.stderr)
+        sibling_hooks_value = "sibling-custom-hooks"
+        sibling_pre_commit = sibling_root / sibling_hooks_value / "pre-commit"
+        original_sibling_pre_commit = self.make_executable_hook(
+            sibling_pre_commit,
+            "#!/bin/sh\nprintf 'sibling-pre-commit-ran\\n'\n",
+        )
+        configured_sibling_path = self.run_git_at(
+            sibling_root,
+            ["config", "--worktree", "core.hooksPath", sibling_hooks_value],
+        )
+        self.assertEqual(
+            configured_sibling_path.returncode,
+            0,
+            configured_sibling_path.stderr,
+        )
+        sibling_config_before = self.git_config_snapshot(sibling_root)
+        self.assertEqual(
+            self.run_git_at(sibling_root, ["config", "--worktree", "--get", "core.hooksPath"]).stdout.strip(),
+            sibling_hooks_value,
+        )
+
+        enabled = self.run_installer(
+            cwd=worktree_root,
+            args=("--worktree-local", "--chain-existing"),
+        )
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+        self.assertIn("this worktree only", enabled.stdout)
+        selected_path = self.run_git_at(
+            worktree_root,
+            ["config", "--worktree", "--get", "core.hooksPath"],
+        )
+        self.assertEqual(selected_path.returncode, 0, selected_path.stderr)
+        dispatch_directory = pathlib.Path(selected_path.stdout.strip())
+        self.assertTrue(dispatch_directory.is_dir())
+        selected_paths = self.run_git_at(
+            worktree_root,
+            ["config", "--worktree", "--get-all", "core.hooksPath"],
+        )
+        self.assertEqual(selected_paths.returncode, 0, selected_paths.stderr)
+        self.assertEqual(
+            selected_paths.stdout.splitlines(),
+            [custom_hooks_value, str(dispatch_directory)],
+        )
+        self.assertEqual(
+            self.run_git_at(
+                sibling_root,
+                ["config", "--worktree", "--get", "core.hooksPath"],
+            ).stdout.strip(),
+            sibling_hooks_value,
+        )
+        self.assertEqual(
+            self.run_git(
+                ["config", "--local", "--get", "core.hooksPath"]
+            ).returncode,
+            1,
+        )
+        self.assertEqual(
+            self.git_config_snapshot(sibling_root),
+            sibling_config_before,
+        )
+
+        moved = self.run_git(["worktree", "move", str(worktree_root), str(moved_root)])
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertFalse(worktree_root.exists())
+        self.assertTrue(moved_root.is_dir())
+        self.assertTrue(dispatch_directory.is_dir())
+        moved_pre_commit = moved_root / custom_hooks_value / "pre-commit"
+        self.assertTrue(moved_pre_commit.is_file())
+        self.assertEqual(
+            pathlib.Path(
+                self.run_git_at(moved_root, ["rev-parse", "--show-toplevel"]).stdout.strip()
+            ),
+            moved_root,
+        )
+        self.assertEqual(
+            pathlib.Path(
+                self.run_git_at(
+                    moved_root,
+                    ["config", "--worktree", "--get", "core.hooksPath"],
+                ).stdout.strip()
+            ),
+            dispatch_directory,
+        )
+
+        credential = "ghp_" + "M" * 36
+        readme = moved_root / "gitmesh-template" / "README.md"
+        readme.write_text(f"staged_secret={credential}\n")
+        self.run_git_at(moved_root, ["add", "gitmesh-template/README.md"])
+        original_head = self.run_git_at(moved_root, ["rev-parse", "HEAD"]).stdout.strip()
+        commit = self.run_git_at(
+            moved_root,
+            ["commit", "-m", "moved worktree chained hook check"],
+        )
+        output = commit.stdout + commit.stderr
+        self.assertNotEqual(
+            commit.returncode,
+            0,
+            output.replace(credential, "[redacted test credential]"),
+        )
+        self.assertIn("custom-pre-commit-ran", output)
+        self.assertIn("README.md (line 1)", output)
+        self.assertIn(
+            "Refusing to commit staged source files containing a credential-like value",
+            output,
+        )
+        self.assertLess(
+            output.index("custom-pre-commit-ran"),
+            output.index("Refusing to commit staged source files containing a credential-like value"),
+        )
+        self.assertNotIn(credential, output)
+        self.assertEqual(
+            self.run_git_at(moved_root, ["rev-parse", "HEAD"]).stdout.strip(),
+            original_head,
+        )
+        self.assertEqual(moved_pre_commit.read_bytes(), original_pre_commit)
+        self.assertEqual(
+            self.git_config_snapshot(sibling_root),
+            sibling_config_before,
+        )
+        self.assertEqual(
+            self.run_git_at(
+                sibling_root,
+                ["config", "--worktree", "--get", "core.hooksPath"],
+            ).stdout.strip(),
+            sibling_hooks_value,
+        )
+
+        sibling_file = sibling_root / "sibling ordinary file.txt"
+        sibling_file.write_text("The sibling keeps its original hook behavior.\n")
+        self.run_git_at(sibling_root, ["add", sibling_file.name])
+        sibling_commit = self.run_git_at(
+            sibling_root,
+            ["commit", "-m", "sibling worktree keeps original hooks"],
+        )
+        sibling_output = sibling_commit.stdout + sibling_commit.stderr
+        self.assertEqual(sibling_commit.returncode, 0, sibling_output)
+        self.assertIn("sibling-pre-commit-ran", sibling_output)
+        self.assertNotIn("custom-pre-commit-ran", sibling_output)
+        self.assertNotIn("Credential check passed:", sibling_output)
+        self.assertEqual(sibling_pre_commit.read_bytes(), original_sibling_pre_commit)
+        self.assertEqual(moved_pre_commit.read_bytes(), original_pre_commit)
+        self.assertEqual(self.global_config.read_text(), "")
+
     def test_hook_setup_refuses_worktree_opt_in_without_worktree_config_support(self):
         nonlinked = self.run_installer(args=("--worktree-local",))
         self.assertNotEqual(nonlinked.returncode, 0)
