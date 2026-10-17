@@ -25,6 +25,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONSOLE = ROOT / "gitmesh-ultimate-core.mjs"
 SYNC = ROOT / "sync-public-source.mjs"
 PRE_COMMIT_HOOK = ROOT / "hooks" / "pre-commit"
+PRE_PUSH_HOOK = ROOT / "hooks" / "pre-push"
 HOOK_INSTALLER = ROOT / "install-pre-commit-hook.mjs"
 INITIAL_SIGIL = "fixture-admin-sigil-one"
 CUSTOM_SIGIL = "fixture-admin-sigil-custom"
@@ -1175,7 +1176,7 @@ process.on("exit", saveCapture);
         result = self.run_sync(args=("--unexpected-option",))
         self.assertEqual(result.returncode, 2)
         self.assertIn(
-            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-syntax].",
+            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
             result.stderr,
         )
         self.assert_safe_failure_output(result)
@@ -2677,6 +2678,7 @@ class PreCommitHookTests(unittest.TestCase):
         hook_dir = self.template_root / "hooks"
         hook_dir.mkdir()
         shutil.copy2(PRE_COMMIT_HOOK, hook_dir / "pre-commit")
+        shutil.copy2(PRE_PUSH_HOOK, hook_dir / "pre-push")
 
         self.run_git(["init", "--quiet"])
         self.run_git(["config", "user.name", "GitMesh Security Test"])
@@ -2746,6 +2748,96 @@ class PreCommitHookTests(unittest.TestCase):
         env["GITMESH_TEST_NETWORK_MARKER"] = str(self.network_marker)
         env["NODE_OPTIONS"] = f"--import={self.network_guard.as_uri()}"
         return env
+
+    def configure_push_remote(self, enable_check=True):
+        remote = self.repo_root / "push-remote.git"
+        result = self.run_git(["init", "--bare", "--quiet", str(remote)])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_git(["remote", "add", "origin", str(remote)])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        if enable_check:
+            result = self.run_git(
+                ["config", "--local", "gitmesh.prePushCredentialCheck", "true"]
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return remote
+
+    def test_pre_push_hook_blocks_outgoing_credentials_without_exposing_them(self):
+        remote = self.configure_push_remote()
+        credential = "ghp_" + "Q" * 36
+        self.readme.write_text(f"safe source\nstaged_secret={credential}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        commit = self.run_git(
+            ["commit", "--no-verify", "-m", "commit that skipped credential check"]
+        )
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+
+        pushed_commit = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        hook_env = self.hook_environment_without_github_token()
+        hook_env["GITHUB_TOKEN"] = FAKE_GITHUB_TOKEN
+        result = self.run_git(
+            ["push", "origin", "HEAD:refs/heads/main"],
+            env=hook_env,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Credential-like values were found in outgoing GitMesh source changes", output)
+        self.assertIn("README.md (line 2)", output)
+        self.assertIn("Push blocked", output)
+        self.assertNotIn(credential, output)
+        self.assertNotIn("safe source", output)
+        self.assertNotIn(pushed_commit, output)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+        self.assertNotIn("network request attempted", output)
+        self.assertFalse(self.network_marker.exists())
+        remote_ref = self.run_git(
+            ["--git-dir", str(remote), "rev-parse", "--verify", "refs/heads/main"]
+        )
+        self.assertNotEqual(remote_ref.returncode, 0)
+
+    def test_pre_push_hook_allows_clean_outgoing_commits_without_github_access(self):
+        remote = self.configure_push_remote()
+        self.readme.write_text(self.baseline_readme.decode() + "\nClean outgoing change.\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        commit = self.run_git(["commit", "-m", "clean outgoing source change"])
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+        local_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        result = self.run_git(
+            ["push", "origin", "HEAD:refs/heads/main"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Pre-push credential check passed", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn("network request attempted", output)
+        self.assertFalse(self.network_marker.exists())
+        remote_head = self.run_git(
+            ["--git-dir", str(remote), "rev-parse", "refs/heads/main"]
+        ).stdout.strip()
+        self.assertEqual(remote_head, local_head)
+
+    def test_pre_push_hook_is_opt_in_by_default(self):
+        remote = self.configure_push_remote(enable_check=False)
+        credential = "ghp_" + "M" * 36
+        self.readme.write_text(f"source={credential}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        commit = self.run_git(["commit", "--no-verify", "-m", "pre-push check remains optional"])
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+
+        result = self.run_git(
+            ["push", "origin", "HEAD:refs/heads/main"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("Credential-like values were found", output)
+        self.assertNotIn("Pre-push credential check", output)
+        self.assertNotIn(credential, output)
+        self.assertFalse(self.network_marker.exists())
 
     def test_precommit_hook_blocks_staged_credentials_without_exposing_them(self):
         credential = "ghp_" + "Z" * 36
@@ -3293,6 +3385,7 @@ class HookInstallerTests(unittest.TestCase):
         hook_dir = self.template_root / "hooks"
         hook_dir.mkdir()
         shutil.copy2(PRE_COMMIT_HOOK, hook_dir / "pre-commit")
+        shutil.copy2(PRE_PUSH_HOOK, hook_dir / "pre-push")
 
         self.global_config = self.repo_root / "isolated-global.gitconfig"
         self.global_config.write_text("")
@@ -3753,6 +3846,55 @@ class HookInstallerTests(unittest.TestCase):
         self.assertEqual(reenabled.returncode, 0, reenabled.stdout + reenabled.stderr)
         reenabled_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
         self.assertEqual(len(reenabled_paths.stdout.splitlines()), 2)
+
+    def test_chain_existing_pre_push_replays_ref_input_to_gitmesh_after_existing_hook(self):
+        existing_hooks = self.repo_root / "existing-push-hooks"
+        ref_input_marker = self.repo_root / "existing-pre-push-ref-input"
+        pre_push = existing_hooks / "pre-push"
+        original_pre_push = self.make_executable_hook(
+            pre_push,
+            "#!/bin/sh\n"
+            f"cat > {shlex.quote(str(ref_input_marker))}\n"
+            "printf 'existing-pre-push-ran\\n'\n",
+        )
+        self.run_git(["config", "--local", "--add", "core.hooksPath", "existing-push-hooks"])
+        enabled = self.run_installer(args=("--chain-existing",))
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+        hook_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
+        self.assertEqual(hook_paths.returncode, 0, hook_paths.stderr)
+        dispatch_directory = pathlib.Path(hook_paths.stdout.splitlines()[-1])
+        legacy_pre_push = dispatch_directory / "pre-push"
+        legacy_pre_push.write_text(
+            "#!/bin/sh\n"
+            "# GitMesh hook dispatcher v1\n"
+            f"exec {shlex.quote(str(pre_push))} \"$@\"\n"
+        )
+        legacy_pre_push.chmod(0o755)
+        upgraded = self.run_installer(args=("--chain-existing",))
+        self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+        self.assertIn("Updated the existing GitMesh dispatcher", upgraded.stdout)
+        self.run_git(
+            ["config", "--local", "gitmesh.prePushCredentialCheck", "true"]
+        )
+        remote = self.repo_root / "pre-push-remote.git"
+        remote_init = self.run_git(["init", "--bare", "--quiet", str(remote)])
+        self.assertEqual(remote_init.returncode, 0, remote_init.stdout + remote_init.stderr)
+        self.run_git(["remote", "add", "origin", str(remote)])
+
+        push = self.run_git(["push", "origin", "HEAD:refs/heads/main"])
+        output = push.stdout + push.stderr
+
+        self.assertEqual(push.returncode, 0, output)
+        self.assertIn("existing-pre-push-ran", output)
+        self.assertIn("Pre-push credential check passed: scanned", output)
+        self.assertIn("allowlisted source revisions", output)
+        self.assertLess(
+            output.index("existing-pre-push-ran"),
+            output.index("Pre-push credential check passed"),
+        )
+        self.assertTrue(ref_input_marker.exists())
+        self.assertIn("refs/heads/main", ref_input_marker.read_text())
+        self.assertEqual(pre_push.read_bytes(), original_pre_push)
 
     def test_chain_existing_hook_failure_stops_before_gitmesh(self):
         existing_hooks = self.repo_root / "failing-local-hooks"
