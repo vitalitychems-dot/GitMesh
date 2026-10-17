@@ -1889,6 +1889,59 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_reports_unicode_separator_lines_without_exposing_content(self):
+        first_secret = "ghp_" + "U" * 36
+        second_secret = "github_pat_" + "V" * 40
+        first_line = f"token={first_secret}"
+        second_line = f"token={second_secret}"
+
+        for label, line_ending in (
+            ("U+2028", "\u2028"),
+            ("U+2029", "\u2029"),
+        ):
+            with self.subTest(line_ending=label):
+                source_text = line_ending.join(
+                    (
+                        "SAFE_UNICODE_HEADER_CONTEXT",
+                        first_line,
+                        "SAFE_UNICODE_MIDDLE_CONTEXT",
+                        second_line,
+                        "SAFE_UNICODE_FOOTER_CONTEXT",
+                    )
+                )
+                self.readme.write_bytes(source_text.encode("utf-8"))
+                self.run_git(["add", "gitmesh-template/README.md"])
+
+                # Verify the hook reads the staged blob, not the restored file.
+                self.readme.write_bytes(self.baseline_readme)
+                original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+                result = self.run_git(
+                    ["commit", "-m", f"must be blocked for {label}"],
+                    env=self.hook_environment_without_github_token(),
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("README.md (lines 2, 4)", output)
+                self.assertIn("No GitHub requests were made", output)
+                for private_text in (
+                    first_secret,
+                    second_secret,
+                    first_line,
+                    second_line,
+                    "SAFE_UNICODE_HEADER_CONTEXT",
+                    "SAFE_UNICODE_MIDDLE_CONTEXT",
+                    "SAFE_UNICODE_FOOTER_CONTEXT",
+                    FAKE_GITHUB_TOKEN,
+                ):
+                    self.assertNotIn(private_text, output)
+                self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+                self.assertEqual(
+                    self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+                    "gitmesh-template/README.md",
+                )
+                self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_blocks_when_node_is_missing(self):
         credential = "ghp_" + "N" * 36
         source_sentinel = "NODE_MISSING_STAGED_SOURCE_SENTINEL"
