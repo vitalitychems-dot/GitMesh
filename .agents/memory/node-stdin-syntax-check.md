@@ -7,4 +7,4 @@ For ES module syntax validation from stdin, invoke Node with `--input-type=modul
 
 **Why:** Source should be syntax-checked from the same bytes that passed file-handle validation, without reopening a potentially replaced path or leaking source through error output.
 
-**How to apply:** When source preflight reads allowlisted JavaScript through an open descriptor, pass those bytes to Node in module mode and expose only a generic validation error.
+**How to apply:** When source preflight reads allowlisted JavaScript through an open descriptor, pass those bytes to Node in module mode. Never print raw parser diagnostics; when Node's stdin header and caret safely identify a location, expose only numeric line/column values and otherwise keep the generic error.
