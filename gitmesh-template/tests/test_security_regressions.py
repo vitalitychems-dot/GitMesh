@@ -352,7 +352,9 @@ const invalidShaStage = process.env.GITMESH_TEST_INVALID_SHA_STAGE;
 const invalidSha = process.env.GITMESH_TEST_INVALID_SHA;
 const malformedJsonAt = process.env.GITMESH_TEST_MALFORMED_JSON_AT;
 const malformedJsonBody = process.env.GITMESH_TEST_MALFORMED_JSON_BODY;
-let mainRefReadCount = 0;
+const selectedBranch = process.env.GITMESH_TEST_BRANCH ?? "main";
+const encodedBranch = encodeURIComponent(selectedBranch);
+let targetRefReadCount = 0;
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
 childProcess.spawnSync = (command, ...args) => {
   if (
@@ -551,17 +553,17 @@ globalThis.fetch = async (input, init = {}) => {
     };
   }
   let data;
-  if (method === "GET" && url.pathname === base + "/git/ref/heads/main") {
-    mainRefReadCount += 1;
+  if (method === "GET" && url.pathname === base + "/git/ref/heads/" + encodedBranch) {
+    targetRefReadCount += 1;
     const movedHeadSha = process.env.GITMESH_TEST_MOVED_HEAD_SHA;
     const secondMovedHeadSha = process.env.GITMESH_TEST_SECOND_MOVED_HEAD_SHA;
     let previewSha = initialCommitSha;
-    if (mainRefReadCount > 1 && movedHeadSha) previewSha = movedHeadSha;
-    if (mainRefReadCount > 2 && secondMovedHeadSha) previewSha = secondMovedHeadSha;
+    if (targetRefReadCount > 1 && movedHeadSha) previewSha = movedHeadSha;
+    if (targetRefReadCount > 2 && secondMovedHeadSha) previewSha = secondMovedHeadSha;
     if (
       invalidShaStage === "main-ref" ||
-      (invalidShaStage === "dry-run-initial-ref" && mainRefReadCount === 1) ||
-      (invalidShaStage === "dry-run-first-comparison-ref" && mainRefReadCount === 2)
+      (invalidShaStage === "dry-run-initial-ref" && targetRefReadCount === 1) ||
+      (invalidShaStage === "dry-run-first-comparison-ref" && targetRefReadCount === 2)
     ) previewSha = invalidSha;
     data = {
       object: {
@@ -598,7 +600,7 @@ globalThis.fetch = async (input, init = {}) => {
     data = { sha: invalidShaStage === "tree" ? invalidSha : "c".repeat(40) };
   } else if (method === "POST" && url.pathname === base + "/git/commits") {
     data = { sha: invalidShaStage === "commit" ? invalidSha : "d".repeat(40) };
-  } else if (method === "PATCH" && url.pathname === base + "/git/refs/heads/main") {
+  } else if (method === "PATCH" && url.pathname === base + "/git/refs/heads/" + encodedBranch) {
     data = {
       object: {
         sha: invalidShaStage === "updated-ref" ? invalidSha : body.sha,
@@ -1010,6 +1012,138 @@ process.on("exit", saveCapture);
             3,
         )
 
+    def test_dry_run_uses_selected_branch_and_encodes_ref_route(self):
+        self.set_remote_snapshot()
+        branch = "release/2026.10+canary#ops"
+        encoded_branch = "release%2F2026.10%2Bcanary%23ops"
+        result = self.run_sync(
+            args=("--branch", branch, "--dry-run"),
+            env_overrides={"GITMESH_TEST_BRANCH": branch},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(f"@{branch}", result.stdout)
+        self.assertIn("no commit was created", result.stdout)
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(result.stdout + result.stderr)
+
+        capture = json.loads(self.capture.read_text())
+        ref_path = (
+            "/repos/vitalitychems-dot/GitMesh/git/ref/heads/" +
+            encoded_branch
+        )
+        self.assertEqual(
+            sum(request["path"] == ref_path for request in capture["requests"]),
+            2,
+        )
+        self.assertTrue(all(request["method"] == "GET" for request in capture["requests"]))
+        self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
+        self.assert_preview_snapshot_matches_content_reads(result.stdout, capture)
+
+    def test_dry_run_retries_consistently_on_selected_branch(self):
+        self.set_remote_snapshot()
+        branch = "release/2026.10+canary#ops"
+        encoded_branch = "release%2F2026.10%2Bcanary%23ops"
+        readme = self.source_root / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nBranch preview fixture.\n")
+        result = self.run_sync(
+            args=("--dry-run", "--branch", branch),
+            moved_head_sha=MOVED_COMMIT_SHA,
+            env_overrides={"GITMESH_TEST_BRANCH": branch},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(f"@{branch}", result.stdout)
+        self.assertIn(f"compared with commit {MOVED_COMMIT_SHA[:7]}", result.stdout)
+        self.assertIn("no GitHub changes were made", result.stdout)
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(result.stdout + result.stderr)
+
+        capture = json.loads(self.capture.read_text())
+        ref_path = (
+            "/repos/vitalitychems-dot/GitMesh/git/ref/heads/" +
+            encoded_branch
+        )
+        requests = capture["requests"]
+        self.assertEqual(sum(request["path"] == ref_path for request in requests), 3)
+        content_reads = [
+            request for request in requests
+            if request["method"] == "GET" and "/contents/" in request["path"]
+        ]
+        self.assertEqual(len(content_reads), 6)
+        self.assertEqual(
+            [request["ref"] for request in content_reads],
+            [INITIAL_COMMIT_SHA] * 3 + [MOVED_COMMIT_SHA] * 3,
+        )
+        self.assertTrue(all(request["method"] == "GET" for request in requests))
+
+    def test_sync_uses_selected_branch_and_preserves_non_force_update(self):
+        self.set_remote_snapshot()
+        branch = "release/2026.10+canary#ops"
+        encoded_branch = "release%2F2026.10%2Bcanary%23ops"
+        readme = self.source_root / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nBranch-specific sync fixture.\n")
+
+        result = self.run_sync(
+            args=("--branch", branch),
+            env_overrides={"GITMESH_TEST_BRANCH": branch},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(f"@{branch}", result.stdout)
+        self.assertIn("Synced 1 changed allowlisted source file", result.stdout)
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(result.stdout + result.stderr)
+
+        capture = json.loads(self.capture.read_text())
+        update = capture["requests"][-1]
+        self.assertEqual(
+            update["path"],
+            "/repos/vitalitychems-dot/GitMesh/git/refs/heads/" + encoded_branch,
+        )
+        self.assertEqual(update["method"], "PATCH")
+        self.assertIs(update["body"]["force"], False)
+        self.assertTrue(all(request["hasExpectedBearer"] for request in capture["requests"]))
+
+    def test_invalid_branch_selection_stops_before_github_request(self):
+        invalid_branches = (
+            "../admin",
+            "release/../admin",
+            "release//candidate",
+            "/release",
+            "release/",
+            "feature?ref=main",
+            "release/.hidden",
+            "release/head.lock",
+            "branch with spaces",
+            "bad\\branch",
+            "@",
+            "--dry-run",
+            "a" * 256,
+        )
+        for branch in invalid_branches:
+            with self.subTest(branch=branch):
+                result = self.run_sync(args=("--branch", branch), token_value=None)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--branch requires a valid Git branch name", result.stderr)
+                self.assertNotIn(branch, result.stdout + result.stderr)
+                self.assert_safe_failure_output(result)
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+
+    def test_branch_option_requires_one_valid_name_and_sync_mode(self):
+        invalid_argument_sets = (
+            ("--branch",),
+            ("--branch", "release/candidate", "--branch", "release/other"),
+            ("--branch", "release/candidate", "--check-local"),
+            ("--dry-run", "--dry-run"),
+        )
+        for args in invalid_argument_sets:
+            with self.subTest(args=args):
+                result = self.run_sync(args=args, token_value=None)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Usage: node ./sync-public-source.mjs", result.stderr)
+                self.assert_safe_failure_output(result)
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+
     def test_dry_run_rejects_malformed_initial_and_first_comparison_commit_ids(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"
@@ -1205,7 +1339,7 @@ process.on("exit", saveCapture);
         result = self.run_sync(args=("--unexpected-option",))
         self.assertEqual(result.returncode, 2)
         self.assertIn(
-            "Usage: node ./sync-public-source.mjs [--dry-run | --check-local | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
+            "Usage: node ./sync-public-source.mjs [--dry-run] [--branch <name>] | [--check-local | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
             result.stderr,
         )
         self.assert_safe_failure_output(result)
@@ -3194,6 +3328,33 @@ process.on("exit", saveCapture);
         self.assert_safe_failure_output(result)
         capture = json.loads(self.capture.read_text())
         update = capture["requests"][-1]
+        self.assertEqual(update["method"], "PATCH")
+        self.assertIs(update["body"]["force"], False)
+
+    def test_selected_branch_conflict_stops_without_force_update(self):
+        self.set_remote_snapshot()
+        branch = "release/2026.10+canary#ops"
+        encoded_branch = "release%2F2026.10%2Bcanary%23ops"
+        readme = self.source_root / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nConflict fixture.\n")
+        result = self.run_sync(
+            args=("--branch", branch),
+            fail_at="PATCH /git/refs/heads/" + encoded_branch,
+            fail_mode="http",
+            fail_status=409,
+            env_overrides={"GITMESH_TEST_BRANCH": branch},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HTTP 409", result.stderr)
+        self.assertIn("branch changed while syncing", result.stderr)
+        self.assertIn("No force update was attempted.", result.stderr)
+        self.assert_safe_failure_output(result)
+        capture = json.loads(self.capture.read_text())
+        update = capture["requests"][-1]
+        self.assertEqual(
+            update["path"],
+            "/repos/vitalitychems-dot/GitMesh/git/refs/heads/" + encoded_branch,
+        )
         self.assertEqual(update["method"], "PATCH")
         self.assertIs(update["body"]["force"], False)
 

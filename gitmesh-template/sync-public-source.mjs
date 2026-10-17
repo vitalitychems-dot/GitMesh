@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const OWNER = "vitalitychems-dot";
 const REPOSITORY = "GitMesh";
-const BRANCH = "main";
+const DEFAULT_BRANCH = "main";
 const API_ROOT = `https://api.github.com/repos/${OWNER}/${REPOSITORY}`;
 const MAX_SOURCE_BYTES = 512 * 1024;
 const STAGED_GIT_TIMEOUT_ENV = "GITMESH_STAGED_SCAN_TIMEOUT_MS";
@@ -62,6 +62,12 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_sync_publishes_only_the_fixed_source_allowlist",
   "test_sync_stops_safely_when_object_creation_returns_unreadable_json",
   "test_normal_sync_stops_safely_on_malformed_object_ids",
+  "test_dry_run_uses_selected_branch_and_encodes_ref_route",
+  "test_dry_run_retries_consistently_on_selected_branch",
+  "test_sync_uses_selected_branch_and_preserves_non_force_update",
+  "test_selected_branch_conflict_stops_without_force_update",
+  "test_invalid_branch_selection_stops_before_github_request",
+  "test_branch_option_requires_one_valid_name_and_sync_mode",
   "test_unchanged_source_skips_blob_tree_commit_and_branch_update",
   "test_dry_run_with_no_changes_reports_no_commit_and_makes_no_writes",
   "test_dry_run_lists_only_changed_paths_without_contents_or_writes",
@@ -164,6 +170,10 @@ const PREFLIGHT_RERUN_MAX_LINE_LENGTH = 100;
 const MINIMUM_PYTHON_VERSION = { major: 3, minor: 9 };
 const PYTHON_VERSION_CHECK_COMMAND =
   "import sys; print('%s.%s' % (sys.version_info[0], sys.version_info[1]))";
+const SOURCE_SYNC_USAGE =
+  "Usage: node ./sync-public-source.mjs [--dry-run] [--branch <name>] | " +
+  "[--check-local | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | " +
+  "--check-staged-credentials | --check-push-credentials | --check-syntax].";
 
 function getToken() {
   const token = process.env.GITHUB_TOKEN;
@@ -178,6 +188,37 @@ function requireSha(value, label) {
     throw new Error(`GitHub returned an invalid ${label}; sync stopped.`);
   }
   return value;
+}
+
+function isValidBranchName(branch) {
+  if (
+    typeof branch !== "string" ||
+    branch.length === 0 ||
+    branch.length > 255 ||
+    branch.startsWith("-") ||
+    branch === "@" ||
+    !/^[\x21-\x7e]+$/.test(branch) ||
+    branch.includes("..") ||
+    branch.includes("@{") ||
+    branch.startsWith("/") ||
+    branch.endsWith("/") ||
+    branch.endsWith(".") ||
+    branch.includes("//")
+  ) {
+    return false;
+  }
+  for (const forbidden of ["~", "^", ":", "?", "*", "[", "\\"]) {
+    if (branch.includes(forbidden)) return false;
+  }
+  return branch.split("/").every(
+    (segment) => segment.length > 0 &&
+      !segment.startsWith(".") &&
+      !segment.toLowerCase().endsWith(".lock"),
+  );
+}
+
+function encodedBranchName(branch) {
+  return encodeURIComponent(branch);
 }
 
 function findEmbeddedCredentialLines(text) {
@@ -1688,23 +1729,32 @@ async function findChangedFiles(token, files, refSha) {
   return changedFiles;
 }
 
-async function previewSource(token, files) {
+async function previewSource(token, files, branch) {
   let parentSha;
   let changedFiles;
   let branchAdvancedToSha;
   try {
-    const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
-    parentSha = requireSha(ref?.object?.sha, "main branch commit");
+    const ref = await githubRequest(
+      token,
+      `/git/ref/heads/${encodedBranchName(branch)}`,
+    );
+    parentSha = requireSha(ref?.object?.sha, `${branch} branch commit`);
     changedFiles = await findChangedFiles(token, files, parentSha);
 
-    const latestRef = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
-    const latestSha = requireSha(latestRef?.object?.sha, "main branch commit");
+    const latestRef = await githubRequest(
+      token,
+      `/git/ref/heads/${encodedBranchName(branch)}`,
+    );
+    const latestSha = requireSha(latestRef?.object?.sha, `${branch} branch commit`);
     if (latestSha !== parentSha) {
       parentSha = latestSha;
       changedFiles = await findChangedFiles(token, files, parentSha);
 
-      const refreshedRef = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
-      const refreshedSha = requireSha(refreshedRef?.object?.sha, "main branch commit");
+      const refreshedRef = await githubRequest(
+        token,
+        `/git/ref/heads/${encodedBranchName(branch)}`,
+      );
+      const refreshedSha = requireSha(refreshedRef?.object?.sha, `${branch} branch commit`);
       if (refreshedSha !== parentSha) {
         branchAdvancedToSha = refreshedSha;
       }
@@ -1727,14 +1777,14 @@ async function previewSource(token, files) {
   const shortParentSha = parentSha.slice(0, 7);
   if (changedFiles.length === 0) {
     console.log(
-      `Dry run: all ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH} (commit ${shortParentSha}); ` +
+      `Dry run: all ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${branch} (commit ${shortParentSha}); ` +
       "no changes would be published and no commit was created.",
     );
     return;
   }
 
   console.log(
-    `Dry run: ${changedFiles.length} allowlisted source files would be published to ${OWNER}/${REPOSITORY}@${BRANCH}, ` +
+    `Dry run: ${changedFiles.length} allowlisted source files would be published to ${OWNER}/${REPOSITORY}@${branch}, ` +
     `compared with commit ${shortParentSha}; no GitHub changes were made.`,
   );
   console.log("Changed files:");
@@ -1744,9 +1794,41 @@ async function previewSource(token, files) {
 }
 
 function parseArguments(args) {
-  if (args.length === 0) {
+  let dryRun = false;
+  let branch = DEFAULT_BRANCH;
+  let branchSpecified = false;
+  const remainingArgs = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--dry-run") {
+      if (dryRun) throw new Error(SOURCE_SYNC_USAGE);
+      dryRun = true;
+      continue;
+    }
+    if (argument === "--branch") {
+      if (branchSpecified || index + 1 >= args.length) {
+        throw new Error(SOURCE_SYNC_USAGE);
+      }
+      const candidate = args[index + 1];
+      index += 1;
+      if (!isValidBranchName(candidate)) {
+        throw new Error(
+          "--branch requires a valid Git branch name: use up to 255 printable ASCII characters " +
+          "without spaces, a leading hyphen, or invalid Git ref components. No GitHub requests were made.",
+        );
+      }
+      branch = candidate;
+      branchSpecified = true;
+      continue;
+    }
+    remainingArgs.push(argument);
+  }
+
+  if (remainingArgs.length === 0) {
     return {
-      dryRun: false,
+      dryRun,
+      branch,
       checkCredentials: false,
       checkStagedCredentials: false,
       checkPushCredentials: false,
@@ -1755,18 +1837,9 @@ function parseArguments(args) {
       checkSyntax: false,
     };
   }
-  if (args.length === 1 && args[0] === "--dry-run") {
-    return {
-      dryRun: true,
-      checkCredentials: false,
-      checkStagedCredentials: false,
-      checkPushCredentials: false,
-      checkHistoryCredentials: false,
-      historySince: null,
-      checkSyntax: false,
-    };
-  }
-  if (args.length === 1 && args[0] === "--check-credentials") {
+  if (dryRun || branchSpecified) throw new Error(SOURCE_SYNC_USAGE);
+
+  if (remainingArgs.length === 1 && remainingArgs[0] === "--check-credentials") {
     return {
       dryRun: false,
       checkCredentials: true,
@@ -1777,13 +1850,13 @@ function parseArguments(args) {
       checkSyntax: false,
     };
   }
-  if (args.length === 1 && args[0] === "--check-local") {
+  if (remainingArgs.length === 1 && remainingArgs[0] === "--check-local") {
     return {
       dryRun: false,
       checkLocalSource: true,
     };
   }
-  if (args.length === 1 && args[0] === "--check-staged-credentials") {
+  if (remainingArgs.length === 1 && remainingArgs[0] === "--check-staged-credentials") {
     return {
       dryRun: false,
       checkCredentials: false,
@@ -1794,7 +1867,7 @@ function parseArguments(args) {
       checkSyntax: false,
     };
   }
-  if (args.length === 1 && args[0] === "--check-history-credentials") {
+  if (remainingArgs.length === 1 && remainingArgs[0] === "--check-history-credentials") {
     return {
       dryRun: false,
       checkCredentials: false,
@@ -1805,7 +1878,7 @@ function parseArguments(args) {
       checkSyntax: false,
     };
   }
-  if (args.length === 1 && args[0] === "--check-push-credentials") {
+  if (remainingArgs.length === 1 && remainingArgs[0] === "--check-push-credentials") {
     return {
       dryRun: false,
       checkCredentials: false,
@@ -1816,8 +1889,12 @@ function parseArguments(args) {
       checkSyntax: false,
     };
   }
-  if (args[0] === "--check-history-credentials" && args.length === 3 && args[1] === "--since") {
-    if (!GIT_COMMIT_ID_PATTERN.test(args[2])) {
+  if (
+    remainingArgs[0] === "--check-history-credentials" &&
+    remainingArgs.length === 3 &&
+    remainingArgs[1] === "--since"
+  ) {
+    if (!GIT_COMMIT_ID_PATTERN.test(remainingArgs[2])) {
       throw new Error(
         "--since requires a full 40- or 64-character commit ID. No GitHub requests were made.",
       );
@@ -1828,11 +1905,11 @@ function parseArguments(args) {
       checkStagedCredentials: false,
       checkPushCredentials: false,
       checkHistoryCredentials: true,
-      historySince: args[2].toLowerCase(),
+      historySince: remainingArgs[2].toLowerCase(),
       checkSyntax: false,
     };
   }
-  if (args.length === 1 && args[0] === "--check-syntax") {
+  if (remainingArgs.length === 1 && remainingArgs[0] === "--check-syntax") {
     return {
       dryRun: false,
       checkCredentials: false,
@@ -1843,25 +1920,26 @@ function parseArguments(args) {
       checkSyntax: true,
     };
   }
-  throw new Error(
-    "Usage: node ./sync-public-source.mjs [--dry-run | --check-local | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
-  );
+  throw new Error(SOURCE_SYNC_USAGE);
 }
 
-async function syncSource({ dryRun }) {
+async function syncSource({ dryRun, branch }) {
   const token = getToken();
   const files = readSourceFiles();
   runSecurityPreflight();
   if (dryRun) {
-    await previewSource(token, files);
+    await previewSource(token, files, branch);
     return;
   }
 
-  const ref = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
-  const parentSha = requireSha(ref?.object?.sha, "main branch commit");
+  const ref = await githubRequest(
+    token,
+    `/git/ref/heads/${encodedBranchName(branch)}`,
+  );
+  const parentSha = requireSha(ref?.object?.sha, `${branch} branch commit`);
   const changedFiles = await findChangedFiles(token, files, parentSha);
   if (changedFiles.length === 0) {
-    console.log(`All ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${BRANCH}; no commit created.`);
+    console.log(`All ${files.length} allowlisted source files already match ${OWNER}/${REPOSITORY}@${branch}; no commit created.`);
     return;
   }
 
@@ -1893,15 +1971,20 @@ async function syncSource({ dryRun }) {
   });
   const commitSha = requireSha(commit?.sha, "commit SHA");
 
-  const updatedRef = await githubRequest(token, `/git/refs/heads/${BRANCH}`, "PATCH", {
-    sha: commitSha,
-    force: false,
-  });
+  const updatedRef = await githubRequest(
+    token,
+    `/git/refs/heads/${encodedBranchName(branch)}`,
+    "PATCH",
+    {
+      sha: commitSha,
+      force: false,
+    },
+  );
   if (updatedRef?.object?.sha !== commitSha) {
     throw new Error("GitHub did not confirm the source sync commit.");
   }
 
-  console.log(`Synced ${changedFiles.length} changed allowlisted source files to ${OWNER}/${REPOSITORY}@${BRANCH}.`);
+  console.log(`Synced ${changedFiles.length} changed allowlisted source files to ${OWNER}/${REPOSITORY}@${branch}.`);
   console.log("Changed files:");
   for (const { target } of changedFiles) {
     console.log(`- ${target}`);
