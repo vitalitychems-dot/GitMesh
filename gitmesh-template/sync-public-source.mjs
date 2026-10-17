@@ -136,6 +136,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_hook_setup_keeps_selected_worktree_check_after_move",
   "test_chain_existing_custom_hook_stays_active_after_worktree_move",
   "test_hook_status_reports_repository_local_setup_without_writing_config",
+  "test_hook_status_reports_inherited_repository_local_setup_as_shared",
   "test_hook_status_reports_shared_setup_without_writing_config",
   "test_hook_status_reports_inactive_setup_without_writing_config",
   "test_hook_status_reports_manual_hook_integration_without_writing_config",

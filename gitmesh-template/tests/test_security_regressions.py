@@ -4588,6 +4588,46 @@ class HookInstallerTests(unittest.TestCase):
         )
         self.assertEqual(self.git_config_snapshot(self.repo_root), before)
 
+    def test_hook_status_reports_inherited_repository_local_setup_as_shared(self):
+        worktree_root = self.repo_root / "status-inherited-linked-worktree"
+        added = self.run_git(["worktree", "add", "--detach", str(worktree_root), "HEAD"])
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        configured = self.run_git(
+            ["config", "--local", "core.hooksPath", "gitmesh-template/hooks"]
+        )
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        worktree_config_before = self.git_config_snapshot(worktree_root)
+        repository_config_before = self.git_config_snapshot(self.repo_root)
+
+        status = self.run_installer(
+            cwd=worktree_root,
+            args=("--status",),
+        )
+        output = status.stdout + status.stderr
+        self.assertEqual(status.returncode, 0, output)
+        self.assertIn("GitMesh pre-commit check: active", output)
+        self.assertIn(
+            "Scope: shared (repository-local across linked worktrees)",
+            output,
+        )
+        self.assertIn(
+            "To disable this GitMesh setup, run: git config --local --unset core.hooksPath '^gitmesh-template/hooks$'",
+            output,
+        )
+        self.assertNotIn("git config --worktree --unset core.hooksPath", output)
+        self.assertEqual(
+            self.git_config_snapshot(worktree_root),
+            worktree_config_before,
+        )
+        self.assertEqual(
+            self.git_config_snapshot(self.repo_root),
+            repository_config_before,
+        )
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get", "core.hooksPath"]).stdout.strip(),
+            "gitmesh-template/hooks",
+        )
+
     def test_hook_status_reports_shared_setup_without_writing_config(self):
         shared_hooks = self.template_root / "hooks"
         self.run_git(["config", "--global", "core.hooksPath", str(shared_hooks)])
