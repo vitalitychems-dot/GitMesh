@@ -140,19 +140,21 @@ function refuseSharedWorktreeSettings(repoRoot) {
 }
 
 function parseOptions(args) {
-  const acceptedOptions = new Set(["--worktree-local", "--chain-existing"]);
+  const acceptedOptions = new Set(["--worktree-local", "--chain-existing", "--status"]);
   if (
     args.length <= acceptedOptions.size &&
     new Set(args).size === args.length &&
-    args.every((argument) => acceptedOptions.has(argument))
+    args.every((argument) => acceptedOptions.has(argument)) &&
+    (!args.includes("--status") || args.length === 1)
   ) {
     return {
       worktreeLocal: args.includes("--worktree-local"),
       chainExisting: args.includes("--chain-existing"),
+      status: args.includes("--status"),
     };
   }
   throw new Error(
-    "Usage: node install-pre-commit-hook.mjs [--worktree-local] [--chain-existing]. No Git configuration was changed.",
+    "Usage: node install-pre-commit-hook.mjs [--status | [--worktree-local] [--chain-existing]]. No Git configuration was changed.",
   );
 }
 
@@ -223,6 +225,72 @@ function effectiveHooksDirectory(repoRoot) {
   return path.resolve(repoRoot, configuredPath);
 }
 
+function hookPathSettingScopeFallback(repoRoot, activeHooksDirectory, fallbackValue) {
+  const scopes = [];
+  if (worktreeConfigIsEnabled(repoRoot)) {
+    scopes.push(["--worktree", "worktree"]);
+  }
+  scopes.push(
+    ["--local", "local"],
+    ["--global", "global"],
+    ["--system", "system"],
+  );
+
+  for (const [scopeFlag, scopeName] of scopes) {
+    const rawValues = readHookPathValues([scopeFlag], repoRoot);
+    if (rawValues.length === 0) continue;
+    const result = runGit(
+      ["config", scopeFlag, "--path", "--get", "core.hooksPath"],
+      repoRoot,
+    );
+    if (result.status !== 0) {
+      throw new Error("Could not safely determine the active Git hook scope.");
+    }
+    const scopedPath = decodeGitOutput(
+      result.stdout,
+      "Could not safely determine the active Git hook scope.",
+    );
+    if (samePath(path.resolve(repoRoot, scopedPath), activeHooksDirectory)) {
+      return { scope: scopeName, value: rawValues.at(-1) };
+    }
+  }
+  return { scope: "unknown", value: fallbackValue };
+}
+
+function activeHookPathSetting(repoRoot, activeHooksDirectory) {
+  const values = readHookPathValues([], repoRoot);
+  if (values.length === 0) return { scope: "default", value: null };
+
+  const result = runGit(
+    ["config", "--show-scope", "--get", "core.hooksPath"],
+    repoRoot,
+  );
+  if (result.status === 129) {
+    return hookPathSettingScopeFallback(
+      repoRoot,
+      activeHooksDirectory,
+      values.at(-1),
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error("Could not safely determine the active Git hook scope.");
+  }
+  const text = decodeGitOutput(
+    result.stdout,
+    "Could not safely determine the active Git hook scope.",
+  );
+  const separator = text.indexOf("\t");
+  if (separator < 1) {
+    throw new Error("Could not safely determine the active Git hook scope.");
+  }
+  const scope = text.slice(0, separator);
+  const value = text.slice(separator + 1);
+  if (!value || /[\r\n\0]/.test(value)) {
+    throw new Error("The active Git hook setting is not a usable path.");
+  }
+  return { scope, value };
+}
+
 function absoluteGitDirectory(repoRoot) {
   const result = runGit(["rev-parse", "--absolute-git-dir"], repoRoot);
   if (result.status !== 0) {
@@ -251,6 +319,145 @@ function inspectExecutableHook(hookPath) {
       return { exists: false, executable: false };
     }
     throw new Error("Could not safely inspect existing Git hooks; no Git configuration was changed.");
+  }
+}
+
+function isExecutableFile(filePath) {
+  try {
+    const hookInfo = fs.statSync(filePath);
+    return hookInfo.isFile() &&
+      (process.platform === "win32" || (hookInfo.mode & 0o111) !== 0);
+  } catch {
+    return false;
+  }
+}
+
+function isCopyOfGitMeshHook(hookPath) {
+  if (!isExecutableFile(hookPath) || !isExecutableFile(HOOK_FILE)) return false;
+  if (samePath(hookPath, HOOK_FILE)) return true;
+  try {
+    return fs.readFileSync(hookPath).equals(fs.readFileSync(HOOK_FILE));
+  } catch {
+    return false;
+  }
+}
+
+function manuallyRunsGitMeshCheck(hookPath) {
+  if (!isExecutableFile(hookPath)) return false;
+  try {
+    const contents = fs.readFileSync(hookPath, "utf8");
+    return contents.includes(path.basename(SYNC_SCRIPT)) &&
+      contents.includes("--check-staged-credentials");
+  } catch {
+    return false;
+  }
+}
+
+function describeHookScope(scope, repoRoot) {
+  if (scope === "worktree") return "worktree-local";
+  if (scope === "local") {
+    return isLinkedWorktree(repoRoot)
+      ? "shared (repository-local across linked worktrees)"
+      : "repository-local";
+  }
+  if (scope === "global" || scope === "system") return `shared (${scope})`;
+  if (scope === "command") return "shared (temporary command-level setting)";
+  if (scope === "default") {
+    return isLinkedWorktree(repoRoot)
+      ? "shared (Git default hooks directory)"
+      : "repository-local (Git default hooks directory)";
+  }
+  return `shared (${scope} Git configuration scope)`;
+}
+
+function hookSettingDisableCommand(setting, hookPath, copiedHook) {
+  if (copiedHook || setting.scope === "default") {
+    return `rm -- ${shellQuote(hookPath)}`;
+  }
+  const scopeFlag = {
+    worktree: "--worktree",
+    local: "--local",
+    global: "--global",
+    system: "--system",
+  }[setting.scope];
+  if (!scopeFlag || !setting.value) return null;
+  const valuePattern = `^${escapeRegex(setting.value)}$`;
+  return `git config ${scopeFlag} --unset core.hooksPath ${shellQuote(valuePattern)}`;
+}
+
+function reportHookStatus(repoRoot) {
+  const activeHooksDirectory = effectiveHooksDirectory(repoRoot);
+  const setting = activeHookPathSetting(repoRoot, activeHooksDirectory);
+  const preCommitPath = path.join(activeHooksDirectory, "pre-commit");
+  const pointsToGitMeshDirectory = samePath(activeHooksDirectory, HOOK_DIRECTORY);
+  const managedDispatcher = dispatcherIsManaged(activeHooksDirectory) &&
+    isExecutableFile(preCommitPath);
+  const copiedHook = !pointsToGitMeshDirectory && isCopyOfGitMeshHook(preCommitPath);
+  const manualIntegration = !pointsToGitMeshDirectory && !copiedHook && !managedDispatcher &&
+    manuallyRunsGitMeshCheck(preCommitPath);
+  const active = managedDispatcher || copiedHook || (
+    pointsToGitMeshDirectory && isExecutableFile(HOOK_FILE)
+  ) || manualIntegration;
+  const configuredButUnavailable = !active && (
+    pointsToGitMeshDirectory ||
+    (dispatcherIsManaged(activeHooksDirectory) && !isExecutableFile(preCommitPath))
+  );
+
+  if (active) {
+    console.log("GitMesh pre-commit check: active");
+    console.log(`Scope: ${describeHookScope(setting.scope, repoRoot)}`);
+    console.log(`Active hooks directory: ${activeHooksDirectory}`);
+    if (manualIntegration) {
+      console.log(`GitMesh check found in the existing hook: ${preCommitPath}`);
+      console.log(
+        `To disable only the GitMesh check, remove its command from ${shellQuote(preCommitPath)} and keep the other hook commands.`,
+      );
+      return;
+    }
+    const disableCommand = hookSettingDisableCommand(setting, preCommitPath, copiedHook);
+    if (disableCommand) {
+      console.log(`To disable this GitMesh setup, run: ${disableCommand}`);
+    } else {
+      console.log(
+        "This GitMesh hook is active through a temporary or unclassified Git setting; no persistent disable command is available.",
+      );
+    }
+    return;
+  }
+
+  console.log(
+    configuredButUnavailable
+      ? "GitMesh pre-commit check: configured but unavailable"
+      : "GitMesh pre-commit check: inactive",
+  );
+  console.log("Scope: inactive");
+  if (setting.scope !== "default") {
+    console.log(
+      `Git's active hooks path is ${describeHookScope(setting.scope, repoRoot)} at ${activeHooksDirectory}, but it does not contain a recognized GitMesh hook.`,
+    );
+    if (configuredButUnavailable) {
+      const disableCommand = hookSettingDisableCommand(setting, preCommitPath, false);
+      if (disableCommand) {
+        console.log(`To remove this inactive GitMesh setting, run: ${disableCommand}`);
+      } else {
+        console.log("No persistent disable command is available for this hook setting.");
+      }
+    } else {
+      console.log(
+        "No GitMesh-specific disable command is available; the existing hook setting was left untouched.",
+      );
+    }
+  } else if (configuredButUnavailable) {
+    console.log(
+      `The configured GitMesh hooks directory has no executable pre-commit hook at ${preCommitPath}.`,
+    );
+    const disableCommand = hookSettingDisableCommand(setting, preCommitPath, false);
+    if (disableCommand) {
+      console.log(`To remove this inactive GitMesh setting, run: ${disableCommand}`);
+    }
+  } else {
+    console.log("No GitMesh hook was found in Git's default hooks directory.");
+    console.log("No GitMesh-specific disable command is needed.");
   }
 }
 
@@ -578,8 +785,8 @@ function installWorktreeLocalHook(repoRoot, desiredHooksPath) {
 }
 
 function installHook(args = process.argv.slice(2)) {
-  const { worktreeLocal, chainExisting } = parseOptions(args);
-  requireHookFile();
+  const { worktreeLocal, chainExisting, status } = parseOptions(args);
+  if (!status) requireHookFile();
   const rootResult = runGit(["rev-parse", "--show-toplevel"], ROOT);
   if (rootResult.status !== 0) {
     throw new Error("Run this setup from inside a Git working tree; no Git configuration was changed.");
@@ -596,6 +803,10 @@ function installHook(args = process.argv.slice(2)) {
     throw new Error(
       "The GitMesh hook files are outside this Git working tree; no Git configuration was changed.",
     );
+  }
+  if (status) {
+    reportHookStatus(repoRoot);
+    return;
   }
   const desiredHooksPath = path.relative(repoRoot, HOOK_DIRECTORY).split(path.sep).join("/");
   if (chainExisting) {
