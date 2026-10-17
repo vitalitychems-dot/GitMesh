@@ -43,6 +43,55 @@ ALLOWED_SOURCE_NAMES = (
     "README.md",
     "sync-public-source.mjs",
 )
+CREDENTIAL_HOOK_TEST_CASES = {
+    "github-prefixed-token": (
+        ("GitHub personal token", "ghp_" + "A" * 36),
+        ("GitHub OAuth token", "gho_" + "B" * 36),
+        ("GitHub user token", "ghu_" + "C" * 36),
+        ("GitHub server token", "ghs_" + "D" * 36),
+        ("GitHub refresh token", "ghr_" + "E" * 36),
+    ),
+    "github-fine-grained-token": (
+        ("GitHub fine-grained token", "github_pat_" + "F" * 40),
+    ),
+    "gitlab-token": (
+        ("GitLab personal access token", "glpat-" + "G" * 24),
+    ),
+    "npm-token": (
+        ("npm token", "npm_" + "H" * 32),
+    ),
+    "slack-token": (
+        ("Slack bot token", "xoxb-" + "I" * 24),
+        ("Slack app token", "xoxa-" + "J" * 24),
+        ("Slack user token", "xoxp-" + "K" * 24),
+        ("Slack refresh token", "xoxr-" + "L" * 24),
+        ("Slack service token", "xoxs-" + "M" * 24),
+    ),
+    "google-api-key": (
+        ("Google API key", "AIza" + "N" * 35),
+    ),
+    "openai-prefixed-key": (
+        ("OpenAI project key", "sk-proj-" + "O" * 24),
+        ("OpenAI admin key", "sk-admin-" + "P" * 24),
+        ("OpenAI service account key", "sk-svcacct-" + "Q" * 24),
+    ),
+    "openai-legacy-key": (
+        ("OpenAI legacy key", "sk-" + "R" * 40),
+    ),
+    "stripe-secret-key": (
+        ("Stripe live secret", "sk_live_" + "S" * 24),
+        ("Stripe test secret", "sk_test_" + "T" * 24),
+    ),
+    "private-key-header": (
+        ("unencrypted private key", "-----BEGIN PRIVATE KEY-----"),
+        ("encrypted private key", "-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+        ("RSA private key", "-----BEGIN RSA PRIVATE KEY-----"),
+        ("EC private key", "-----BEGIN EC PRIVATE KEY-----"),
+        ("DSA private key", "-----BEGIN DSA PRIVATE KEY-----"),
+        ("OpenSSH private key", "-----BEGIN OPENSSH PRIVATE KEY-----"),
+        ("PGP private key", "-----BEGIN PGP PRIVATE KEY-----"),
+    ),
+}
 
 
 def reported_changed_paths(output):
@@ -2369,33 +2418,9 @@ class PreCommitHookTests(unittest.TestCase):
 
     def test_precommit_hook_blocks_every_supported_credential_pattern(self):
         credential_cases = [
-            ("GitHub personal token", "ghp_" + "A" * 36),
-            ("GitHub OAuth token", "gho_" + "B" * 36),
-            ("GitHub user token", "ghu_" + "C" * 36),
-            ("GitHub server token", "ghs_" + "D" * 36),
-            ("GitHub refresh token", "ghr_" + "E" * 36),
-            ("GitHub fine-grained token", "github_pat_" + "F" * 40),
-            ("GitLab personal access token", "glpat-" + "G" * 24),
-            ("npm token", "npm_" + "H" * 32),
-            ("Slack bot token", "xoxb-" + "I" * 24),
-            ("Slack app token", "xoxa-" + "J" * 24),
-            ("Slack user token", "xoxp-" + "K" * 24),
-            ("Slack refresh token", "xoxr-" + "L" * 24),
-            ("Slack service token", "xoxs-" + "M" * 24),
-            ("Google API key", "AIza" + "N" * 35),
-            ("OpenAI project key", "sk-proj-" + "O" * 24),
-            ("OpenAI admin key", "sk-admin-" + "P" * 24),
-            ("OpenAI service account key", "sk-svcacct-" + "Q" * 24),
-            ("OpenAI legacy key", "sk-" + "R" * 40),
-            ("Stripe live secret", "sk_live_" + "S" * 24),
-            ("Stripe test secret", "sk_test_" + "T" * 24),
-            ("unencrypted private key", "-----BEGIN PRIVATE KEY-----"),
-            ("encrypted private key", "-----BEGIN ENCRYPTED PRIVATE KEY-----"),
-            ("RSA private key", "-----BEGIN RSA PRIVATE KEY-----"),
-            ("EC private key", "-----BEGIN EC PRIVATE KEY-----"),
-            ("DSA private key", "-----BEGIN DSA PRIVATE KEY-----"),
-            ("OpenSSH private key", "-----BEGIN OPENSSH PRIVATE KEY-----"),
-            ("PGP private key", "-----BEGIN PGP PRIVATE KEY-----"),
+            case
+            for pattern_cases in CREDENTIAL_HOOK_TEST_CASES.values()
+            for case in pattern_cases
         ]
         hook_env = self.hook_environment_without_github_token()
         self.assertNotIn("GITHUB_TOKEN", hook_env)
@@ -2429,6 +2454,49 @@ class PreCommitHookTests(unittest.TestCase):
                     "gitmesh-template/README.md",
                 )
                 self.assertFalse(self.network_marker.exists())
+
+    def test_precommit_hook_vectors_cover_every_scanner_pattern(self):
+        scanner_source = SYNC.read_text(encoding="utf-8")
+        pattern_block = re.search(
+            r"const EMBEDDED_CREDENTIAL_PATTERNS = \[(.*?)\n\];",
+            scanner_source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(
+            pattern_block,
+            "Keep scanner formats in an explicit registry so hook-test coverage can be checked.",
+        )
+        pattern_block_text = pattern_block.group(1)
+        scanner_pattern_ids = re.findall(
+            r'\bid\s*:\s*"([a-z0-9-]+)"',
+            pattern_block_text,
+        )
+        scanner_pattern_count = len(re.findall(r"\bpattern\s*:", pattern_block_text))
+
+        self.assertEqual(
+            len(scanner_pattern_ids),
+            scanner_pattern_count,
+            "Every scanner pattern needs an ID before it can be paired with a hook test vector.",
+        )
+        self.assertEqual(
+            len(scanner_pattern_ids),
+            len(set(scanner_pattern_ids)),
+            "Scanner credential pattern IDs must be unique.",
+        )
+        scanner_ids = set(scanner_pattern_ids)
+        test_vector_ids = set(CREDENTIAL_HOOK_TEST_CASES)
+        missing_vectors = sorted(scanner_ids - test_vector_ids)
+        stale_vectors = sorted(test_vector_ids - scanner_ids)
+        self.assertFalse(
+            missing_vectors or stale_vectors,
+            "Add representative synthetic commit-hook values to CREDENTIAL_HOOK_TEST_CASES "
+            f"for every scanner pattern. Missing vectors: {missing_vectors}; "
+            f"stale vector groups: {stale_vectors}.",
+        )
+        self.assertTrue(
+            all(CREDENTIAL_HOOK_TEST_CASES[pattern_id] for pattern_id in scanner_ids),
+            "Every scanner credential pattern needs at least one synthetic hook test value.",
+        )
 
     def test_precommit_hook_rejects_non_text_staged_files_without_leaking_contents(self):
         non_text_cases = (
