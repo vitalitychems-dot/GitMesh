@@ -83,6 +83,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely",
   "test_local_credential_check_reports_location_without_exposing_value",
+  "test_local_credential_check_repairs_unavailable_linked_and_oversized_sources",
   "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
   "test_precommit_hook_blocks_every_supported_credential_pattern",
@@ -408,6 +409,14 @@ function validateSourceFileInfo(fileInfo, source, operation = "sync") {
         "No GitHub requests were made.",
       );
     }
+    if (operation === "local-check") {
+      throw new Error(
+        `Refusing to check an invalid, linked, or oversized source file: ${source}. ` +
+        `Replace it with a standalone regular file (not a symlink or hard link) no larger than ` +
+        `${MAX_SOURCE_BYTES / 1024} KiB, then rerun the local credential check with --check-credentials. ` +
+        "No GitHub requests were made.",
+      );
+    }
     throw new Error(
       `Refusing to sync an invalid, linked, or oversized source file: ${source}. ` +
       "Review and save the intended file as a regular file within the size limit, then rerun sync. " +
@@ -434,6 +443,13 @@ function readSourceContent(sourcePath, source, operation = "sync") {
       throw new Error(
         `Refusing to check an unavailable JavaScript source file: ${source}. ` +
         "Review and save the intended file state, then rerun the local syntax check with --check-syntax. No GitHub requests were made.",
+      );
+    }
+    if (operation === "local-check") {
+      throw new Error(
+        `Refusing to check an unavailable source file: ${source}. ` +
+        "Restore or recreate the intended file at this path, then rerun the local credential check with --check-credentials. " +
+        "No GitHub requests were made.",
       );
     }
     throw new Error(
@@ -469,6 +485,13 @@ function readSourceContent(sourcePath, source, operation = "sync") {
       throw new Error(
         `Refusing to check a JavaScript source file that changed or could not be safely opened: ${source}. ` +
         "Review and save the intended file state, then rerun the local syntax check with --check-syntax. No GitHub requests were made.",
+      );
+    }
+    if (operation === "local-check") {
+      throw new Error(
+        `Refusing to check a source file that changed or could not be safely opened: ${source}. ` +
+        "Restore it as a standalone regular file, save it, then rerun the local credential check with --check-credentials. " +
+        "No GitHub requests were made.",
       );
     }
     throw new Error(

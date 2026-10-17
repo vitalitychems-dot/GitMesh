@@ -1410,6 +1410,87 @@ process.on("exit", saveCapture);
         self.assertEqual(capture["requests"], [])
         self.assertEqual(capture["preflightCalls"], [])
 
+    def test_local_credential_check_repairs_unavailable_linked_and_oversized_sources(self):
+        source_name = "gitmesh-ultimate-core.mjs"
+        source_path = self.source_root / source_name
+        private_path = self.source_root / "SovereignMeshVault/ledger_matrix/private-record.json"
+        original_content = source_path.read_bytes()
+        local_guidance = (
+            "Replace it with a standalone regular file (not a symlink or hard link) no larger than "
+            "512 KiB, then rerun the local credential check with --check-credentials."
+        )
+        cases = (
+            (
+                "unavailable",
+                "Refusing to check an unavailable source file",
+                "Restore or recreate the intended file at this path, then rerun the local credential check with --check-credentials.",
+                (),
+                [],
+            ),
+            (
+                "symlink",
+                "Refusing to check an invalid, linked, or oversized source file",
+                local_guidance,
+                ("PRIVATE_RECORD_SENTINEL",),
+                [("lstatSync", str(source_path))],
+            ),
+            (
+                "hard link",
+                "Refusing to check an invalid, linked, or oversized source file",
+                local_guidance,
+                ("PRIVATE_RECORD_SENTINEL",),
+                [("lstatSync", str(source_path))],
+            ),
+            (
+                "oversized",
+                "Refusing to check an invalid, linked, or oversized source file",
+                local_guidance,
+                ("OVERSIZED_LOCAL_CHECK_SOURCE_SENTINEL",),
+                [("lstatSync", str(source_path))],
+            ),
+        )
+
+        try:
+            for case_name, expected_error, expected_guidance, sentinels, expected_reads in cases:
+                with self.subTest(source_type=case_name):
+                    source_path.unlink(missing_ok=True)
+                    if case_name == "symlink":
+                        source_path.symlink_to(private_path)
+                    elif case_name == "hard link":
+                        os.link(private_path, source_path)
+                    elif case_name == "oversized":
+                        source_path.write_bytes(
+                            b"OVERSIZED_LOCAL_CHECK_SOURCE_SENTINEL" + b"x" * (512 * 1024)
+                        )
+
+                    result = self.run_sync(
+                        token_value=None,
+                        args=("--check-credentials",),
+                    )
+                    output = result.stdout + result.stderr
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected_error, result.stderr)
+                    self.assertIn(source_name, result.stderr)
+                    self.assertIn(expected_guidance, result.stderr)
+                    self.assertIn("No GitHub requests were made", result.stderr)
+                    self.assertNotIn("rerun sync", output)
+                    self.assert_safe_failure_output(result)
+                    for sentinel in sentinels:
+                        self.assertNotIn(sentinel, output)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+                    self.assertEqual(capture["preflightCalls"], [])
+                    observed_reads = [
+                        (event["method"], event["path"])
+                        for event in capture["filesystemReads"]
+                        if event["path"] == str(source_path)
+                    ]
+                    self.assertEqual(observed_reads, expected_reads)
+        finally:
+            source_path.unlink(missing_ok=True)
+            source_path.write_bytes(original_content)
+
     def test_local_credential_check_guides_non_text_repair_without_leaking(self):
         source_path = self.source_root / "README.md"
         original_content = source_path.read_bytes()
