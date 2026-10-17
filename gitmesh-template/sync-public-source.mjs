@@ -36,6 +36,12 @@ const EMBEDDED_CREDENTIAL_PATTERNS = [
   /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/,
   /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/,
 ];
+const SAFE_PREFLIGHT_TEST_CLASSES = new Set([
+  "SigilRotationTests",
+  "GitHubSyncTests",
+  "PreCommitHookTests",
+  "HookInstallerTests",
+]);
 const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_rotation_failure_recovery_and_never_reuses_active_sigil",
   "test_sync_publishes_only_the_fixed_source_allowlist",
@@ -134,38 +140,63 @@ function nonTextSourceError(source, operation = "sync") {
   );
 }
 
+function withPreflightRerun(summary, failedTests = []) {
+  const rerunOnly = failedTests.length > 0;
+  return {
+    summary,
+    rerunOnly,
+    rerunCommand: rerunOnly
+      ? `${PREFLIGHT_REPRO_COMMAND} ${failedTests.join(" ")}`
+      : PREFLIGHT_REPRO_COMMAND,
+  };
+}
+
 function summarizePreflightFailure(result) {
   if (
     result.error?.code === "ETIMEDOUT" ||
     result.signal === "SIGTERM" ||
     result.signal === "SIGKILL"
   ) {
-    return "Security regression preflight timed out";
+    return withPreflightRerun("Security regression preflight timed out");
   }
   if (result.error?.code === "ENOBUFS") {
-    return "Security regression preflight exceeded its output limit";
+    return withPreflightRerun("Security regression preflight exceeded its output limit");
   }
   if (result.error) {
-    return "Python could not start the security regression preflight. " +
-      "Install Python 3 or make python3 available on PATH, then rerun the regression checks and sync";
+    return withPreflightRerun(
+      "Python could not start the security regression preflight. " +
+      "Install Python 3 or make python3 available on PATH, then rerun the regression checks and sync",
+    );
   }
   if (result.signal) {
-    return "Python security regression preflight was interrupted";
+    return withPreflightRerun("Python security regression preflight was interrupted");
   }
 
   const output = [result.stdout, result.stderr]
     .filter((chunk) => typeof chunk === "string")
     .join("\n");
-  const failedTests = new Set();
-  for (const match of output.matchAll(/^(?:FAIL|ERROR): (test_[A-Za-z0-9_]+) \(/gm)) {
-    if (SAFE_PREFLIGHT_TEST_NAMES.has(match[1])) {
-      failedTests.add(match[1]);
+  const failedTests = new Map();
+  for (const match of output.matchAll(
+    /^(?:FAIL|ERROR): (test_[A-Za-z0-9_]+) \(__main__\.([A-Za-z0-9_]+)\.(test_[A-Za-z0-9_]+)\)/gm,
+  )) {
+    const [, testName, testClass, qualifiedName] = match;
+    if (
+      testName === qualifiedName &&
+      SAFE_PREFLIGHT_TEST_NAMES.has(testName) &&
+      SAFE_PREFLIGHT_TEST_CLASSES.has(testClass)
+    ) {
+      failedTests.set(testName, `${testClass}.${testName}`);
     }
   }
   if (failedTests.size > 0) {
-    return `Security regression preflight failed in: ${[...failedTests].join(", ")}`;
+    return withPreflightRerun(
+      `Security regression preflight failed in: ${[...failedTests.keys()].join(", ")}`,
+      [...failedTests.values()],
+    );
   }
-  return "Security regression preflight failed; no safe failing test name was available";
+  return withPreflightRerun(
+    "Security regression preflight failed; no safe failing test name was available",
+  );
 }
 
 function runSecurityPreflight() {
@@ -200,9 +231,12 @@ function runSecurityPreflight() {
     },
   );
   if (result.error || result.status !== 0) {
-    const summary = summarizePreflightFailure(result);
+    const { summary, rerunOnly, rerunCommand } = summarizePreflightFailure(result);
+    const rerunInstruction = rerunOnly
+      ? "Rerun only the named checks from the workspace root"
+      : "Run locally from the workspace root";
     throw new Error(
-      `${summary}. Run locally from the workspace root: ${PREFLIGHT_REPRO_COMMAND}. ` +
+      `${summary}. ${rerunInstruction}: ${rerunCommand}. ` +
       "No GitHub requests were made.",
     );
   }
