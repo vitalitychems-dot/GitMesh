@@ -61,6 +61,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_missing_secret_fails_before_any_github_request",
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_credential_check_reports_location_without_exposing_value",
+  "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
   "test_precommit_hook_reports_unicode_separator_lines_without_exposing_content",
   "test_precommit_hook_blocks_when_node_is_missing",
@@ -114,10 +115,14 @@ function findEmbeddedCredentialLines(text) {
     );
 }
 
-function nonTextSourceError(source) {
+function nonTextSourceError(source, operation = "sync") {
+  const isLocalCheck = operation === "local-check";
   return new Error(
-    `Refusing to sync a non-text source file: ${source}. ` +
-      "Save the intended source as valid UTF-8 plain text, then rerun sync. " +
+    `Refusing to ${isLocalCheck ? "check" : "sync"} a non-text source file: ${source}. ` +
+      "Save the intended source as valid UTF-8 plain text, then " +
+      (isLocalCheck
+        ? "rerun the local credential check with --check-credentials. "
+        : "rerun sync. ") +
       "No GitHub requests were made.",
   );
 }
@@ -283,18 +288,18 @@ function readSourceContent(sourcePath, source) {
   }
 }
 
-function readSourceFiles({ validateSyntax = true } = {}) {
+function readSourceFiles({ validateSyntax = true, operation = "sync" } = {}) {
   const sourceFiles = ALLOWED_FILES.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
     const content = readSourceContent(sourcePath, source);
     if (content.includes(0)) {
-      throw nonTextSourceError(source);
+      throw nonTextSourceError(source, operation);
     }
     let text;
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(content);
     } catch {
-      throw nonTextSourceError(source);
+      throw nonTextSourceError(source, operation);
     }
     return {
       source,
@@ -341,7 +346,10 @@ function readSourceFiles({ validateSyntax = true } = {}) {
 }
 
 function checkLocalCredentials() {
-  const files = readSourceFiles({ validateSyntax: false });
+  const files = readSourceFiles({
+    validateSyntax: false,
+    operation: "local-check",
+  });
   console.log(
     `Credential check passed: no credential-like values found in ${files.length} allowlisted source files.`,
   );

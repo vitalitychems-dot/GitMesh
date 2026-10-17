@@ -1010,6 +1010,44 @@ process.on("exit", saveCapture);
         self.assertEqual(capture["requests"], [])
         self.assertEqual(capture["preflightCalls"], [])
 
+    def test_local_credential_check_guides_non_text_repair_without_leaking(self):
+        source_path = self.source_root / "README.md"
+        original_content = source_path.read_bytes()
+        non_text_cases = (
+            ("invalid UTF-8", b"\xffLOCAL_INVALID_UTF8_CONTENT_SENTINEL"),
+            ("NUL byte", b"\x00LOCAL_NUL_CONTENT_SENTINEL"),
+        )
+
+        try:
+            for case_name, content in non_text_cases:
+                with self.subTest(case=case_name):
+                    source_path.write_bytes(content)
+                    result = self.run_sync(
+                        token_value=None,
+                        args=("--check-credentials",),
+                    )
+                    output = result.stdout + result.stderr
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        f"Refusing to check a non-text source file: {source_path.name}.",
+                        result.stderr,
+                    )
+                    self.assertIn(
+                        "Save the intended source as valid UTF-8 plain text, then rerun the local credential check with --check-credentials.",
+                        result.stderr,
+                    )
+                    self.assertIn("No GitHub requests were made", result.stderr)
+                    self.assertNotIn("rerun sync", output)
+                    self.assertNotIn(content.decode("latin1"), output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+                    self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_malformed_remote_files_stop_before_any_github_write(self):
         target = "projects/local-vault/gitmesh-ultimate-core.mjs"
         malformed_cases = (
