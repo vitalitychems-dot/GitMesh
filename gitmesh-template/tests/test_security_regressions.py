@@ -355,6 +355,22 @@ const malformedJsonBody = process.env.GITMESH_TEST_MALFORMED_JSON_BODY;
 let mainRefReadCount = 0;
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
 childProcess.spawnSync = (command, ...args) => {
+  if (
+    command === process.execPath &&
+    args[0]?.[0] === "--input-type=module" &&
+    args[0]?.includes("--check") &&
+    Object.hasOwn(process.env, "GITMESH_TEST_NODE_SYNTAX_DIAGNOSTICS")
+  ) {
+    return {
+      error: undefined,
+      status: 1,
+      signal: null,
+      stdout: "",
+      stderr: process.env.GITMESH_TEST_NODE_SYNTAX_DIAGNOSTICS,
+      pid: 123,
+      output: [],
+    };
+  }
   if (command === "python3") {
     preflightCalls.push({
       command,
@@ -1876,6 +1892,92 @@ process.on("exit", saveCapture);
                     self.assertNotIn("SyntaxError", output)
                     self.assertNotIn("[stdin]", output)
                     self.assertNotIn("Node.js v", output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+                    self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
+    def test_syntax_diagnostics_are_sanitized_across_node_formats(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_content = source_path.read_bytes()
+        invalid_line = "const PRIVATE_NODE_FORMAT_SOURCE_SENTINEL = ;"
+        invalid_source = f"const SAFE_SYNTAX_CONTEXT = 1;\n{invalid_line}\n"
+        column = invalid_line.index(";") + 1
+        source_path.write_text(invalid_source)
+
+        cases = (
+            (
+                "caret-format",
+                (
+                    "[stdin]:2\n"
+                    f"{invalid_line}\n"
+                    f"{' ' * (column - 1)}^\n"
+                    "SyntaxError: RAW_NODE_DIAGNOSTIC_SENTINEL"
+                ),
+                f"{source_path.name} (line 2, column {column})",
+            ),
+            (
+                "explicit-column-format",
+                (
+                    f"[stdin]:2:{column}\n"
+                    f"{invalid_line}\n"
+                    f"{' ' * (column - 1)}^\n"
+                    "SyntaxError: RAW_NODE_DIAGNOSTIC_SENTINEL"
+                ),
+                f"{source_path.name} (line 2, column {column})",
+            ),
+            (
+                "unrecognized-format",
+                (
+                    "RAW_UNKNOWN_NODE_FORMAT_SENTINEL\n"
+                    f"{invalid_line}\n"
+                ),
+                source_path.name,
+            ),
+            (
+                "malformed-location",
+                (
+                    "[stdin]:9007199254740992:999999999999999999999\n"
+                    f"{invalid_line}\n"
+                    "^\n"
+                    "RAW_MALFORMED_NODE_LOCATION_SENTINEL"
+                ),
+                source_path.name,
+            ),
+        )
+        try:
+            for case_name, diagnostics, expected_location in cases:
+                with self.subTest(format=case_name):
+                    result = self.run_sync(
+                        env_overrides={
+                            "GITMESH_TEST_NODE_SYNTAX_DIAGNOSTICS": diagnostics,
+                        }
+                    )
+                    output = result.stdout + result.stderr
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected_location, result.stderr)
+                    self.assertIn(
+                        "Review and correct this file, save it, then rerun sync. No GitHub requests were made.",
+                        result.stderr,
+                    )
+                    self.assertNotIn(invalid_source, output)
+                    self.assertNotIn(invalid_line, output)
+                    self.assertNotIn("PRIVATE_NODE_FORMAT_SOURCE_SENTINEL", output)
+                    self.assertNotIn("RAW_NODE_DIAGNOSTIC_SENTINEL", output)
+                    self.assertNotIn("RAW_UNKNOWN_NODE_FORMAT_SENTINEL", output)
+                    self.assertNotIn("RAW_MALFORMED_NODE_LOCATION_SENTINEL", output)
+                    self.assertNotIn("[stdin]", output)
+                    self.assertNotIn("SyntaxError", output)
+                    self.assertNotIn("Node.js v", output)
+                    if case_name in {"unrecognized-format", "malformed-location"}:
+                        self.assertNotRegex(
+                            result.stderr,
+                            r"\(line \d+, column \d+\)",
+                        )
                     self.assert_safe_failure_output(result)
 
                     capture = json.loads(self.capture.read_text())
