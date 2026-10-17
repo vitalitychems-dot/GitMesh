@@ -10,6 +10,12 @@ const REPOSITORY = "GitMesh";
 const BRANCH = "main";
 const API_ROOT = `https://api.github.com/repos/${OWNER}/${REPOSITORY}`;
 const MAX_SOURCE_BYTES = 512 * 1024;
+const MAX_HISTORY_COMMITS = 500;
+const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
+const MAX_HISTORY_FINDINGS = 1000;
+const MAX_HISTORY_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
+const HISTORY_SCAN_TIMEOUT_MS = 120_000;
+const GIT_COMMIT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const ALLOWED_FILES = [
   {
     source: "gitmesh-ultimate-core.mjs",
@@ -70,6 +76,10 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_dry_run_refresh_failure_requests_rerun",
   "test_changed_source_updates_only_the_changed_allowlisted_file",
   "test_missing_secret_fails_before_any_github_request",
+  "test_history_credential_check_reports_removed_values_without_leaking",
+  "test_history_credential_check_accepts_a_since_commit_range",
+  "test_history_credential_check_fails_safely_for_large_history",
+  "test_history_credential_check_refuses_shallow_repositories",
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely",
   "test_local_credential_check_reports_location_without_exposing_value",
@@ -587,6 +597,267 @@ function runStagedGitCommand(args, cwd, failureMessage) {
   return result.stdout;
 }
 
+function runHistoryGitCommand(args, cwd, failureMessage, maxBuffer = MAX_HISTORY_COMMAND_OUTPUT_BYTES) {
+  const env = { ...process.env };
+  delete env.GITHUB_TOKEN;
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_PREFIX"]) {
+    delete env[name];
+  }
+  env.GIT_OPTIONAL_LOCKS = "0";
+  env.GIT_TERMINAL_PROMPT = "0";
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: null,
+    timeout: 15_000,
+    maxBuffer,
+    env,
+  });
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(
+      "Git timed out while scanning committed source history. Narrow the range with " +
+      "--since <full-commit-sha> and retry. No GitHub requests were made.",
+    );
+  }
+  if (result.error?.code === "ENOBUFS") {
+    throw new Error(
+      "Git produced more history data than the safe scan limit allows. Narrow the range with " +
+      "--since <full-commit-sha> and retry. No GitHub requests were made.",
+    );
+  }
+  if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
+    throw new Error(`${failureMessage} No GitHub requests were made.`);
+  }
+  return result.stdout;
+}
+
+function decodeHistoryGitOutput(output, failureMessage) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(output);
+  } catch {
+    throw new Error(`${failureMessage} No GitHub requests were made.`);
+  }
+}
+
+function checkHistoryCredentials(sinceCommit) {
+  const gitRootText = decodeHistoryGitOutput(
+    runHistoryGitCommand(
+      ["rev-parse", "--show-toplevel"],
+      ROOT,
+      "Could not locate a Git repository for the history scan.",
+    ),
+    "Git returned an unreadable repository path.",
+  ).trim();
+  if (!gitRootText) {
+    throw new Error("Could not locate a Git repository for the history scan. No GitHub requests were made.");
+  }
+  const gitRoot = path.resolve(gitRootText);
+  const shallowResult = decodeHistoryGitOutput(
+    runHistoryGitCommand(
+      ["rev-parse", "--is-shallow-repository"],
+      gitRoot,
+      "Could not determine whether the repository contains complete history.",
+    ),
+    "Git returned an unreadable shallow-repository status.",
+  ).trim();
+  if (shallowResult === "true") {
+    throw new Error(
+      "History scan cannot confirm complete history in a shallow clone. Use a full clone, then retry. " +
+      "No GitHub requests were made.",
+    );
+  }
+  if (shallowResult !== "false") {
+    throw new Error(
+      "Could not verify that the repository contains complete history. No GitHub requests were made.",
+    );
+  }
+
+  if (sinceCommit) {
+    const resolvedCommit = decodeHistoryGitOutput(
+      runHistoryGitCommand(
+        ["rev-parse", "--verify", `${sinceCommit}^{commit}`],
+        gitRoot,
+        "Could not resolve the --since commit. Use a full commit ID from this repository.",
+      ),
+      "Git returned an unreadable --since commit ID.",
+    ).trim().toLowerCase();
+    if (!GIT_COMMIT_ID_PATTERN.test(resolvedCommit)) {
+      throw new Error(
+        "Could not verify the --since commit. Use a full 40- or 64-character commit ID from this repository. " +
+        "No GitHub requests were made.",
+      );
+    }
+    const mergeBase = decodeHistoryGitOutput(
+      runHistoryGitCommand(
+        ["merge-base", resolvedCommit, "HEAD"],
+        gitRoot,
+        "Could not verify that the --since commit is on the current HEAD history.",
+      ),
+      "Git returned an unreadable --since merge base.",
+    ).trim().toLowerCase();
+    if (mergeBase !== resolvedCommit) {
+      throw new Error(
+        "The --since commit must be an ancestor of the current HEAD. No history was scanned. " +
+        "No GitHub requests were made.",
+      );
+    }
+  }
+
+  const sourceByGitPath = new Map();
+  for (const { source } of ALLOWED_FILES) {
+    const sourcePath = path.resolve(ROOT, source);
+    const relativePath = path.relative(gitRoot, sourcePath);
+    if (
+      path.isAbsolute(relativePath) ||
+      relativePath === ".." ||
+      relativePath.startsWith(`..${path.sep}`)
+    ) {
+      throw new Error(
+        "Could not map allowlisted source files to this repository for history scanning. " +
+        "No GitHub requests were made.",
+      );
+    }
+    sourceByGitPath.set(relativePath.split(path.sep).join("/"), source);
+  }
+
+  const revisionRange = sinceCommit ? `${sinceCommit}..HEAD` : "HEAD";
+  const logOutput = decodeHistoryGitOutput(
+    runHistoryGitCommand(
+      [
+        "log",
+        "--full-history",
+        "--root",
+        "-m",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--diff-filter=ACMRT",
+        "--format=%H",
+        "--name-only",
+        revisionRange,
+        "--",
+        ...sourceByGitPath.keys(),
+      ],
+      gitRoot,
+      "Could not safely list committed allowlisted source revisions. Narrow the range with " +
+      "--since <full-commit-sha> and retry.",
+    ),
+    "Git returned unreadable committed history data.",
+  );
+  const entries = [];
+  const seenEntries = new Set();
+  const commitIds = new Set();
+  let currentCommit = null;
+  for (const line of logOutput.split(/\r?\n/)) {
+    if (!line) continue;
+    if (GIT_COMMIT_ID_PATTERN.test(line)) {
+      currentCommit = line.toLowerCase();
+      commitIds.add(currentCommit);
+      continue;
+    }
+    const source = sourceByGitPath.get(line);
+    if (!source || !currentCommit) {
+      throw new Error(
+        "Git returned an unexpected history listing. No complete history result is available. " +
+        "No GitHub requests were made.",
+      );
+    }
+    const key = `${currentCommit}\0${line}`;
+    if (!seenEntries.has(key)) {
+      seenEntries.add(key);
+      entries.push({ commit: currentCommit, gitPath: line, source });
+    }
+  }
+
+  if (commitIds.size > MAX_HISTORY_COMMITS) {
+    throw new Error(
+      `History scan stopped after reaching the ${MAX_HISTORY_COMMITS}-commit limit. ` +
+      "No complete result was produced. Narrow the range with --since <full-commit-sha> and retry. " +
+      "No GitHub requests were made.",
+    );
+  }
+
+  const scanStartedAt = Date.now();
+  let scannedBytes = 0;
+  const findings = [];
+  for (const { commit, gitPath, source } of entries) {
+    if (Date.now() - scanStartedAt > HISTORY_SCAN_TIMEOUT_MS) {
+      throw new Error(
+        "History scan exceeded its time limit. Narrow the range with --since <full-commit-sha> and retry. " +
+        "No GitHub requests were made.",
+      );
+    }
+    const content = runHistoryGitCommand(
+      [
+        "show",
+        "--no-ext-diff",
+        "--no-textconv",
+        `${commit}:${gitPath}`,
+      ],
+      gitRoot,
+      `Could not safely read committed source revision ${commit} for ${source}.`,
+      1024 * 1024,
+    );
+    if (content.length > MAX_SOURCE_BYTES) {
+      throw new Error(
+        `History scan stopped because ${source} at ${commit} exceeds the ${MAX_SOURCE_BYTES}-byte per-file limit. ` +
+        "Narrow the range with --since <full-commit-sha> or review that revision manually. " +
+        "No GitHub requests were made.",
+      );
+    }
+    scannedBytes += content.length;
+    if (scannedBytes > MAX_HISTORY_BYTES) {
+      throw new Error(
+        `History scan stopped after reaching its ${MAX_HISTORY_BYTES}-byte source-data limit. ` +
+        "No complete result was produced. Narrow the range with --since <full-commit-sha> and retry. " +
+        "No GitHub requests were made.",
+      );
+    }
+    if (content.includes(0)) {
+      throw new Error(
+        `History scan stopped because ${source} at ${commit} is not text. ` +
+        "Review that revision manually or narrow the range with --since <full-commit-sha>. " +
+        "No GitHub requests were made.",
+      );
+    }
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+    } catch {
+      throw new Error(
+        `History scan stopped because ${source} at ${commit} is not UTF-8 text. ` +
+        "Review that revision manually or narrow the range with --since <full-commit-sha>. " +
+        "No GitHub requests were made.",
+      );
+    }
+    for (const line of findEmbeddedCredentialLines(text)) {
+      findings.push({ commit, source, line });
+      if (findings.length > MAX_HISTORY_FINDINGS) {
+        throw new Error(
+          `History scan stopped after reaching its ${MAX_HISTORY_FINDINGS}-finding output limit. ` +
+          "No complete result was produced. Narrow the range with --since <full-commit-sha> and retry. " +
+          "No GitHub requests were made.",
+        );
+      }
+    }
+  }
+
+  if (findings.length > 0) {
+    const locations = findings.map(
+      ({ commit, source, line }) => `${commit} ${source} (line ${line})`,
+    );
+    throw new Error(
+      "Credential-like values were found in committed allowlisted source history: " +
+      `${locations.join("; ")}. Review and remove affected revisions before sharing; rotate values ` +
+      "if they were already shared. No credential values or source lines were printed. " +
+      "No GitHub requests were made.",
+    );
+  }
+  console.log(
+    `History credential check passed: scanned ${commitIds.size} commits and ${entries.length} ` +
+    `allowlisted source revisions. No credential-like values found. No GitHub requests were made.`,
+  );
+}
+
 function checkStagedCredentials() {
   const gitRootOutput = runStagedGitCommand(
     ["rev-parse", "--show-toplevel"],
@@ -880,6 +1151,8 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: false,
       checkStagedCredentials: false,
+      checkHistoryCredentials: false,
+      historySince: null,
       checkSyntax: false,
     };
   }
@@ -888,6 +1161,8 @@ function parseArguments(args) {
       dryRun: true,
       checkCredentials: false,
       checkStagedCredentials: false,
+      checkHistoryCredentials: false,
+      historySince: null,
       checkSyntax: false,
     };
   }
@@ -896,6 +1171,8 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: true,
       checkStagedCredentials: false,
+      checkHistoryCredentials: false,
+      historySince: null,
       checkSyntax: false,
     };
   }
@@ -904,6 +1181,33 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: false,
       checkStagedCredentials: true,
+      checkHistoryCredentials: false,
+      historySince: null,
+      checkSyntax: false,
+    };
+  }
+  if (args.length === 1 && args[0] === "--check-history-credentials") {
+    return {
+      dryRun: false,
+      checkCredentials: false,
+      checkStagedCredentials: false,
+      checkHistoryCredentials: true,
+      historySince: null,
+      checkSyntax: false,
+    };
+  }
+  if (args[0] === "--check-history-credentials" && args.length === 3 && args[1] === "--since") {
+    if (!GIT_COMMIT_ID_PATTERN.test(args[2])) {
+      throw new Error(
+        "--since requires a full 40- or 64-character commit ID. No GitHub requests were made.",
+      );
+    }
+    return {
+      dryRun: false,
+      checkCredentials: false,
+      checkStagedCredentials: false,
+      checkHistoryCredentials: true,
+      historySince: args[2].toLowerCase(),
       checkSyntax: false,
     };
   }
@@ -912,11 +1216,13 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: false,
       checkStagedCredentials: false,
+      checkHistoryCredentials: false,
+      historySince: null,
       checkSyntax: true,
     };
   }
   throw new Error(
-    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-staged-credentials | --check-syntax].",
+    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-syntax].",
   );
 }
 
@@ -983,7 +1289,9 @@ async function syncSource({ dryRun }) {
 
 try {
   const options = parseArguments(process.argv.slice(2));
-  if (options.checkStagedCredentials) {
+  if (options.checkHistoryCredentials) {
+    checkHistoryCredentials(options.historySince);
+  } else if (options.checkStagedCredentials) {
     checkStagedCredentials();
   } else if (options.checkCredentials) {
     checkLocalCredentials();
