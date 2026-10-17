@@ -4094,14 +4094,18 @@ class PreCommitHookTests(unittest.TestCase):
             for file_path, *_ in staged_sources
         }
         private_texts = []
-        expected_locations = []
-        for file_path, git_path, variable_name, credential, safe_context, line_number in staged_sources:
+        expected_locations = [
+            f"{file_path.name} (line {line_number})"
+            for file_path, _git_path, _variable_name, _credential, _safe_context, line_number
+            in staged_sources
+        ]
+        # Diagnostics are documented in repository-relative path order, not staging order.
+        for file_path, git_path, variable_name, credential, safe_context, _line_number in reversed(staged_sources):
             source_line = f"{variable_name}={credential}"
             staged_text = "\n".join([*safe_context, source_line, "SAFE_SOURCE_FOOTER"]) + "\n"
             file_path.write_bytes(staged_text.encode("utf-8"))
             self.run_git(["add", git_path])
             private_texts.extend([credential, source_line, *safe_context, "SAFE_SOURCE_FOOTER"])
-            expected_locations.append(f"{file_path.name} (line {line_number})")
 
         # The hook must inspect each staged blob, not the restored working tree.
         for file_path, original_content in original_contents.items():
@@ -4125,8 +4129,7 @@ class PreCommitHookTests(unittest.TestCase):
             output,
             safe_output,
         )
-        for location in expected_locations:
-            self.assertIn(location, output, safe_output)
+        self.assertIn("; ".join(expected_locations), output, safe_output)
         self.assertIn("Remove the values from these staged files", output, safe_output)
         self.assertIn("No GitHub requests were made", output, safe_output)
         for private_text in private_texts:
