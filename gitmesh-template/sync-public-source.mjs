@@ -136,6 +136,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking",
   "test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
+  "test_security_preflight_multiple_subcases_are_counted_safely",
   "test_security_preflight_timeout_and_interruption_are_clear_and_private",
   "test_security_preflight_output_limit_hides_child_output_and_stops_before_github",
   "test_preflight_safe_name_allowlist_matches_regression_tests",
@@ -311,22 +312,36 @@ function summarizePreflightFailure(result) {
     .filter((chunk) => typeof chunk === "string")
     .join("\n");
   const failedTests = new Map();
-  for (const match of output.matchAll(
-    /^(?:FAIL|ERROR): (test_[A-Za-z0-9_]+) \(__main__\.([A-Za-z0-9_]+)\.(test_[A-Za-z0-9_]+)\)/gm,
-  )) {
+  const failureHeaderPattern =
+    /^(?:FAIL|ERROR): (test_[A-Za-z0-9_]+) \(__main__\.([A-Za-z0-9_]+)\.(test_[A-Za-z0-9_]+)\)/;
+  for (const line of output.split(/\r\n|\n|\r/)) {
+    const match = failureHeaderPattern.exec(line);
+    if (!match) continue;
     const [, testName, testClass, qualifiedName] = match;
     if (
       testName === qualifiedName &&
       SAFE_PREFLIGHT_TEST_NAMES.has(testName) &&
       SAFE_PREFLIGHT_TEST_CLASSES.has(testClass)
     ) {
-      failedTests.set(testName, `${testClass}.${testName}`);
+      const failure = failedTests.get(testName) ?? {
+        qualifiedName: `${testClass}.${testName}`,
+        subcaseCount: 0,
+      };
+      if (line[match[0].length] === " ") {
+        failure.subcaseCount += 1;
+      }
+      failedTests.set(testName, failure);
     }
   }
   if (failedTests.size > 0) {
+    const failureSummaries = [...failedTests].map(([testName, failure]) => {
+      if (failure.subcaseCount === 0) return testName;
+      const countLabel = failure.subcaseCount === 1 ? "failing subcase" : "failing subcases";
+      return `${testName} (${failure.subcaseCount} ${countLabel})`;
+    });
     return withPreflightRerun(
-      `Security regression preflight failed in: ${[...failedTests.keys()].join(", ")}`,
-      [...failedTests.values()],
+      `Security regression preflight failed in: ${failureSummaries.join(", ")}`,
+      [...failedTests.values()].map(({ qualifiedName }) => qualifiedName),
     );
   }
   return withPreflightRerun(
