@@ -4975,6 +4975,177 @@ class HookInstallerTests(unittest.TestCase):
         self.assertEqual(len(reenabled_paths.stdout.splitlines()), 2)
         self.assertTrue(dispatch_directory.is_dir())
 
+    def test_chain_existing_hooks_survive_paths_with_spaces_apostrophes_and_regex_characters(self):
+        repo_root = self.repo_root / "repo with spaces ' [regex]+(root)$"
+        repo_root.mkdir()
+        template_root = repo_root / "gitmesh-template"
+        template_root.mkdir()
+        for name in ALLOWED_SOURCE_NAMES:
+            shutil.copy2(ROOT / name, template_root / name)
+        installer_path = template_root / HOOK_INSTALLER.name
+        shutil.copy2(HOOK_INSTALLER, installer_path)
+        hooks_root = template_root / "hooks"
+        hooks_root.mkdir()
+        shutil.copy2(PRE_COMMIT_HOOK, hooks_root / "pre-commit")
+        shutil.copy2(PRE_PUSH_HOOK, hooks_root / "pre-push")
+
+        initialized = self.run_git_at(repo_root, ["init", "--quiet"])
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        for name, value in (
+            ("user.name", "GitMesh Quoted Path Test"),
+            ("user.email", "gitmesh-quoted-path-test@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ):
+            configured = self.run_git_at(repo_root, ["config", "--local", name, value])
+            self.assertEqual(configured.returncode, 0, configured.stderr)
+        self.run_git_at(repo_root, ["add", "gitmesh-template"])
+        baseline = self.run_git_at(repo_root, ["commit", "--quiet", "-m", "quoted path baseline"])
+        self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+
+        previous_hooks_value = "previous hooks ' [first]+$"
+        existing_hooks_value = "existing hooks ' [a-z]+(current)$"
+        existing_hooks = repo_root / existing_hooks_value
+        marker = repo_root / "hook ran ' [marker]+.txt"
+        original_hook = self.make_executable_hook(
+            existing_hooks / "pre-commit",
+            "#!/bin/sh\n"
+            "printf 'existing hook invoked\\n'\n"
+            "printf 'existing hook invoked\\n' >> "
+            f"{shlex.quote(str(marker))}\n",
+        )
+        self.run_git_at(
+            repo_root,
+            ["config", "--local", "--add", "core.hooksPath", previous_hooks_value],
+        )
+        self.run_git_at(
+            repo_root,
+            ["config", "--local", "--add", "core.hooksPath", existing_hooks_value],
+        )
+        original_global_config = self.global_config.read_bytes()
+
+        enabled = self.run_installer(
+            cwd=repo_root,
+            args=("--chain-existing",),
+            installer_path=installer_path,
+        )
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+        self.assertIn(
+            "node 'gitmesh-template/install-pre-commit-hook.mjs' --disable-chain",
+            enabled.stdout,
+        )
+        configured_paths = self.run_git_at(
+            repo_root,
+            ["config", "--local", "--get-all", "core.hooksPath"],
+        )
+        self.assertEqual(configured_paths.returncode, 0, configured_paths.stderr)
+        path_values = configured_paths.stdout.splitlines()
+        self.assertEqual(path_values[:2], [previous_hooks_value, existing_hooks_value])
+        self.assertEqual(len(path_values), 3)
+        dispatch_directory = pathlib.Path(path_values[-1])
+        self.assertTrue(dispatch_directory.is_dir())
+        self.assertIn(" [regex]+(root)$", str(dispatch_directory))
+        self.assertEqual((existing_hooks / "pre-commit").read_bytes(), original_hook)
+
+        first_file = repo_root / "first ordinary file.txt"
+        first_file.write_text("Commit through the quoted dispatcher.\n")
+        self.run_git_at(repo_root, ["add", first_file.name])
+        first_commit = self.run_git_at(repo_root, ["commit", "-m", "first quoted path commit"])
+        first_output = first_commit.stdout + first_commit.stderr
+        self.assertEqual(first_commit.returncode, 0, first_output)
+        self.assertLess(
+            first_output.index("existing hook invoked"),
+            first_output.index("Credential check passed: no allowlisted source files are staged."),
+        )
+        self.assertEqual(marker.read_text().splitlines(), ["existing hook invoked"])
+        self.assertEqual((existing_hooks / "pre-commit").read_bytes(), original_hook)
+
+        before_status = self.git_config_snapshot(repo_root)
+        status = self.run_installer(
+            cwd=repo_root,
+            args=("--status",),
+            installer_path=installer_path,
+        )
+        status_output = status.stdout + status.stderr
+        self.assertEqual(status.returncode, 0, status_output)
+        self.assertIn(
+            "node 'gitmesh-template/install-pre-commit-hook.mjs' --disable-chain",
+            status_output,
+        )
+        self.assertEqual(self.git_config_snapshot(repo_root), before_status)
+
+        disable_command = enabled.stdout.split("To disable it, run: ", 1)[1].strip()
+        disabled = subprocess.run(
+            shlex.split(disable_command),
+            cwd=repo_root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertFalse(dispatch_directory.exists())
+        remaining_paths = self.run_git_at(
+            repo_root,
+            ["config", "--local", "--get-all", "core.hooksPath"],
+        )
+        self.assertEqual(
+            remaining_paths.stdout.splitlines(),
+            [previous_hooks_value, existing_hooks_value],
+        )
+        self.assertEqual((existing_hooks / "pre-commit").read_bytes(), original_hook)
+        self.assertEqual(self.global_config.read_bytes(), original_global_config)
+
+        reenabled = self.run_installer(
+            cwd=repo_root,
+            args=("--chain-existing",),
+            installer_path=installer_path,
+        )
+        self.assertEqual(reenabled.returncode, 0, reenabled.stdout + reenabled.stderr)
+        reenabled_paths = self.run_git_at(
+            repo_root,
+            ["config", "--local", "--get-all", "core.hooksPath"],
+        )
+        self.assertEqual(reenabled_paths.returncode, 0, reenabled_paths.stderr)
+        self.assertEqual(
+            reenabled_paths.stdout.splitlines()[:2],
+            [previous_hooks_value, existing_hooks_value],
+        )
+        self.assertEqual(len(reenabled_paths.stdout.splitlines()), 3)
+        reinstalled_again = self.run_installer(
+            cwd=repo_root,
+            args=("--chain-existing",),
+            installer_path=installer_path,
+        )
+        self.assertEqual(
+            reinstalled_again.returncode,
+            0,
+            reinstalled_again.stdout + reinstalled_again.stderr,
+        )
+        self.assertIn("already enabled", reinstalled_again.stdout)
+        self.assertEqual(
+            self.run_git_at(
+                repo_root,
+                ["config", "--local", "--get-all", "core.hooksPath"],
+            ).stdout.splitlines(),
+            reenabled_paths.stdout.splitlines(),
+        )
+
+        second_file = repo_root / "second ordinary file.txt"
+        second_file.write_text("Reinstallation kept the hook working.\n")
+        self.run_git_at(repo_root, ["add", second_file.name])
+        second_commit = self.run_git_at(
+            repo_root,
+            ["commit", "-m", "reinstalled quoted path commit"],
+        )
+        second_output = second_commit.stdout + second_commit.stderr
+        self.assertEqual(second_commit.returncode, 0, second_output)
+        self.assertEqual(
+            marker.read_text().splitlines(),
+            ["existing hook invoked", "existing hook invoked"],
+        )
+        self.assertEqual((existing_hooks / "pre-commit").read_bytes(), original_hook)
+        self.assertEqual(self.global_config.read_bytes(), original_global_config)
+
     def test_disable_chain_refuses_unmarked_or_unexpected_dispatcher_files(self):
         self.run_git(["config", "--global", "core.hooksPath", "existing-global-hooks"])
         self.run_git(["config", "--local", "--add", "core.hooksPath", "existing-local-hooks"])

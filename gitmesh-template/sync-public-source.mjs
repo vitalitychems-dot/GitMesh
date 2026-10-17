@@ -139,6 +139,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_hook_status_reports_inactive_setup_without_writing_config",
   "test_hook_status_reports_manual_hook_integration_without_writing_config",
   "test_chain_existing_hooks_run_first_and_preserve_configuration",
+  "test_chain_existing_hooks_survive_paths_with_spaces_apostrophes_and_regex_characters",
   "test_disable_chain_refuses_unmarked_or_unexpected_dispatcher_files",
   "test_chain_existing_pre_push_replays_ref_input_to_gitmesh_after_existing_hook",
   "test_chain_existing_hook_failure_stops_before_gitmesh",
