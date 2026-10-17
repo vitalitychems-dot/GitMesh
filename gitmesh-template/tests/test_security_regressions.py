@@ -3296,6 +3296,7 @@ class PreCommitHookTests(unittest.TestCase):
             "        JSON.stringify({\n"
             "          stage: timeoutStage,\n"
             "          command: gitArgs[0],\n"
+            "          timeoutMs: args[1]?.timeout,\n"
             "          hasGitHubToken: Boolean(args[1]?.env?.GITHUB_TOKEN),\n"
             "        }),\n"
             "      );\n"
@@ -4053,7 +4054,112 @@ class PreCommitHookTests(unittest.TestCase):
                 timeout_capture = json.loads(timeout_marker.read_text())
                 self.assertEqual(timeout_capture["stage"], timeout_stage)
                 self.assertEqual(timeout_capture["command"], expected_command)
+                self.assertEqual(timeout_capture["timeoutMs"], 15_000)
                 self.assertFalse(timeout_capture["hasGitHubToken"])
+                self.assertFalse(self.network_marker.exists())
+
+    def test_precommit_hook_accepts_bounded_staged_git_timeout_override(self):
+        credential = "ghp_" + "R" * 36
+        staged_source_line = f"staged_secret={credential}"
+        source_sentinel = "CUSTOM_TIMEOUT_STAGED_SOURCE_SENTINEL"
+        self.readme.write_text(f"{staged_source_line}\n{source_sentinel}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        valid_settings = (("1000", 1_000), ("30000", 30_000), ("120000", 120_000))
+        for setting, expected_timeout in valid_settings:
+            with self.subTest(timeout_ms=setting):
+                timeout_marker = self.repo_root / f"valid-staged-git-timeout-{setting}.json"
+                env = self.hook_environment_without_github_token()
+                env["GITMESH_STAGED_SCAN_TIMEOUT_MS"] = setting
+                env["GITMESH_TEST_GIT_TIMEOUT"] = "1"
+                env["GITMESH_TEST_GIT_TIMEOUT_STAGE"] = "repository-lookup"
+                env["GITMESH_TEST_GIT_TIMEOUT_MARKER"] = str(timeout_marker)
+                result = self.run_git(
+                    ["commit", "-m", "must block when the staged scan times out"],
+                    env=env,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Git timed out during repository lookup", output)
+                self.assertIn("The staged source check failed closed", output)
+                self.assertIn("No GitHub requests were made", output)
+                for private_text in (
+                    credential,
+                    staged_source_line,
+                    source_sentinel,
+                    "PRIVATE_GIT_TIMEOUT_DIAGNOSTIC",
+                    "PRIVATE_GIT_TIMEOUT_STDERR",
+                    "PRIVATE_STAGED_TIMEOUT_CONTENT",
+                    FAKE_GITHUB_TOKEN,
+                ):
+                    self.assertNotIn(private_text, output)
+                self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+                self.assertEqual(
+                    self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+                    "gitmesh-template/README.md",
+                )
+                self.assertTrue(timeout_marker.exists())
+                timeout_capture = json.loads(timeout_marker.read_text())
+                self.assertEqual(timeout_capture["stage"], "repository-lookup")
+                self.assertEqual(timeout_capture["command"], "rev-parse")
+                self.assertEqual(timeout_capture["timeoutMs"], expected_timeout)
+                self.assertFalse(timeout_capture["hasGitHubToken"])
+                self.assertFalse(self.network_marker.exists())
+
+    def test_precommit_hook_rejects_invalid_staged_git_timeout_settings(self):
+        credential = "ghp_" + "S" * 36
+        staged_source_line = f"staged_secret={credential}"
+        source_sentinel = "INVALID_TIMEOUT_STAGED_SOURCE_SENTINEL"
+        self.readme.write_text(f"{staged_source_line}\n{source_sentinel}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        invalid_settings = (
+            "",
+            "0",
+            "999",
+            "120001",
+            "-1",
+            "1.5",
+            "1e6",
+            "UNSAFE_TIMEOUT_SETTING_SENTINEL",
+            "9" * 100,
+        )
+        for index, setting in enumerate(invalid_settings):
+            with self.subTest(timeout_setting=setting or "<empty>"):
+                timeout_marker = self.repo_root / f"invalid-staged-git-timeout-{index}.json"
+                env = self.hook_environment_without_github_token()
+                env["GITMESH_STAGED_SCAN_TIMEOUT_MS"] = setting
+                env["GITMESH_TEST_GIT_TIMEOUT"] = "1"
+                env["GITMESH_TEST_GIT_TIMEOUT_STAGE"] = "repository-lookup"
+                env["GITMESH_TEST_GIT_TIMEOUT_MARKER"] = str(timeout_marker)
+                result = self.run_git(
+                    ["commit", "-m", "must block with invalid staged scan timeout"],
+                    env=env,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "GITMESH_STAGED_SCAN_TIMEOUT_MS must be a whole number from "
+                    "1000 to 120000 milliseconds",
+                    output,
+                )
+                self.assertIn("The staged source check failed closed", output)
+                self.assertIn("No GitHub requests were made", output)
+                self.assertNotIn("UNSAFE_TIMEOUT_SETTING_SENTINEL", output)
+                self.assertNotIn(staged_source_line, output)
+                self.assertNotIn(source_sentinel, output)
+                self.assertNotIn(credential, output)
+                self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+                self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+                self.assertEqual(
+                    self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+                    "gitmesh-template/README.md",
+                )
+                self.assertFalse(timeout_marker.exists())
                 self.assertFalse(self.network_marker.exists())
 
     def test_precommit_hook_blocks_when_staged_index_cannot_be_read(self):
