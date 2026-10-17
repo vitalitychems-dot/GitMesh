@@ -89,6 +89,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
   "test_preflight_safe_name_allowlist_matches_regression_tests",
   "test_missing_preflight_harness_has_safe_recovery_guidance",
+  "test_outdated_python_version_stops_before_preflight_and_github_without_leaking_output",
   "test_malformed_credentials_fail_before_reading_sources_or_requesting_github",
   "test_http_and_network_failures_stop_without_printing_token",
   "test_branch_conflict_uses_non_force_update_and_stops",
@@ -97,6 +98,10 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_gitignore_excludes_local_vault_from_normal_git_operations",
 ]);
 const PREFLIGHT_REPRO_COMMAND = "python3 gitmesh-template/tests/test_security_regressions.py";
+// The regression suite uses os.waitstatus_to_exitcode, introduced in Python 3.9.
+const MINIMUM_PYTHON_VERSION = { major: 3, minor: 9 };
+const PYTHON_VERSION_CHECK_COMMAND =
+  "import sys; print('%s.%s' % (sys.version_info[0], sys.version_info[1]))";
 
 function getToken() {
   const token = process.env.GITHUB_TOKEN;
@@ -151,6 +156,75 @@ function withPreflightRerun(summary, failedTests = []) {
   };
 }
 
+function pythonVersionRecoveryMessage(reason, detectedVersion = null) {
+  const detected = detectedVersion ? ` Detected Python ${detectedVersion}.` : "";
+  return (
+    `${reason}.${detected} Python ${MINIMUM_PYTHON_VERSION.major}.` +
+    `${MINIMUM_PYTHON_VERSION.minor} or newer is required for the security regression preflight. ` +
+    `Install or upgrade Python to ${MINIMUM_PYTHON_VERSION.major}.` +
+    `${MINIMUM_PYTHON_VERSION.minor} or newer using your operating system's package manager or python.org, ` +
+    `then confirm python3 --version reports ${MINIMUM_PYTHON_VERSION.major}.` +
+    `${MINIMUM_PYTHON_VERSION.minor} or newer. ` +
+    `Run locally from the workspace root: ${PREFLIGHT_REPRO_COMMAND}. ` +
+    "No GitHub requests were made."
+  );
+}
+
+function checkMinimumPythonVersion() {
+  const result = spawnSync(
+    "python3",
+    ["-c", PYTHON_VERSION_CHECK_COMMAND],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 10_000,
+      maxBuffer: 64 * 1024,
+      env: {
+        PATH: process.env.PATH ?? "",
+        ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
+        ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+      },
+    },
+  );
+  if (result.error || result.status !== 0 || result.signal) {
+    const reason = result.error?.code === "ETIMEDOUT"
+      ? "Python version check timed out"
+      : result.error?.code === "ENOBUFS"
+        ? "Python version check exceeded its output limit"
+        : result.error
+          ? "Could not start python3 to check the security regression preflight version"
+          : result.signal
+            ? "Python version check was interrupted"
+            : "Python version check failed";
+    throw new Error(pythonVersionRecoveryMessage(reason));
+  }
+
+  const match = /^(\d{1,2})\.(\d{1,2})$/.exec(
+    typeof result.stdout === "string" ? result.stdout.trim() : "",
+  );
+  if (!match) {
+    throw new Error(
+      pythonVersionRecoveryMessage(
+        "Could not safely determine the python3 version for the security regression preflight",
+      ),
+    );
+  }
+
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (
+    major < MINIMUM_PYTHON_VERSION.major ||
+    (major === MINIMUM_PYTHON_VERSION.major && minor < MINIMUM_PYTHON_VERSION.minor)
+  ) {
+    throw new Error(
+      pythonVersionRecoveryMessage(
+        "The installed Python version is too old",
+        `${major}.${minor}`,
+      ),
+    );
+  }
+}
+
 function summarizePreflightFailure(result) {
   if (
     result.error?.code === "ETIMEDOUT" ||
@@ -165,7 +239,7 @@ function summarizePreflightFailure(result) {
   if (result.error) {
     return withPreflightRerun(
       "Python could not start the security regression preflight. " +
-      "Install Python 3 or make python3 available on PATH, then rerun the regression checks and sync",
+      "Install or upgrade Python to 3.9 or newer, make python3 available on PATH, then rerun the regression checks and sync",
     );
   }
   if (result.signal) {
@@ -214,6 +288,8 @@ function runSecurityPreflight() {
       `Run locally from the workspace root: ${PREFLIGHT_REPRO_COMMAND}. No GitHub requests were made.`,
     );
   }
+
+  checkMinimumPythonVersion();
 
   const result = spawnSync(
     "python3",

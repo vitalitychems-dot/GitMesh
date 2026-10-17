@@ -307,6 +307,18 @@ childProcess.spawnSync = (command, ...args) => {
       args: args[0],
       hasGitHubToken: Boolean(args[1]?.env?.GITHUB_TOKEN),
     });
+    if (args[0]?.[0] === "-c") {
+      const version = process.env.GITMESH_TEST_PREFLIGHT_PYTHON_VERSION ?? "3.13";
+      return {
+        error: undefined,
+        status: 0,
+        signal: null,
+        stdout: `${version}\n`,
+        stderr: process.env.GITMESH_TEST_PREFLIGHT_VERSION_STDERR ?? "",
+        pid: 123,
+        output: [],
+      };
+    }
     const mode = process.env.GITMESH_TEST_PREFLIGHT_MODE ?? "success";
     const childOutput = process.env.GITMESH_TEST_PREFLIGHT_OUTPUT ?? "";
     const childStderr = process.env.GITMESH_TEST_PREFLIGHT_STDERR ?? childOutput;
@@ -537,6 +549,8 @@ process.on("exit", saveCapture);
         preflight_mode=None,
         preflight_output=None,
         preflight_stderr=None,
+        preflight_python_version=None,
+        preflight_version_stderr=None,
         moved_head_sha=None,
         second_moved_head_sha=None,
         fail_ref=None,
@@ -565,6 +579,8 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_PREFLIGHT_MODE", preflight_mode),
             ("GITMESH_TEST_PREFLIGHT_OUTPUT", preflight_output),
             ("GITMESH_TEST_PREFLIGHT_STDERR", preflight_stderr),
+            ("GITMESH_TEST_PREFLIGHT_PYTHON_VERSION", preflight_python_version),
+            ("GITMESH_TEST_PREFLIGHT_VERSION_STDERR", preflight_version_stderr),
             ("GITMESH_TEST_MOVED_HEAD_SHA", moved_head_sha),
             ("GITMESH_TEST_SECOND_MOVED_HEAD_SHA", second_moved_head_sha),
             ("GITMESH_TEST_FAIL_REF", fail_ref),
@@ -630,7 +646,7 @@ process.on("exit", saveCapture);
         self.remote_contents.write_text(json.dumps(contents))
 
     def test_sync_publishes_only_the_fixed_source_allowlist(self):
-        result = self.run_sync()
+        result = self.run_sync(preflight_python_version="3.9")
         self.assertEqual(result.returncode, 0, "Mocked source sync did not complete.")
         self.assertNotIn(FAKE_GITHUB_TOKEN, result.stdout + result.stderr)
         self.assertNotIn(FAKE_AUTHORIZATION, result.stdout + result.stderr)
@@ -638,6 +654,19 @@ process.on("exit", saveCapture);
         self.assertEqual(set(reported_paths), ALLOWED_GITHUB_PATHS)
         self.assertEqual(len(reported_paths), len(ALLOWED_GITHUB_PATHS))
         capture = json.loads(self.capture.read_text())
+        self.assertEqual(len(capture["preflightCalls"]), 2)
+        self.assertEqual(
+            capture["preflightCalls"][0]["args"],
+            [
+                "-c",
+                "import sys; print('%s.%s' % (sys.version_info[0], sys.version_info[1]))",
+            ],
+        )
+        self.assertEqual(
+            capture["preflightCalls"][1]["args"],
+            [str(self.source_root / "tests" / "test_security_regressions.py")],
+        )
+        self.assertFalse(any(call["hasGitHubToken"] for call in capture["preflightCalls"]))
         requests = capture["requests"]
         self.assert_content_reads_use_initial_snapshot(capture)
         self.assertTrue(all(request["hasExpectedBearer"] for request in requests))
@@ -1788,6 +1817,55 @@ process.on("exit", saveCapture);
         finally:
             readme.write_bytes(original_readme)
 
+    def test_outdated_python_version_stops_before_preflight_and_github_without_leaking_output(self):
+        source_sentinel = "PYTHON_VERSION_SOURCE_SENTINEL"
+        credential_sentinel = "ghp_" + "R" * 36
+        version_output = f"{source_sentinel}\n{credential_sentinel}"
+        result = self.run_sync(
+            preflight_mode="failure",
+            preflight_python_version="3.8",
+            preflight_version_stderr=version_output,
+        )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("The installed Python version is too old.", result.stderr)
+        self.assertIn("Detected Python 3.8.", result.stderr)
+        self.assertIn(
+            "Python 3.9 or newer is required for the security regression preflight.",
+            result.stderr,
+        )
+        self.assertIn(
+            "Install or upgrade Python to 3.9 or newer using your operating system's package manager or python.org",
+            result.stderr,
+        )
+        self.assertIn(
+            "confirm python3 --version reports 3.9 or newer",
+            result.stderr,
+        )
+        self.assertIn(
+            "Run locally from the workspace root: "
+            "python3 gitmesh-template/tests/test_security_regressions.py.",
+            result.stderr,
+        )
+        self.assertIn("No GitHub requests were made", result.stderr)
+        self.assertNotIn(source_sentinel, output)
+        self.assertNotIn(credential_sentinel, output)
+        self.assertNotIn(version_output, output)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(len(capture["preflightCalls"]), 1)
+        self.assertEqual(capture["preflightCalls"][0]["command"], "python3")
+        self.assertEqual(
+            capture["preflightCalls"][0]["args"],
+            [
+                "-c",
+                "import sys; print('%s.%s' % (sys.version_info[0], sys.version_info[1]))",
+            ],
+        )
+        self.assertFalse(capture["preflightCalls"][0]["hasGitHubToken"])
+
     def test_failed_security_preflight_stops_before_github_without_leaking_output(self):
         expected_source_reads = Counter(
             (method, str((self.source_root / source).resolve()))
@@ -1826,7 +1904,7 @@ process.on("exit", saveCapture);
                 "start",
                 "python start",
                 (),
-                "Install Python 3 or make python3 available on PATH, then rerun the regression checks and sync",
+                "Install or upgrade Python to 3.9 or newer, make python3 available on PATH, then rerun the regression checks and sync",
             ),
             ("timeout", "python timeout", (), "preflight timed out"),
             ("output-limit", "large output", (), "exceeded its output limit"),
@@ -1872,11 +1950,15 @@ process.on("exit", saveCapture);
 
                 capture = json.loads(self.capture.read_text())
                 self.assertEqual(capture["requests"], [])
-                self.assertEqual(len(capture["preflightCalls"]), 1)
+                self.assertEqual(len(capture["preflightCalls"]), 2)
                 self.assertEqual(capture["preflightCalls"][0]["command"], "python3")
-                self.assertFalse(capture["preflightCalls"][0]["hasGitHubToken"])
                 self.assertEqual(
-                    capture["preflightCalls"][0]["args"],
+                    capture["preflightCalls"][0]["args"][0],
+                    "-c",
+                )
+                self.assertFalse(any(call["hasGitHubToken"] for call in capture["preflightCalls"]))
+                self.assertEqual(
+                    capture["preflightCalls"][1]["args"],
                     [str(self.source_root / "tests" / "test_security_regressions.py")],
                 )
                 observed_source_reads = Counter(
