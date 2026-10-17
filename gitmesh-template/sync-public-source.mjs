@@ -75,6 +75,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_reports_unicode_separator_lines_without_exposing_content",
   "test_precommit_hook_blocks_when_node_is_missing",
   "test_precommit_hook_blocks_when_staged_index_cannot_be_read",
+  "test_precommit_hook_reports_staged_git_timeout_safely_without_github_token",
   "test_precommit_hook_passes_clean_source_and_ignores_unrelated_files",
   "test_hook_setup_enables_only_repository_local_path_when_safe",
   "test_hook_setup_preserves_existing_local_hooks_path",
@@ -555,6 +556,11 @@ function runStagedGitCommand(args, cwd, failureMessage) {
     maxBuffer: 1024 * 1024,
     env,
   });
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(
+      "Git timed out while checking staged source files. Check whether another Git process is stuck and whether the repository is responsive, then retry the commit. The staged credential check failed closed. No GitHub requests were made.",
+    );
+  }
   if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
     throw new Error(`${failureMessage} No GitHub requests were made.`);
   }
