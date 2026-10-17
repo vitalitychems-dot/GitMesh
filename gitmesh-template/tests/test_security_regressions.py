@@ -1704,17 +1704,27 @@ process.on("exit", saveCapture);
         safe_names = set(
             re.findall(r'"(test_[A-Za-z0-9_]+)"', safe_name_block.group(1))
         )
-        regression_test_names = set(
-            re.findall(
-                r"^\s+def (test_[A-Za-z0-9_]+)\(",
-                pathlib.Path(__file__).read_text(),
-                re.MULTILINE,
-            )
+        test_method_names = re.findall(
+            r"^\s+def (test_[A-Za-z0-9_]+)\(",
+            pathlib.Path(__file__).read_text(),
+            re.MULTILINE,
         )
+        regression_test_names = set(test_method_names)
         self.assertEqual(
             safe_names,
             regression_test_names,
             "Keep the safe preflight names in sync with all regression tests.",
+        )
+        eligible_name_counts = Counter(
+            name for name in test_method_names if name in safe_names
+        )
+        duplicate_eligible_names = sorted(
+            name for name, count in eligible_name_counts.items() if count > 1
+        )
+        self.assertEqual(
+            duplicate_eligible_names,
+            [],
+            "Safe preflight summaries identify tests by method name, so eligible names must be unique across test classes.",
         )
 
     def test_missing_preflight_harness_has_safe_recovery_guidance(self):
