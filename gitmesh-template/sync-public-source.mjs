@@ -114,6 +114,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_blocks_oversized_staged_source_with_safe_repair_steps",
   "test_precommit_hook_vectors_cover_every_scanner_pattern",
   "test_precommit_hook_reports_credentials_from_every_staged_source_file",
+  "test_precommit_hook_reports_every_credential_in_linked_worktree",
   "test_precommit_hook_blocks_when_node_version_output_is_empty_or_malformed",
   "test_precommit_hook_blocks_when_node_is_too_old_without_leaking_output",
   "test_precommit_hook_rejects_non_text_staged_files_without_leaking_contents",

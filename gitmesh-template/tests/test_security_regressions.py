@@ -3613,9 +3613,12 @@ class PreCommitHookTests(unittest.TestCase):
         self.temp.cleanup()
 
     def run_git(self, args, env=None):
+        return self.run_git_at(self.repo_root, args, env=env)
+
+    def run_git_at(self, cwd, args, env=None):
         return subprocess.run(
             ["git", *args],
-            cwd=self.repo_root,
+            cwd=cwd,
             env=env,
             capture_output=True,
             text=True,
@@ -4132,6 +4135,118 @@ class PreCommitHookTests(unittest.TestCase):
         self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
         self.assertEqual(
             self.run_git(["diff", "--cached", "--name-only"]).stdout.strip().splitlines(),
+            sorted(git_path for _, git_path, *_ in staged_sources),
+        )
+        self.assertFalse(self.network_marker.exists())
+
+    def test_precommit_hook_reports_every_credential_in_linked_worktree(self):
+        enabled_worktree_config = self.run_git(
+            ["config", "--local", "extensions.worktreeConfig", "true"]
+        )
+        self.assertEqual(
+            enabled_worktree_config.returncode,
+            0,
+            enabled_worktree_config.stdout + enabled_worktree_config.stderr,
+        )
+        worktree_root = self.repo_root / "multi-file-credential-worktree"
+        added = self.run_git(
+            ["worktree", "add", "--detach", str(worktree_root), "HEAD"]
+        )
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        configured_hooks = self.run_git_at(
+            worktree_root,
+            ["config", "--worktree", "core.hooksPath", "gitmesh-template/hooks"],
+        )
+        self.assertEqual(
+            configured_hooks.returncode,
+            0,
+            configured_hooks.stdout + configured_hooks.stderr,
+        )
+
+        linked_template_root = worktree_root / "gitmesh-template"
+        staged_sources = [
+            (
+                linked_template_root / "README.md",
+                "gitmesh-template/README.md",
+                "README_TOKEN",
+                "ghp_" + "A" * 36,
+                ["SAFE_README_HEADER"],
+                2,
+            ),
+            (
+                linked_template_root / "gitmesh-ultimate-core.mjs",
+                "gitmesh-template/gitmesh-ultimate-core.mjs",
+                "CONSOLE_TOKEN",
+                "github_pat_" + "B" * 40,
+                ["SAFE_CONSOLE_HEADER", "SAFE_CONSOLE_CONTEXT"],
+                3,
+            ),
+            (
+                linked_template_root / "sync-public-source.mjs",
+                "gitmesh-template/sync-public-source.mjs",
+                "SYNC_TOKEN",
+                "glpat-" + "C" * 24,
+                ["SAFE_SYNC_HEADER", "SAFE_SYNC_CONTEXT_ONE", "SAFE_SYNC_CONTEXT_TWO"],
+                4,
+            ),
+        ]
+        original_contents = {
+            file_path: file_path.read_bytes()
+            for file_path, *_ in staged_sources
+        }
+        private_texts = []
+        expected_locations = []
+        for file_path, git_path, variable_name, credential, safe_context, line_number in staged_sources:
+            source_line = f"{variable_name}={credential}"
+            staged_text = "\n".join([*safe_context, source_line, "SAFE_SOURCE_FOOTER"]) + "\n"
+            file_path.write_bytes(staged_text.encode("utf-8"))
+            staged = self.run_git_at(worktree_root, ["add", git_path])
+            self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+            private_texts.extend([credential, source_line, *safe_context, "SAFE_SOURCE_FOOTER"])
+            expected_locations.append(f"{file_path.name} (line {line_number})")
+
+        # The linked-worktree hook must inspect the staged blobs, not restored files.
+        for file_path, original_content in original_contents.items():
+            file_path.write_bytes(original_content)
+
+        hook_env = self.hook_environment_without_github_token()
+        self.assertNotIn("GITHUB_TOKEN", hook_env)
+        original_head = self.run_git_at(worktree_root, ["rev-parse", "HEAD"]).stdout.strip()
+        result = subprocess.run(
+            ["git", "commit", "-m", "report all linked-worktree source findings"],
+            cwd=worktree_root,
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = result.stdout + result.stderr
+        safe_output = output
+        for private_text in [*private_texts, FAKE_GITHUB_TOKEN]:
+            safe_output = safe_output.replace(private_text, "[redacted test content]")
+
+        self.assertNotEqual(result.returncode, 0, safe_output)
+        self.assertIn(
+            "Refusing to commit staged source files containing a credential-like value:",
+            output,
+            safe_output,
+        )
+        for location in expected_locations:
+            self.assertIn(location, output, safe_output)
+        self.assertIn("Remove the values from these staged files", output, safe_output)
+        self.assertIn("No GitHub requests were made", output, safe_output)
+        for private_text in private_texts:
+            self.assertFalse(private_text in output, safe_output)
+        self.assertFalse(FAKE_GITHUB_TOKEN in output, safe_output)
+        self.assertEqual(
+            self.run_git_at(worktree_root, ["rev-parse", "HEAD"]).stdout.strip(),
+            original_head,
+        )
+        self.assertEqual(
+            self.run_git_at(
+                worktree_root,
+                ["diff", "--cached", "--name-only"],
+            ).stdout.strip().splitlines(),
             sorted(git_path for _, git_path, *_ in staged_sources),
         )
         self.assertFalse(self.network_marker.exists())
