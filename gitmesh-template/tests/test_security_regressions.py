@@ -477,7 +477,11 @@ globalThis.fetch = async (input, init = {}) => {
     let previewSha = initialCommitSha;
     if (mainRefReadCount > 1 && movedHeadSha) previewSha = movedHeadSha;
     if (mainRefReadCount > 2 && secondMovedHeadSha) previewSha = secondMovedHeadSha;
-    if (invalidShaStage === "main-ref") previewSha = invalidSha;
+    if (
+      invalidShaStage === "main-ref" ||
+      (invalidShaStage === "dry-run-initial-ref" && mainRefReadCount === 1) ||
+      (invalidShaStage === "dry-run-first-comparison-ref" && mainRefReadCount === 2)
+    ) previewSha = invalidSha;
     data = {
       object: {
         sha: previewSha,
@@ -846,6 +850,56 @@ process.on("exit", saveCapture);
             sum("/contents/" in request["path"] for request in capture["requests"]),
             3,
         )
+
+    def test_dry_run_rejects_malformed_initial_and_first_comparison_commit_ids(self):
+        self.set_remote_snapshot()
+        readme = self.source_root / "README.md"
+        source_sentinel = "DRY_RUN_INVALID_HEAD_SOURCE_SENTINEL"
+        readme.write_bytes(readme.read_bytes() + f"\n{source_sentinel}\n".encode())
+
+        cases = (
+            ("dry-run-initial-ref", 1, []),
+            ("dry-run-first-comparison-ref", 2, [INITIAL_COMMIT_SHA] * 3),
+        )
+        for stage, expected_head_reads, expected_content_refs in cases:
+            with self.subTest(stage=stage):
+                invalid_sha = f"UNTRUSTED_{stage.upper()}_COMMIT_ID_SENTINEL"
+                result = self.run_sync(
+                    args=("--dry-run",),
+                    invalid_sha_stage=stage,
+                    invalid_sha=invalid_sha,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid main branch commit", result.stderr)
+                self.assertIn("Rerun the dry run before publishing", result.stderr)
+                self.assertIn("No GitHub changes were made", result.stderr)
+                for preview_success in ("Dry run:", "would be published", "already match"):
+                    self.assertNotIn(preview_success, output)
+                self.assertNotIn(invalid_sha, output)
+                self.assertEqual(reported_changed_paths(result.stdout), [])
+                self.assert_safe_failure_output(result)
+                self.assert_no_source_contents_in_output(output)
+
+                capture = json.loads(self.capture.read_text())
+                requests = capture["requests"]
+                head_reads = [
+                    request for request in requests
+                    if request["path"] ==
+                    "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
+                ]
+                content_reads = [
+                    request for request in requests
+                    if request["method"] == "GET" and "/contents/" in request["path"]
+                ]
+                self.assertEqual(len(head_reads), expected_head_reads)
+                self.assertEqual(
+                    [request["ref"] for request in content_reads],
+                    expected_content_refs,
+                )
+                self.assertNotIn(invalid_sha, json.dumps(requests))
+                self.assertTrue(all(request["method"] == "GET" for request in requests))
 
     def test_dry_run_refreshes_once_when_main_advances(self):
         self.set_remote_snapshot()
