@@ -136,6 +136,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking",
   "test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
+  "test_many_safe_preflight_failures_use_a_wrapped_copyable_rerun_command",
   "test_security_preflight_multiple_subcases_are_counted_safely",
   "test_security_preflight_timeout_and_interruption_are_clear_and_private",
   "test_security_preflight_output_limit_hides_child_output_and_stops_before_github",
@@ -150,6 +151,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_gitignore_excludes_local_vault_from_normal_git_operations",
 ]);
 const PREFLIGHT_REPRO_COMMAND = "python3 gitmesh-template/tests/test_security_regressions.py";
+const PREFLIGHT_RERUN_MAX_LINE_LENGTH = 100;
 // The regression suite uses os.waitstatus_to_exitcode, introduced in Python 3.9.
 const MINIMUM_PYTHON_VERSION = { major: 3, minor: 9 };
 const PYTHON_VERSION_CHECK_COMMAND =
@@ -207,13 +209,28 @@ function nonTextSourceError(source, operation = "sync") {
   );
 }
 
+function formatPreflightRerunCommand(failedTests) {
+  const commandLines = [PREFLIGHT_REPRO_COMMAND];
+  for (const failedTest of failedTests) {
+    const lastLineIndex = commandLines.length - 1;
+    const candidate = `${commandLines[lastLineIndex]} ${failedTest}`;
+    if (candidate.length <= PREFLIGHT_RERUN_MAX_LINE_LENGTH) {
+      commandLines[lastLineIndex] = candidate;
+    } else {
+      commandLines[lastLineIndex] += " \\";
+      commandLines.push(`  ${failedTest}`);
+    }
+  }
+  return commandLines.join("\n");
+}
+
 function withPreflightRerun(summary, failedTests = []) {
   const rerunOnly = failedTests.length > 0;
   return {
     summary,
     rerunOnly,
     rerunCommand: rerunOnly
-      ? `${PREFLIGHT_REPRO_COMMAND} ${failedTests.join(" ")}`
+      ? formatPreflightRerunCommand(failedTests)
       : PREFLIGHT_REPRO_COMMAND,
   };
 }
@@ -385,11 +402,10 @@ function runSecurityPreflight() {
   if (result.error || result.status !== 0) {
     const { summary, rerunOnly, rerunCommand } = summarizePreflightFailure(result);
     const rerunInstruction = rerunOnly
-      ? "Rerun only the named checks from the workspace root"
-      : "Run locally from the workspace root";
+      ? `Rerun only the named checks from the workspace root:\n${rerunCommand}\n`
+      : `Run locally from the workspace root: ${rerunCommand}. `;
     throw new Error(
-      `${summary}. ${rerunInstruction}: ${rerunCommand}. ` +
-      "No GitHub requests were made.",
+      `${summary}. ${rerunInstruction}No GitHub requests were made.`,
     );
   }
 }

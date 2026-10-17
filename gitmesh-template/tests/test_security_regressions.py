@@ -2672,9 +2672,9 @@ process.on("exit", saveCapture);
             f"{safe_test_name}, {second_safe_test_name}"
         )
         expected_rerun_command = (
-            "python3 gitmesh-template/tests/test_security_regressions.py "
-            f"GitHubSyncTests.{safe_test_name} "
-            f"GitHubSyncTests.{second_safe_test_name}"
+            "python3 gitmesh-template/tests/test_security_regressions.py \\\n"
+            f"  GitHubSyncTests.{safe_test_name} \\\n"
+            f"  GitHubSyncTests.{second_safe_test_name}"
         )
         source_sentinel = "PREFLIGHT_SOURCE_CONTENT_SENTINEL"
         credential_sentinel = "ghp_" + "Q" * 36
@@ -2717,8 +2717,8 @@ process.on("exit", saveCapture);
                 )
                 if preflight_mode == "failure":
                     self.assertIn(
-                        "Rerun only the named checks from the workspace root: "
-                        f"{expected_rerun_command}.",
+                        "Rerun only the named checks from the workspace root:\n"
+                        f"{expected_rerun_command}\nNo GitHub requests were made.",
                         result.stderr,
                     )
                 else:
@@ -2762,20 +2762,17 @@ process.on("exit", saveCapture);
                     for event in capture["filesystemReads"]
                 ))
 
-        reported_command_prefix = (
-            "Rerun only the named checks from the workspace root: "
-        )
+        reported_command_prefix = "Rerun only the named checks from the workspace root:\n"
         self.assertIsNotNone(recognized_failure_stderr)
-        matching_line = next(
-            line for line in recognized_failure_stderr.splitlines()
-            if reported_command_prefix in line
+        command_start = recognized_failure_stderr.index(reported_command_prefix) + len(
+            reported_command_prefix
         )
-        reported_command = matching_line.split(reported_command_prefix, 1)[1]
-        reported_command = reported_command.split(
-            ". No GitHub requests were made.", 1
-        )[0]
+        command_end = recognized_failure_stderr.index(
+            "\nNo GitHub requests were made.", command_start
+        )
+        reported_command = recognized_failure_stderr[command_start:command_end]
         self.assertEqual(reported_command, expected_rerun_command)
-        selected_command = reported_command.split()
+        selected_command = reported_command.replace("\\\n", " ").split()
         self.assertEqual(
             selected_command,
             [
@@ -2839,6 +2836,95 @@ process.on("exit", saveCapture);
                 capture = json.loads(self.capture.read_text())
                 self.assertEqual(capture["requests"], [])
 
+    def test_many_safe_preflight_failures_use_a_wrapped_copyable_rerun_command(self):
+        parent_test_names = (
+            "test_authentication_and_permission_errors_give_safe_recovery_guidance",
+            "test_branch_conflict_uses_non_force_update_and_stops",
+            "test_changed_source_updates_only_the_changed_allowlisted_file",
+            "test_credentials_in_multiple_sources_are_all_reported_without_leaking",
+            "test_dry_run_lists_only_changed_paths_without_contents_or_writes",
+            "test_dry_run_refresh_failure_requests_rerun",
+            "test_dry_run_refreshes_once_when_main_advances",
+            "test_dry_run_rejects_malformed_initial_and_first_comparison_commit_ids",
+            "test_dry_run_stops_after_second_head_advance",
+            "test_dry_run_stops_safely_when_refreshed_commit_id_is_invalid",
+            "test_dry_run_with_no_changes_reports_no_commit_and_makes_no_writes",
+        )
+        source_sentinel = "PREFLIGHT_MANY_FAILURE_SOURCE_SENTINEL"
+        credential_sentinel = "ghp_" + "R" * 36
+        unlisted_test_name = f"test_{credential_sentinel}"
+        stdout_output = "\n".join(
+            [
+                *(
+                    f"FAIL: {test_name} (__main__.GitHubSyncTests.{test_name})"
+                    for test_name in parent_test_names
+                ),
+                f"ERROR: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})",
+                source_sentinel,
+                credential_sentinel,
+            ]
+        )
+        stderr_output = "PREFLIGHT_MANY_FAILURE_PRIVATE_DIAGNOSTIC"
+        result = self.run_sync(
+            preflight_mode="failure",
+            preflight_output=stdout_output,
+            preflight_stderr=stderr_output,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        for test_name in parent_test_names:
+            self.assertIn(test_name, result.stderr)
+        for private_output in (
+            unlisted_test_name,
+            source_sentinel,
+            credential_sentinel,
+            stderr_output,
+            stdout_output,
+            FAKE_GITHUB_TOKEN,
+        ):
+            self.assertNotIn(private_output, output)
+        self.assert_safe_failure_output(result)
+
+        command_prefix = "Rerun only the named checks from the workspace root:\n"
+        command_start = result.stderr.index(command_prefix) + len(command_prefix)
+        command_end = result.stderr.index("\nNo GitHub requests were made.", command_start)
+        reported_command = result.stderr[command_start:command_end]
+        command_lines = reported_command.splitlines()
+        self.assertGreater(len(command_lines), 2)
+        self.assertTrue(all(line.endswith("\\") for line in command_lines[:-1]))
+        self.assertFalse(command_lines[-1].endswith("\\"))
+        self.assertLessEqual(max(map(len, command_lines)), 100)
+
+        selected_command = reported_command.replace("\\\n", " ").split()
+        expected_command = [
+            "python3",
+            "gitmesh-template/tests/test_security_regressions.py",
+            *(f"GitHubSyncTests.{test_name}" for test_name in parent_test_names),
+        ]
+        self.assertEqual(selected_command, expected_command)
+        selected_tests = subprocess.run(
+            ["sh", "-c", reported_command],
+            cwd=ROOT.parent,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        self.assertEqual(
+            selected_tests.returncode,
+            0,
+            selected_tests.stdout + selected_tests.stderr,
+        )
+        selected_run_count = re.search(r"Ran (\d+) tests?", selected_tests.stderr)
+        self.assertIsNotNone(selected_run_count, selected_tests.stderr)
+        self.assertEqual(int(selected_run_count.group(1)), len(parent_test_names))
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(len(capture["preflightCalls"]), 2)
+        self.assertFalse(any(call["hasGitHubToken"] for call in capture["preflightCalls"]))
+
     def test_security_preflight_multiple_subcases_are_counted_safely(self):
         parent_test_name = "test_sync_publishes_only_the_fixed_source_allowlist"
         first_subcase = "PRIVATE_SUBCASE_DESCRIPTION_ALPHA"
@@ -2866,11 +2952,17 @@ process.on("exit", saveCapture);
             f"{parent_test_name} (2 failing subcases)",
             result.stderr,
         )
-        self.assertIn(
-            "Rerun only the named checks from the workspace root: "
-            "python3 gitmesh-template/tests/test_security_regressions.py "
-            f"GitHubSyncTests.{parent_test_name}.",
-            result.stderr,
+        command_prefix = "Rerun only the named checks from the workspace root:\n"
+        command_start = result.stderr.index(command_prefix) + len(command_prefix)
+        command_end = result.stderr.index("\nNo GitHub requests were made.", command_start)
+        reported_command = result.stderr[command_start:command_end]
+        self.assertEqual(
+            reported_command.replace("\\\n", " ").split(),
+            [
+                "python3",
+                "gitmesh-template/tests/test_security_regressions.py",
+                f"GitHubSyncTests.{parent_test_name}",
+            ],
         )
         for private_output in (
             first_subcase,
