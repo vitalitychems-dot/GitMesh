@@ -143,6 +143,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_preflight_safe_name_allowlist_matches_regression_tests",
   "test_missing_preflight_harness_has_safe_recovery_guidance",
   "test_outdated_python_version_stops_before_preflight_and_github_without_leaking_output",
+  "test_invalid_python_version_output_stops_before_preflight_and_github_without_leaking",
   "test_malformed_credentials_fail_before_reading_sources_or_requesting_github",
   "test_http_and_network_failures_stop_without_printing_token",
   "test_branch_conflict_uses_non_force_update_and_stops",
