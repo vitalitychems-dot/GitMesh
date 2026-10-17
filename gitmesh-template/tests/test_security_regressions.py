@@ -1241,6 +1241,46 @@ process.on("exit", saveCapture);
                     self.assertNotIn(invalid_sha, json.dumps(requests))
                     self.assertTrue(all(request["method"] == "GET" for request in requests))
 
+    def test_dry_run_stops_safely_when_branch_ref_returns_unreadable_json(self):
+        self.set_remote_snapshot()
+        body_sentinel = "UNTRUSTED_BRANCH_REF_RESPONSE_BODY_SENTINEL"
+        result = self.run_sync(
+            args=("--dry-run",),
+            malformed_json_at="GET /git/ref/heads/main",
+            malformed_json_body=body_sentinel,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Dry run could not complete a consistent comparison",
+            result.stderr,
+        )
+        self.assertIn(
+            "GitHub returned an invalid response during GET /git/ref/heads/main",
+            result.stderr,
+        )
+        self.assertIn("Rerun the dry run before publishing", result.stderr)
+        self.assertIn("No GitHub changes were made", result.stderr)
+        self.assertNotIn(body_sentinel, output)
+        self.assertNotIn("would be published", output)
+        self.assertNotIn("already match", output)
+        self.assertEqual(reported_changed_paths(result.stdout), [])
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(output)
+
+        capture = json.loads(self.capture.read_text())
+        requests = capture["requests"]
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(
+            requests[0]["path"],
+            "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main",
+        )
+        self.assertTrue(requests[0]["hasExpectedBearer"])
+        self.assertEqual(requests[0]["method"], "GET")
+        self.assertFalse(any("/contents/" in request["path"] for request in requests))
+        self.assertFalse(any(request["method"] in ("POST", "PATCH") for request in requests))
+
     def test_dry_run_refreshes_once_when_main_advances(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"
