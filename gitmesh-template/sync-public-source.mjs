@@ -1514,8 +1514,12 @@ function checkStagedCredentials() {
     STAGED_GIT_TIMEOUT_STAGE.PATH_LISTING,
     timeoutMs,
   ).toString("utf8").split("\0").filter(Boolean);
+  // Keep diagnostic order stable by repository-relative path, regardless of staging order.
+  const stagedGitPaths = [...new Set(
+    stagedNames.filter((name) => sourceByGitPath.has(name)),
+  )].sort();
   const stagedSources = [...new Set(
-    stagedNames.map((name) => sourceByGitPath.get(name)).filter(Boolean),
+    stagedGitPaths.map((name) => sourceByGitPath.get(name)).filter(Boolean),
   )];
   if (stagedSources.length === 0) {
     console.log(
