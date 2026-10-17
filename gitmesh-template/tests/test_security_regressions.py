@@ -4876,6 +4876,89 @@ class HookInstallerTests(unittest.TestCase):
         )
         self.assertEqual(self.global_config.read_text(), "")
 
+    def test_standalone_root_worktree_setup_refuses_without_worktree_config_support(self):
+        standalone_root = self.repo_root / "standalone-no-worktree-config"
+        standalone_root.mkdir()
+        for name in ALLOWED_SOURCE_NAMES:
+            shutil.copy2(ROOT / name, standalone_root / name)
+        installer_path = standalone_root / HOOK_INSTALLER.name
+        shutil.copy2(HOOK_INSTALLER, installer_path)
+        hooks_directory = standalone_root / "hooks"
+        hooks_directory.mkdir()
+        standalone_hook = hooks_directory / "pre-commit"
+        shutil.copy2(PRE_COMMIT_HOOK, standalone_hook)
+        original_hook = standalone_hook.read_bytes()
+
+        initialized = self.run_git_at(standalone_root, ["init", "--quiet"])
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        for name, value in (
+            ("user.name", "GitMesh Standalone Unsupported Test"),
+            ("user.email", "gitmesh-standalone-unsupported-test@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ):
+            configured = self.run_git_at(
+                standalone_root,
+                ["config", "--local", name, value],
+            )
+            self.assertEqual(configured.returncode, 0, configured.stderr)
+        self.run_git_at(standalone_root, ["add", "."])
+        baseline = self.run_git_at(
+            standalone_root,
+            ["commit", "--quiet", "-m", "standalone unsupported fixture baseline"],
+        )
+        self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+
+        selected_worktree = self.repo_root / "standalone-no-config-selected"
+        sibling_worktree = self.repo_root / "standalone-no-config-sibling"
+        selected_added = self.run_git_at(
+            standalone_root,
+            ["worktree", "add", "--detach", str(selected_worktree), "HEAD"],
+        )
+        self.assertEqual(selected_added.returncode, 0, selected_added.stdout + selected_added.stderr)
+        sibling_added = self.run_git_at(
+            standalone_root,
+            ["worktree", "add", "--detach", str(sibling_worktree), "HEAD"],
+        )
+        self.assertEqual(sibling_added.returncode, 0, sibling_added.stdout + sibling_added.stderr)
+
+        selected_hook = selected_worktree / "hooks" / "pre-commit"
+        sibling_hook = sibling_worktree / "hooks" / "pre-commit"
+        self.assertEqual(selected_hook.read_bytes(), original_hook)
+        self.assertEqual(sibling_hook.read_bytes(), original_hook)
+        config_before = {
+            str(root): self.git_config_snapshot(root)
+            for root in (standalone_root, selected_worktree, sibling_worktree)
+        }
+
+        result = self.run_installer(
+            cwd=selected_worktree,
+            args=("--worktree-local",),
+            installer_path=selected_worktree / HOOK_INSTALLER.name,
+        )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires extensions.worktreeConfig=true", output)
+        self.assertIn("The setting is not enabled", output)
+        self.assertIn("No Git configuration was changed", output)
+        self.assertEqual(
+            self.run_git_at(
+                standalone_root,
+                ["config", "--local", "--get", "extensions.worktreeConfig"],
+            ).returncode,
+            1,
+        )
+        for root in (standalone_root, selected_worktree, sibling_worktree):
+            hook_path = self.run_git_at(root, ["config", "--get-all", "core.hooksPath"])
+            self.assertEqual(hook_path.returncode, 1, hook_path.stdout + hook_path.stderr)
+            self.assertEqual(
+                self.git_config_snapshot(root),
+                config_before[str(root)],
+            )
+        self.assertEqual(selected_hook.read_bytes(), original_hook)
+        self.assertEqual(sibling_hook.read_bytes(), original_hook)
+        self.assertEqual(standalone_hook.read_bytes(), original_hook)
+        self.assertEqual(self.global_config.read_bytes(), b"")
+
     def test_hook_setup_enables_only_repository_local_path_when_safe(self):
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
