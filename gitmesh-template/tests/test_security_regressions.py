@@ -1491,6 +1491,52 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_embedded_credentials_report_lines_for_mixed_line_breaks_without_leaking(self):
+        source_path = self.source_root / "README.md"
+        original_content = source_path.read_bytes()
+        credentials = (
+            "ghp_" + "A" * 36,
+            "github_pat_" + "B" * 40,
+            "npm_" + "C" * 36,
+            "xoxb-" + "D" * 24,
+        )
+        credential_lines = tuple(f"token={value}" for value in credentials)
+        source_text = "\r\n".join(("SAFE_MIXED_HEADER_CONTEXT", credential_lines[0]))
+        source_text += "\r" + credential_lines[1]
+        source_text += "\u2028" + credential_lines[2]
+        source_text += "\u2029" + credential_lines[3]
+        source_text += "\r\nSAFE_MIXED_FOOTER_CONTEXT"
+
+        try:
+            source_path.write_bytes(source_text.encode("utf-8"))
+
+            for mode, args, token_value in (
+                ("sync", (), FAKE_GITHUB_TOKEN),
+                ("local check without token", ("--check-credentials",), None),
+            ):
+                with self.subTest(mode=mode):
+                    result = self.run_sync(args=args, token_value=token_value)
+                    output = result.stdout + result.stderr
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        f"{source_path.name} (lines 2, 3, 4, 5)",
+                        result.stderr,
+                    )
+                    self.assertIn("No GitHub requests were made", result.stderr)
+                    for private_text in (
+                        *credentials,
+                        *credential_lines,
+                        "SAFE_MIXED_HEADER_CONTEXT",
+                        "SAFE_MIXED_FOOTER_CONTEXT",
+                    ):
+                        self.assertNotIn(private_text, output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"
