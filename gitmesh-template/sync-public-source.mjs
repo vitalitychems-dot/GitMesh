@@ -70,6 +70,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_in_place_source_edit_during_read_is_rejected_before_github",
   "test_invalid_javascript_stops_before_github_without_printing_source",
   "test_javascript_syntax_locations_are_accurate_with_tabs_and_crlf_without_leaking_source",
+  "test_syntax_diagnostics_are_sanitized_across_node_formats",
   "test_embedded_credentials_stop_before_github_without_leaking_values",
   "test_credentials_in_multiple_sources_are_all_reported_without_leaking",
   "test_embedded_credentials_report_lines_for_crlf_and_bare_cr_without_leaking",
