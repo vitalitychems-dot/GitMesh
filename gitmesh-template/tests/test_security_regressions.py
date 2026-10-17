@@ -1704,9 +1704,26 @@ process.on("exit", saveCapture);
         safe_names = set(
             re.findall(r'"(test_[A-Za-z0-9_]+)"', safe_name_block.group(1))
         )
+        safe_class_block = re.search(
+            r"const SAFE_PREFLIGHT_TEST_CLASSES = new Set\(\[(.*?)\]\);",
+            sync_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            safe_class_block,
+            "Could not find the safe preflight test-class allowlist.",
+        )
+        safe_class_names = set(
+            re.findall(r'"([A-Za-z0-9_]+)"', safe_class_block.group(1))
+        )
+        test_source = pathlib.Path(__file__).read_text()
+        test_class_names = set(
+            re.findall(r"^class ([A-Za-z0-9_]+)\(", test_source, re.MULTILINE)
+        )
+        self.assertEqual(safe_class_names, test_class_names)
         test_method_names = re.findall(
             r"^\s+def (test_[A-Za-z0-9_]+)\(",
-            pathlib.Path(__file__).read_text(),
+            test_source,
             re.MULTILINE,
         )
         regression_test_names = set(test_method_names)
@@ -1783,6 +1800,11 @@ process.on("exit", saveCapture);
             f"Security regression preflight failed in: "
             f"{safe_test_name}, {second_safe_test_name}"
         )
+        expected_rerun_command = (
+            "python3 gitmesh-template/tests/test_security_regressions.py "
+            f"GitHubSyncTests.{safe_test_name} "
+            f"GitHubSyncTests.{second_safe_test_name}"
+        )
         source_sentinel = "PREFLIGHT_SOURCE_CONTENT_SENTINEL"
         credential_sentinel = "ghp_" + "Q" * 36
         unlisted_test_name = f"test_{credential_sentinel}"
@@ -1809,6 +1831,7 @@ process.on("exit", saveCapture);
             ("timeout", "python timeout", (), "preflight timed out"),
             ("output-limit", "large output", (), "exceeded its output limit"),
         )
+        recognized_failure_stderr = None
         for preflight_mode, mode, args, expected_summary in cases:
             with self.subTest(mode=mode):
                 result = self.run_sync(
@@ -1823,6 +1846,18 @@ process.on("exit", saveCapture);
                     "python3 gitmesh-template/tests/test_security_regressions.py",
                     result.stderr,
                 )
+                if preflight_mode == "failure":
+                    self.assertIn(
+                        "Rerun only the named checks from the workspace root: "
+                        f"{expected_rerun_command}.",
+                        result.stderr,
+                    )
+                else:
+                    self.assertIn(
+                        "Run locally from the workspace root: "
+                        "python3 gitmesh-template/tests/test_security_regressions.py.",
+                        result.stderr,
+                    )
                 self.assertIn("No GitHub requests were made", result.stderr)
                 self.assertNotIn(source_sentinel, result.stdout + result.stderr)
                 self.assertNotIn(credential_sentinel, result.stdout + result.stderr)
@@ -1830,7 +1865,9 @@ process.on("exit", saveCapture);
                 self.assertNotIn(injected_output, result.stdout + result.stderr)
                 if preflight_mode == "failure":
                     for recognized_name in (safe_test_name, second_safe_test_name):
-                        self.assertEqual(result.stderr.count(recognized_name), 1)
+                        self.assertEqual(result.stderr.count(recognized_name), 2)
+                    if mode == "publish":
+                        recognized_failure_stderr = result.stderr
                 self.assert_safe_failure_output(result)
 
                 capture = json.loads(self.capture.read_text())
@@ -1852,27 +1889,82 @@ process.on("exit", saveCapture);
                     for event in capture["filesystemReads"]
                 ))
 
+        reported_command_prefix = (
+            "Rerun only the named checks from the workspace root: "
+        )
+        self.assertIsNotNone(recognized_failure_stderr)
+        matching_line = next(
+            line for line in recognized_failure_stderr.splitlines()
+            if reported_command_prefix in line
+        )
+        reported_command = matching_line.split(reported_command_prefix, 1)[1]
+        reported_command = reported_command.split(
+            ". No GitHub requests were made.", 1
+        )[0]
+        self.assertEqual(reported_command, expected_rerun_command)
+        selected_command = reported_command.split()
+        self.assertEqual(
+            selected_command,
+            [
+                "python3",
+                "gitmesh-template/tests/test_security_regressions.py",
+                f"GitHubSyncTests.{safe_test_name}",
+                f"GitHubSyncTests.{second_safe_test_name}",
+            ],
+        )
+        selected_tests = subprocess.run(
+            selected_command,
+            cwd=ROOT.parent,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        self.assertEqual(
+            selected_tests.returncode,
+            0,
+            selected_tests.stdout + selected_tests.stderr,
+        )
+        selected_run_count = re.search(r"Ran (\d+) tests?", selected_tests.stderr)
+        self.assertIsNotNone(selected_run_count, selected_tests.stderr)
+        self.assertEqual(int(selected_run_count.group(1)), 2)
+
         unknown_only_output = (
             f"ERROR: {unlisted_test_name} (__main__.GitHubSyncTests.{unlisted_test_name})\n"
             f"{source_sentinel}\n{credential_sentinel}"
         )
-        with self.subTest(mode="unknown test only"):
-            result = self.run_sync(
-                preflight_mode="failure",
-                preflight_output=unknown_only_output,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("no safe failing test name was available", result.stderr)
-            for unsafe_text in (
-                unlisted_test_name,
-                source_sentinel,
-                credential_sentinel,
-                unknown_only_output,
-            ):
-                self.assertNotIn(unsafe_text, result.stdout + result.stderr)
-            self.assert_safe_failure_output(result)
-            capture = json.loads(self.capture.read_text())
-            self.assertEqual(capture["requests"], [])
+        unallowlisted_class_output = (
+            f"FAIL: {safe_test_name} (__main__.UnlistedFixtureTests.{safe_test_name})\n"
+            f"{source_sentinel}\n{credential_sentinel}"
+        )
+        for label, child_output, hidden_name in (
+            ("unknown test only", unknown_only_output, unlisted_test_name),
+            ("unallowlisted class", unallowlisted_class_output, safe_test_name),
+        ):
+            with self.subTest(mode=label):
+                result = self.run_sync(
+                    preflight_mode="failure",
+                    preflight_output=child_output,
+                )
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no safe failing test name was available", result.stderr)
+                self.assertIn(
+                    "Run locally from the workspace root: "
+                    "python3 gitmesh-template/tests/test_security_regressions.py.",
+                    result.stderr,
+                )
+                self.assertNotIn("Rerun only the named checks", result.stderr)
+                for unsafe_text in (
+                    hidden_name,
+                    source_sentinel,
+                    credential_sentinel,
+                    child_output,
+                ):
+                    self.assertNotIn(unsafe_text, output)
+                self.assert_safe_failure_output(result)
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
 
     def test_malformed_credentials_fail_before_reading_sources_or_requesting_github(self):
         for bad_value in ("", "bad\ntoken", "x" * 4097):
