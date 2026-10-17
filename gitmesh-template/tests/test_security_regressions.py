@@ -2741,6 +2741,90 @@ class HookInstallerTests(unittest.TestCase):
         hook_path.chmod(0o755)
         return hook_path.read_bytes()
 
+    def git_config_snapshot(self, cwd):
+        git_dir_result = self.run_git_at(cwd, ["rev-parse", "--absolute-git-dir"])
+        common_dir_result = self.run_git_at(cwd, ["rev-parse", "--git-common-dir"])
+        self.assertEqual(git_dir_result.returncode, 0, git_dir_result.stderr)
+        self.assertEqual(common_dir_result.returncode, 0, common_dir_result.stderr)
+        git_dir = pathlib.Path(git_dir_result.stdout.strip())
+        common_dir = pathlib.Path(common_dir_result.stdout.strip())
+        if not git_dir.is_absolute():
+            git_dir = cwd / git_dir
+        if not common_dir.is_absolute():
+            common_dir = cwd / common_dir
+        paths = (common_dir / "config", git_dir / "config.worktree", self.global_config)
+        snapshot = {}
+        for config_path in paths:
+            try:
+                metadata = config_path.stat()
+                snapshot[str(config_path)] = (
+                    metadata.st_mtime_ns,
+                    metadata.st_size,
+                    config_path.read_bytes(),
+                )
+            except FileNotFoundError:
+                snapshot[str(config_path)] = None
+        return snapshot
+
+    def test_hook_status_reports_repository_local_setup_without_writing_config(self):
+        self.run_git(["config", "--local", "core.hooksPath", "gitmesh-template/hooks"])
+        before = self.git_config_snapshot(self.repo_root)
+        status = self.run_installer(args=("--status",))
+        output = status.stdout + status.stderr
+
+        self.assertEqual(status.returncode, 0, output)
+        self.assertIn("GitMesh pre-commit check: active", output)
+        self.assertIn("Scope: repository-local", output)
+        self.assertIn(
+            "To disable this GitMesh setup, run: git config --local --unset core.hooksPath '^gitmesh-template/hooks$'",
+            output,
+        )
+        self.assertEqual(self.git_config_snapshot(self.repo_root), before)
+
+    def test_hook_status_reports_shared_setup_without_writing_config(self):
+        shared_hooks = self.template_root / "hooks"
+        self.run_git(["config", "--global", "core.hooksPath", str(shared_hooks)])
+        before = self.git_config_snapshot(self.repo_root)
+        status = self.run_installer(args=("--status",))
+        output = status.stdout + status.stderr
+
+        self.assertEqual(status.returncode, 0, output)
+        self.assertIn("GitMesh pre-commit check: active", output)
+        self.assertIn("Scope: shared (global)", output)
+        self.assertIn("git config --global --unset core.hooksPath", output)
+        self.assertEqual(self.git_config_snapshot(self.repo_root), before)
+
+    def test_hook_status_reports_inactive_setup_without_writing_config(self):
+        before = self.git_config_snapshot(self.repo_root)
+        status = self.run_installer(args=("--status",))
+        output = status.stdout + status.stderr
+
+        self.assertEqual(status.returncode, 0, output)
+        self.assertIn("GitMesh pre-commit check: inactive", output)
+        self.assertIn("Scope: inactive", output)
+        self.assertIn("No GitMesh-specific disable command is needed", output)
+        self.assertEqual(self.git_config_snapshot(self.repo_root), before)
+
+    def test_hook_status_reports_manual_hook_integration_without_writing_config(self):
+        hook_path = self.repo_root / "manual-hooks" / "pre-commit"
+        self.make_executable_hook(
+            hook_path,
+            "#!/bin/sh\n"
+            "node 'gitmesh-template/sync-public-source.mjs' --check-staged-credentials\n",
+        )
+        self.run_git(["config", "--local", "core.hooksPath", "manual-hooks"])
+        before = self.git_config_snapshot(self.repo_root)
+        status = self.run_installer(args=("--status",))
+        output = status.stdout + status.stderr
+
+        self.assertEqual(status.returncode, 0, output)
+        self.assertIn("GitMesh pre-commit check: active", output)
+        self.assertIn("Scope: repository-local", output)
+        self.assertIn("GitMesh check found in the existing hook", output)
+        self.assertIn("remove its command", output)
+        self.assertNotIn("git config --local --unset core.hooksPath", output)
+        self.assertEqual(self.git_config_snapshot(self.repo_root), before)
+
     def test_hook_setup_uses_local_hooks_path_when_gitmesh_is_repository_root(self):
         standalone_root = self.repo_root / "standalone-gitmesh"
         standalone_root.mkdir()
@@ -2885,6 +2969,21 @@ class HookInstallerTests(unittest.TestCase):
         )
         self.assertEqual(selected_path.returncode, 0)
         self.assertEqual(selected_path.stdout.strip(), "hooks")
+        before_status = self.git_config_snapshot(selected_worktree)
+        status = self.run_installer(
+            cwd=selected_worktree,
+            args=("--status",),
+            installer_path=selected_worktree / HOOK_INSTALLER.name,
+        )
+        status_output = status.stdout + status.stderr
+        self.assertEqual(status.returncode, 0, status_output)
+        self.assertIn("GitMesh pre-commit check: active", status_output)
+        self.assertIn("Scope: worktree-local", status_output)
+        self.assertIn(
+            "To disable this GitMesh setup, run: git config --worktree --unset core.hooksPath '^hooks$'",
+            status_output,
+        )
+        self.assertEqual(self.git_config_snapshot(selected_worktree), before_status)
 
         for untouched in (standalone_root, sibling_worktree):
             self.assertEqual(
@@ -2998,6 +3097,14 @@ class HookInstallerTests(unittest.TestCase):
         self.assertIn("existing pre-commit hook, if present, runs first, then GitMesh", enabled.stdout)
         self.assertIn("No global or sibling-worktree settings were changed", enabled.stdout)
         self.assertIn("git config --local --unset core.hooksPath", enabled.stdout)
+        before_status = self.git_config_snapshot(self.repo_root)
+        status = self.run_installer(args=("--status",))
+        status_output = status.stdout + status.stderr
+        self.assertEqual(status.returncode, 0, status_output)
+        self.assertIn("GitMesh pre-commit check: active", status_output)
+        self.assertIn("Scope: repository-local", status_output)
+        self.assertIn("git config --local --unset core.hooksPath", status_output)
+        self.assertEqual(self.git_config_snapshot(self.repo_root), before_status)
 
         local_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
         self.assertEqual(local_paths.returncode, 0)
