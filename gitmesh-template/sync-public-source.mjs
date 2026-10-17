@@ -62,6 +62,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_credential_check_reports_location_without_exposing_value",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
+  "test_precommit_hook_reports_unicode_separator_lines_without_exposing_content",
   "test_precommit_hook_blocks_when_node_is_missing",
   "test_precommit_hook_blocks_when_staged_index_cannot_be_read",
   "test_precommit_hook_passes_clean_source_and_ignores_unrelated_files",
