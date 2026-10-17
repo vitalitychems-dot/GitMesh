@@ -2358,6 +2358,69 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_blocks_when_node_is_too_old_without_leaking_output(self):
+        credential = "ghp_" + "D" * 36
+        staged_source_line = f"staged_secret={credential}"
+        source_sentinel = "OLD_NODE_STAGED_SOURCE_SENTINEL"
+        self.readme.write_text(f"{staged_source_line}\n{source_sentinel}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        path_with_old_node = self.repo_root / "path-with-old-node"
+        path_with_old_node.mkdir()
+        for command in ("git", "dirname"):
+            executable = shutil.which(command)
+            self.assertIsNotNone(executable, f"required test executable not found: {command}")
+            (path_with_old_node / command).symlink_to(executable)
+        execution_marker = self.repo_root / "old-node-was-used-for-scan"
+        node_shim = path_with_old_node / "node"
+        node_shim.write_text(
+            "#!/bin/sh\n"
+            'if [ "${1-}" = "--version" ]; then\n'
+            "  printf '%s\\n' 'v18.19.0'\n"
+            "  printf '%s\\n' 'NODE_VERSION_STDERR_SENTINEL' >&2\n"
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "scanner unexpectedly launched" > "$GITMESH_TEST_NODE_EXECUTION_MARKER"\n'
+            'printf "%s\\n" "NODE_RUNTIME_OUTPUT_SENTINEL" >&2\n'
+            "exit 1\n"
+        )
+        node_shim.chmod(0o755)
+
+        env = self.hook_environment_without_github_token()
+        env["PATH"] = str(path_with_old_node)
+        env["GITMESH_TEST_NODE_EXECUTION_MARKER"] = str(execution_marker)
+        result = self.run_git(
+            ["commit", "-m", "must be blocked with old node"],
+            env=env,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("detected Node.js major version 18", output)
+        self.assertIn("Node.js 20 or newer is required", output)
+        self.assertIn("Upgrade Node.js to 20 or newer", output)
+        self.assertIn("ensure node --version reports v20 or newer", output)
+        self.assertIn("No staged content was inspected", output)
+        self.assertIn("No GitHub requests were made", output)
+        for private_text in (
+            "v18.19.0",
+            "NODE_VERSION_STDERR_SENTINEL",
+            "NODE_RUNTIME_OUTPUT_SENTINEL",
+            staged_source_line,
+            source_sentinel,
+            credential,
+            FAKE_GITHUB_TOKEN,
+        ):
+            self.assertNotIn(private_text, output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(
+            self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+            "gitmesh-template/README.md",
+        )
+        self.assertFalse(execution_marker.exists())
+        self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_blocks_when_staged_index_cannot_be_read(self):
         credential = "ghp_" + "I" * 36
         source_sentinel = "UNREADABLE_INDEX_STAGED_SOURCE_SENTINEL"
