@@ -4903,14 +4903,17 @@ class HookInstallerTests(unittest.TestCase):
         self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
         self.assertIn("existing pre-commit hook, if present, runs first, then GitMesh", enabled.stdout)
         self.assertIn("No global or sibling-worktree settings were changed", enabled.stdout)
-        self.assertIn("git config --local --unset core.hooksPath", enabled.stdout)
+        disable_command_text = (
+            "node 'gitmesh-template/install-pre-commit-hook.mjs' --disable-chain"
+        )
+        self.assertIn(disable_command_text, enabled.stdout)
         before_status = self.git_config_snapshot(self.repo_root)
         status = self.run_installer(args=("--status",))
         status_output = status.stdout + status.stderr
         self.assertEqual(status.returncode, 0, status_output)
         self.assertIn("GitMesh pre-commit check: active", status_output)
         self.assertIn("Scope: repository-local", status_output)
-        self.assertIn("git config --local --unset core.hooksPath", status_output)
+        self.assertIn(disable_command_text, status_output)
         self.assertEqual(self.git_config_snapshot(self.repo_root), before_status)
 
         local_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
@@ -4943,6 +4946,10 @@ class HookInstallerTests(unittest.TestCase):
             self.run_git(["config", "--global", "--get", "core.hooksPath"]).stdout.strip(),
             "existing-global-hooks",
         )
+        # Existing installations may still have the original marker-only format.
+        (dispatch_directory / ".gitmesh-dispatch").write_text(
+            "GitMesh hook dispatcher v1\n"
+        )
         disable_command = enabled.stdout.split("To disable it, run: ", 1)[1].strip()
         disabled = subprocess.run(
             shlex.split(disable_command),
@@ -4953,12 +4960,88 @@ class HookInstallerTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertFalse(dispatch_directory.exists())
         restored_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
         self.assertEqual(restored_paths.stdout.splitlines(), ["existing-local-hooks"])
+        self.assertEqual(
+            self.run_git(["config", "--global", "--get", "core.hooksPath"]).stdout.strip(),
+            "existing-global-hooks",
+        )
+        self.assertEqual(pre_commit.read_bytes(), original_pre_commit)
+        self.assertEqual(post_commit.read_bytes(), original_post_commit)
         reenabled = self.run_installer(args=("--chain-existing",))
         self.assertEqual(reenabled.returncode, 0, reenabled.stdout + reenabled.stderr)
         reenabled_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
         self.assertEqual(len(reenabled_paths.stdout.splitlines()), 2)
+        self.assertTrue(dispatch_directory.is_dir())
+
+    def test_disable_chain_refuses_unmarked_or_unexpected_dispatcher_files(self):
+        self.run_git(["config", "--global", "core.hooksPath", "existing-global-hooks"])
+        self.run_git(["config", "--local", "--add", "core.hooksPath", "existing-local-hooks"])
+        enabled = self.run_installer(args=("--chain-existing",))
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+        local_paths = self.run_git(["config", "--local", "--get-all", "core.hooksPath"])
+        self.assertEqual(local_paths.returncode, 0, local_paths.stderr)
+        original_values = local_paths.stdout.splitlines()
+        self.assertEqual(original_values[0], "existing-local-hooks")
+        self.assertEqual(len(original_values), 2)
+        dispatch_directory = pathlib.Path(original_values[-1])
+        marker = dispatch_directory / ".gitmesh-dispatch"
+        marker_contents = marker.read_text()
+
+        unexpected_file = dispatch_directory / "unexpected-hook"
+        unexpected_file.write_text("UNEXPECTED_DISPATCHER_FILE_SENTINEL\n")
+        refused_extra = self.run_installer(args=("--disable-chain",))
+        output_extra = refused_extra.stdout + refused_extra.stderr
+        self.assertNotEqual(refused_extra.returncode, 0)
+        self.assertIn("marker or file set is missing or unexpected", output_extra)
+        self.assertIn("no Git configuration or files were changed", output_extra)
+        self.assertTrue(dispatch_directory.is_dir())
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get-all", "core.hooksPath"]).stdout.splitlines(),
+            original_values,
+        )
+        self.assertEqual(
+            self.run_git(["config", "--global", "--get", "core.hooksPath"]).stdout.strip(),
+            "existing-global-hooks",
+        )
+
+        unexpected_file.unlink()
+        marker.write_text("UNTRUSTED_DISPATCHER_MARKER_SENTINEL\n")
+        refused_unmarked = self.run_installer(args=("--disable-chain",))
+        output_unmarked = refused_unmarked.stdout + refused_unmarked.stderr
+        self.assertNotEqual(refused_unmarked.returncode, 0)
+        self.assertIn("marker or file set is missing or unexpected", output_unmarked)
+        self.assertIn("no Git configuration or files were changed", output_unmarked)
+        self.assertTrue(dispatch_directory.is_dir())
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get-all", "core.hooksPath"]).stdout.splitlines(),
+            original_values,
+        )
+        self.assertEqual(
+            self.run_git(["config", "--global", "--get", "core.hooksPath"]).stdout.strip(),
+            "existing-global-hooks",
+        )
+
+        marker.write_text(marker_contents)
+        pre_commit_dispatcher = dispatch_directory / "pre-commit"
+        pre_commit_dispatcher.write_text(
+            pre_commit_dispatcher.read_text() + "# TAMPERED_DISPATCHER_SENTINEL\n"
+        )
+        refused_tampered = self.run_installer(args=("--disable-chain",))
+        output_tampered = refused_tampered.stdout + refused_tampered.stderr
+        self.assertNotEqual(refused_tampered.returncode, 0)
+        self.assertIn("marker or file set is missing or unexpected", output_tampered)
+        self.assertIn("no Git configuration or files were changed", output_tampered)
+        self.assertTrue(dispatch_directory.is_dir())
+        self.assertEqual(
+            self.run_git(["config", "--local", "--get-all", "core.hooksPath"]).stdout.splitlines(),
+            original_values,
+        )
+        self.assertEqual(
+            self.run_git(["config", "--global", "--get", "core.hooksPath"]).stdout.strip(),
+            "existing-global-hooks",
+        )
 
     def test_chain_existing_pre_push_replays_ref_input_to_gitmesh_after_existing_hook(self):
         existing_hooks = self.repo_root / "existing-push-hooks"
@@ -4983,6 +5066,9 @@ class HookInstallerTests(unittest.TestCase):
             f"exec {shlex.quote(str(pre_push))} \"$@\"\n"
         )
         legacy_pre_push.chmod(0o755)
+        (dispatch_directory / ".gitmesh-dispatch").write_text(
+            "GitMesh hook dispatcher v1\n"
+        )
         upgraded = self.run_installer(args=("--chain-existing",))
         self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
         self.assertIn("Updated the existing GitMesh dispatcher", upgraded.stdout)
@@ -5104,13 +5190,18 @@ class HookInstallerTests(unittest.TestCase):
         )
         self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
         self.assertIn("this worktree only", enabled.stdout)
-        self.assertIn("git config --worktree --unset core.hooksPath", enabled.stdout)
+        self.assertIn(
+            "node 'gitmesh-template/install-pre-commit-hook.mjs' "
+            "--worktree-local --disable-chain",
+            enabled.stdout,
+        )
         worktree_path = self.run_git_at(
             worktree_root,
             ["config", "--worktree", "--get", "core.hooksPath"],
         )
         self.assertEqual(worktree_path.returncode, 0)
-        self.assertTrue(pathlib.Path(worktree_path.stdout.strip()).is_dir())
+        dispatch_directory = pathlib.Path(worktree_path.stdout.strip())
+        self.assertTrue(dispatch_directory.is_dir())
         self.assertEqual(
             self.run_git_at(sibling_root, ["config", "--worktree", "--get", "core.hooksPath"]).returncode,
             1,
@@ -5139,6 +5230,41 @@ class HookInstallerTests(unittest.TestCase):
             self.run_git_at(sibling_root, ["config", "--worktree", "--get", "core.hooksPath"]).returncode,
             1,
         )
+
+        disable_command = enabled.stdout.split("To disable it, run: ", 1)[1].strip()
+        disabled = subprocess.run(
+            shlex.split(disable_command),
+            cwd=worktree_root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertIn("removed the verified dispatcher directory", disabled.stdout)
+        self.assertFalse(dispatch_directory.exists())
+        self.assertEqual(
+            self.run_git_at(
+                worktree_root,
+                ["config", "--worktree", "--get", "core.hooksPath"],
+            ).returncode,
+            1,
+        )
+        self.assertEqual(
+            self.run_git_at(
+                sibling_root,
+                ["config", "--worktree", "--get", "core.hooksPath"],
+            ).returncode,
+            1,
+        )
+        self.assertEqual(
+            self.run_git(
+                ["config", "--local", "--get", "core.hooksPath"]
+            ).returncode,
+            1,
+        )
+        self.assertEqual(self.global_config.read_text(), "")
+        self.assertEqual(pre_commit.read_bytes(), original_pre_commit)
 
     def test_hook_setup_preserves_existing_local_hooks_path(self):
         existing_hooks = self.repo_root / "existing-local-hooks"
