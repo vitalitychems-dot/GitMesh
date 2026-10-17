@@ -86,6 +86,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_hook_setup_preserves_existing_default_hooks",
   "test_hook_setup_refuses_linked_worktree_without_changing_config",
   "test_hook_setup_enables_only_selected_linked_worktree_when_supported",
+  "test_hook_setup_keeps_selected_worktree_check_after_move",
   "test_chain_existing_hooks_run_first_and_preserve_configuration",
   "test_chain_existing_hook_failure_stops_before_gitmesh",
   "test_chain_existing_gitmesh_failure_happens_after_existing_hook",
