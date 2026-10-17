@@ -298,6 +298,8 @@ const base = "/repos/vitalitychems-dot/GitMesh";
 const initialCommitSha = process.env.GITMESH_TEST_INITIAL_SHA;
 const invalidShaStage = process.env.GITMESH_TEST_INVALID_SHA_STAGE;
 const invalidSha = process.env.GITMESH_TEST_INVALID_SHA;
+const malformedJsonAt = process.env.GITMESH_TEST_MALFORMED_JSON_AT;
+const malformedJsonBody = process.env.GITMESH_TEST_MALFORMED_JSON_BODY;
 let mainRefReadCount = 0;
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
 childProcess.spawnSync = (command, ...args) => {
@@ -527,6 +529,13 @@ globalThis.fetch = async (input, init = {}) => {
     throw new Error("Unexpected mocked GitHub request.");
   }
   saveCapture();
+  if (malformedJsonAt === method + " " + route) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => JSON.parse(malformedJsonBody),
+    };
+  }
   return { ok: true, status: 200, json: async () => data };
 };
 process.on("exit", saveCapture);
@@ -560,6 +569,8 @@ process.on("exit", saveCapture);
         fail_ref=None,
         invalid_sha_stage=None,
         invalid_sha=None,
+        malformed_json_at=None,
+        malformed_json_body=None,
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -590,6 +601,8 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_FAIL_REF", fail_ref),
             ("GITMESH_TEST_INVALID_SHA_STAGE", invalid_sha_stage),
             ("GITMESH_TEST_INVALID_SHA", invalid_sha),
+            ("GITMESH_TEST_MALFORMED_JSON_AT", malformed_json_at),
+            ("GITMESH_TEST_MALFORMED_JSON_BODY", malformed_json_body),
         ):
             if value is None:
                 env.pop(key, None)
@@ -713,6 +726,46 @@ process.on("exit", saveCapture);
             b"PRIVATE_WORKSPACE_SENTINEL",
         ):
             self.assertNotIn(sentinel, uploaded_contents)
+
+    def test_sync_stops_safely_when_object_creation_returns_unreadable_json(self):
+        self.set_remote_snapshot()
+        readme = self.source_root / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nUnreadable JSON sync test marker.\n")
+
+        body_sentinel = "UNTRUSTED_SUCCESS_RESPONSE_BODY_SENTINEL"
+        repository_prefix = "/repos/vitalitychems-dot/GitMesh"
+        cases = (
+            ("/git/blobs", ["/git/blobs"]),
+            ("/git/trees", ["/git/blobs", "/git/trees"]),
+            ("/git/commits", ["/git/blobs", "/git/trees", "/git/commits"]),
+        )
+        for route, expected_write_routes in cases:
+            with self.subTest(route=route):
+                result = self.run_sync(
+                    malformed_json_at=f"POST {route}",
+                    malformed_json_body=body_sentinel,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"GitHub returned an invalid response during POST {route}", result.stderr)
+                self.assertNotIn(body_sentinel, output)
+                self.assertNotIn("Synced ", output)
+                self.assertNotIn("Commit: ", output)
+                self.assertEqual(reported_changed_paths(result.stdout), [])
+                self.assert_safe_failure_output(result)
+                self.assert_no_source_contents_in_output(output)
+
+                capture = json.loads(self.capture.read_text())
+                requests = capture["requests"]
+                self.assertTrue(all(request["hasExpectedBearer"] for request in requests))
+                write_routes = [
+                    request["path"][len(repository_prefix):]
+                    for request in requests
+                    if request["method"] in ("POST", "PATCH")
+                ]
+                self.assertEqual(write_routes, expected_write_routes)
+                self.assertFalse(any(request["method"] == "PATCH" for request in requests))
 
     def test_normal_sync_stops_safely_on_malformed_object_ids(self):
         readme = self.source_root / "README.md"
