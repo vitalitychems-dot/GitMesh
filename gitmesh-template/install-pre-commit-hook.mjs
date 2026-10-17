@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { TextDecoder } from "node:util";
@@ -12,6 +13,7 @@ const SYNC_SCRIPT = path.join(ROOT, "sync-public-source.mjs");
 const DISPATCH_DIRECTORY_NAME = "gitmesh-hooks";
 const DISPATCH_MARKER_NAME = ".gitmesh-dispatch";
 const DISPATCH_MARKER = "GitMesh hook dispatcher v1\n";
+const DISPATCH_MANIFEST_HEADER = `${DISPATCH_MARKER}files-sha256-v1\n`;
 const PRE_PUSH_DISPATCH_MARKER = "GitMesh pre-push dispatcher v1";
 
 function runGit(args, cwd) {
@@ -142,21 +144,28 @@ function refuseSharedWorktreeSettings(repoRoot) {
 }
 
 function parseOptions(args) {
-  const acceptedOptions = new Set(["--worktree-local", "--chain-existing", "--status"]);
+  const acceptedOptions = new Set([
+    "--worktree-local",
+    "--chain-existing",
+    "--status",
+    "--disable-chain",
+  ]);
   if (
     args.length <= acceptedOptions.size &&
     new Set(args).size === args.length &&
     args.every((argument) => acceptedOptions.has(argument)) &&
-    (!args.includes("--status") || args.length === 1)
+    (!args.includes("--status") || args.length === 1) &&
+    (!args.includes("--disable-chain") || !args.includes("--chain-existing"))
   ) {
     return {
       worktreeLocal: args.includes("--worktree-local"),
       chainExisting: args.includes("--chain-existing"),
       status: args.includes("--status"),
+      disableChain: args.includes("--disable-chain"),
     };
   }
   throw new Error(
-    "Usage: node install-pre-commit-hook.mjs [--status | [--worktree-local] [--chain-existing]]. No Git configuration was changed.",
+    "Usage: node install-pre-commit-hook.mjs [--status | [--worktree-local] [--chain-existing] | [--worktree-local] --disable-chain]. No Git configuration was changed.",
   );
 }
 
@@ -372,9 +381,42 @@ function describeHookScope(scope, repoRoot) {
   return `shared (${scope} Git configuration scope)`;
 }
 
-function hookSettingDisableCommand(setting, hookPath, copiedHook) {
+function chainedDisableCommand(repoRoot, worktreeLocal) {
+  const installerPath = path.relative(
+    repoRoot,
+    fileURLToPath(import.meta.url),
+  ).split(path.sep).join("/");
+  if (
+    !installerPath ||
+    path.isAbsolute(installerPath) ||
+    !pathIsInsideRoot(repoRoot, path.resolve(repoRoot, installerPath))
+  ) {
+    return null;
+  }
+  const scopeOption = worktreeLocal ? "--worktree-local " : "";
+  return `node ${shellQuote(installerPath)} ${scopeOption}--disable-chain`;
+}
+
+function hookSettingDisableCommand(setting, hookPath, copiedHook, repoRoot, managedDispatcher) {
   if (copiedHook || setting.scope === "default") {
     return `rm -- ${shellQuote(hookPath)}`;
+  }
+  if (
+    managedDispatcher &&
+    (setting.scope === "local" || setting.scope === "worktree")
+  ) {
+    const expectedDispatchDirectory = path.join(
+      absoluteGitDirectory(repoRoot),
+      DISPATCH_DIRECTORY_NAME,
+    );
+    const localScopeIsWorktreeShared =
+      setting.scope === "local" && isLinkedWorktree(repoRoot);
+    if (
+      !localScopeIsWorktreeShared &&
+      samePath(path.dirname(hookPath), expectedDispatchDirectory)
+    ) {
+      return chainedDisableCommand(repoRoot, setting.scope === "worktree");
+    }
   }
   const scopeFlag = {
     worktree: "--worktree",
@@ -416,7 +458,13 @@ function reportHookStatus(repoRoot) {
       );
       return;
     }
-    const disableCommand = hookSettingDisableCommand(setting, preCommitPath, copiedHook);
+    const disableCommand = hookSettingDisableCommand(
+      setting,
+      preCommitPath,
+      copiedHook,
+      repoRoot,
+      managedDispatcher,
+    );
     if (disableCommand) {
       console.log(`To disable this GitMesh setup, run: ${disableCommand}`);
     } else {
@@ -438,7 +486,13 @@ function reportHookStatus(repoRoot) {
       `Git's active hooks path is ${describeHookScope(setting.scope, repoRoot)} at ${activeHooksDirectory}, but it does not contain a recognized GitMesh hook.`,
     );
     if (configuredButUnavailable) {
-      const disableCommand = hookSettingDisableCommand(setting, preCommitPath, false);
+      const disableCommand = hookSettingDisableCommand(
+        setting,
+        preCommitPath,
+        false,
+        repoRoot,
+        false,
+      );
       if (disableCommand) {
         console.log(`To remove this inactive GitMesh setting, run: ${disableCommand}`);
       } else {
@@ -453,7 +507,13 @@ function reportHookStatus(repoRoot) {
     console.log(
       `The configured GitMesh hooks directory has no executable pre-commit hook at ${preCommitPath}.`,
     );
-    const disableCommand = hookSettingDisableCommand(setting, preCommitPath, false);
+    const disableCommand = hookSettingDisableCommand(
+      setting,
+      preCommitPath,
+      false,
+      repoRoot,
+      false,
+    );
     if (disableCommand) {
       console.log(`To remove this inactive GitMesh setting, run: ${disableCommand}`);
     }
@@ -602,6 +662,7 @@ function upgradeManagedPrePushDispatcher(dispatchDirectory) {
     );
     fs.renameSync(temporaryHookPath, hookPath);
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    writeDispatcherManifest(dispatchDirectory);
   } catch {
     if (temporaryDirectory) {
       try {
@@ -616,30 +677,111 @@ function upgradeManagedPrePushDispatcher(dispatchDirectory) {
   }
 }
 
+function writeDispatcherManifest(dispatchDirectory) {
+  const hookEntries = fs.readdirSync(dispatchDirectory)
+    .filter((entry) => entry !== DISPATCH_MARKER_NAME)
+    .sort();
+  if (
+    !hookEntries.includes("pre-commit") ||
+    !hookEntries.includes("pre-push") ||
+    hookEntries.some((entry) => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry))
+  ) {
+    throw new Error("Could not safely record the GitMesh dispatcher file set.");
+  }
+  const manifestEntries = hookEntries.map((entry) => {
+    const hookPath = path.join(dispatchDirectory, entry);
+    const hookInfo = fs.lstatSync(hookPath);
+    if (!hookInfo.isFile() || (process.platform !== "win32" && (hookInfo.mode & 0o111) === 0)) {
+      throw new Error("Could not safely record the GitMesh dispatcher file set.");
+    }
+    const contents = fs.readFileSync(hookPath);
+    const digest = createHash("sha256").update(contents).digest("hex");
+    return `${entry}\t${digest}`;
+  });
+  const markerPath = path.join(dispatchDirectory, DISPATCH_MARKER_NAME);
+  const temporaryMarkerPath = `${markerPath}.tmp`;
+  let temporaryMarkerCreated = false;
+  try {
+    fs.writeFileSync(
+      temporaryMarkerPath,
+      `${DISPATCH_MANIFEST_HEADER}${manifestEntries.join("\n")}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    temporaryMarkerCreated = true;
+    fs.renameSync(temporaryMarkerPath, markerPath);
+  } catch {
+    if (temporaryMarkerCreated) {
+      try {
+        fs.rmSync(temporaryMarkerPath, { force: true });
+      } catch {
+        // Keep filesystem diagnostics out of installer output.
+      }
+    }
+    throw new Error("Could not safely record the GitMesh dispatcher file set.");
+  }
+}
+
 function dispatcherIsManaged(dispatchDirectory) {
   try {
     const directoryInfo = fs.lstatSync(dispatchDirectory);
     if (!directoryInfo.isDirectory()) return false;
     const entries = fs.readdirSync(dispatchDirectory);
     if (!entries.includes(DISPATCH_MARKER_NAME)) return false;
-    if (!fs.lstatSync(path.join(dispatchDirectory, DISPATCH_MARKER_NAME)).isFile()) {
+    const markerPath = path.join(dispatchDirectory, DISPATCH_MARKER_NAME);
+    const markerInfo = fs.lstatSync(markerPath);
+    if (!markerInfo.isFile() || markerInfo.size > 1024 * 1024) {
       return false;
     }
+    const markerContents = fs.readFileSync(markerPath, "utf8");
+    let expectedHashes = null;
+    if (markerContents !== DISPATCH_MARKER) {
+      if (
+        !markerContents.startsWith(DISPATCH_MANIFEST_HEADER) ||
+        !markerContents.endsWith("\n")
+      ) {
+        return false;
+      }
+      const manifestLines = markerContents
+        .slice(DISPATCH_MANIFEST_HEADER.length, -1)
+        .split("\n");
+      expectedHashes = new Map();
+      let priorName = "";
+      for (const line of manifestLines) {
+        const match = /^([A-Za-z0-9][A-Za-z0-9._-]*)\t([a-f0-9]{64})$/.exec(line);
+        if (!match || match[1] <= priorName) return false;
+        priorName = match[1];
+        expectedHashes.set(match[1], match[2]);
+      }
+    }
+    const hookEntries = entries.filter((entry) => entry !== DISPATCH_MARKER_NAME).sort();
     if (
-      fs.readFileSync(path.join(dispatchDirectory, DISPATCH_MARKER_NAME), "utf8") !==
-      DISPATCH_MARKER
+      !hookEntries.includes("pre-commit") ||
+      !hookEntries.includes("pre-push") ||
+      (expectedHashes !== null &&
+        (hookEntries.length !== expectedHashes.size ||
+          hookEntries.some((entry) => !expectedHashes.has(entry))))
     ) {
       return false;
     }
-    return entries.every((entry) => {
-      if (entry === DISPATCH_MARKER_NAME) return true;
+    return hookEntries.every((entry) => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry)) return false;
       const hookInfo = fs.lstatSync(path.join(dispatchDirectory, entry));
-      if (!hookInfo.isFile()) return false;
-      const contents = fs.readFileSync(path.join(dispatchDirectory, entry), "utf8");
-      return contents.startsWith(
+      if (
+        !hookInfo.isFile() ||
+        hookInfo.size > 1024 * 1024 ||
+        (process.platform !== "win32" && (hookInfo.mode & 0o111) === 0)
+      ) {
+        return false;
+      }
+      const contents = fs.readFileSync(path.join(dispatchDirectory, entry));
+      if (!contents.toString("utf8").startsWith(
         `#!/bin/sh\n# ${DISPATCH_MARKER.trim()}\n`,
-      );
+      )) {
+        return false;
+      }
+      if (expectedHashes === null) return true;
+      return createHash("sha256").update(contents).digest("hex") ===
+        expectedHashes.get(entry);
     });
   } catch {
     return false;
@@ -743,11 +885,7 @@ function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
       path.join(temporaryDirectory, "pre-push"),
       createPrePushDispatcher(originalPrePushPath),
     );
-    fs.writeFileSync(
-      path.join(temporaryDirectory, DISPATCH_MARKER_NAME),
-      DISPATCH_MARKER,
-      { flag: "wx" },
-    );
+    writeDispatcherManifest(temporaryDirectory);
     fs.renameSync(temporaryDirectory, dispatchDirectory);
     return dispatchDirectory;
   } catch (error) {
@@ -773,6 +911,12 @@ function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
 function installChainedHook(repoRoot, worktreeLocal) {
   const scopeArgs = worktreeLocal ? ["--worktree"] : ["--local"];
   const scopeLabel = worktreeLocal ? "this worktree only" : "this repository only";
+  const disableCommand = chainedDisableCommand(repoRoot, worktreeLocal);
+  if (!disableCommand) {
+    throw new Error(
+      "Could not safely construct the GitMesh chaining disable command; no Git configuration was changed.",
+    );
+  }
   if (worktreeLocal) {
     if (!isLinkedWorktree(repoRoot)) {
       throw new Error(
@@ -861,12 +1005,96 @@ function installChainedHook(repoRoot, worktreeLocal) {
     );
   }
 
-  const removalPattern = `^${escapeRegex(createdDirectory)}$`;
-  const disableCommand = `git config ${scopeArgs.join(" ")} --unset core.hooksPath ${shellQuote(removalPattern)}`;
   console.log(
     `Enabled the GitMesh dispatcher for ${scopeLabel}. The existing pre-commit hook, if present, runs first, then GitMesh; other executable hooks are forwarded to their original files. ` +
     `The existing pre-push hook, if present, also runs before GitMesh's optional pre-push check. ` +
     `No global or sibling-worktree settings were changed. To disable it, run: ${disableCommand}`,
+  );
+}
+
+function disableChainedHook(repoRoot, worktreeLocal) {
+  const scopeArgs = worktreeLocal ? ["--worktree"] : ["--local"];
+  const scopeLabel = worktreeLocal ? "this worktree" : "this repository";
+  if (worktreeLocal) {
+    if (!isLinkedWorktree(repoRoot)) {
+      throw new Error(
+        "The --worktree-local option is only available in a linked Git worktree. No Git configuration or files were changed.",
+      );
+    }
+    if (!worktreeConfigIsEnabled(repoRoot)) {
+      throw new Error(
+        "Worktree-local cleanup requires extensions.worktreeConfig=true in this repository. " +
+        "No Git configuration or files were changed.",
+      );
+    }
+  } else {
+    refuseSharedWorktreeSettings(repoRoot);
+  }
+
+  const dispatchDirectory = path.join(
+    absoluteGitDirectory(repoRoot),
+    DISPATCH_DIRECTORY_NAME,
+  );
+  const configuredValues = readHookPathValues(scopeArgs, repoRoot);
+  const matchingIndexes = configuredValues
+    .map((value, index) => {
+      if (!value || /[\r\n\0]/.test(value)) return -1;
+      return path.resolve(repoRoot, value) === dispatchDirectory ? index : -1;
+    })
+    .filter((index) => index >= 0);
+  if (
+    matchingIndexes.length !== 1 ||
+    matchingIndexes[0] !== configuredValues.length - 1 ||
+    !samePath(effectiveHooksDirectory(repoRoot), dispatchDirectory)
+  ) {
+    throw new Error(
+      `Could not identify one active GitMesh dispatcher in the selected scope; no Git configuration or files were changed.`,
+    );
+  }
+  if (!dispatcherIsManaged(dispatchDirectory)) {
+    throw new Error(
+      "Refusing to remove the GitMesh dispatcher because its marker or file set is missing or unexpected; no Git configuration or files were changed.",
+    );
+  }
+
+  const selectedValue = configuredValues[matchingIndexes[0]];
+  const removalPattern = `^${escapeRegex(selectedValue)}$`;
+  const unsetResult = runGit(
+    ["config", ...scopeArgs, "--unset", "core.hooksPath", removalPattern],
+    repoRoot,
+  );
+  if (unsetResult.status !== 0) {
+    throw new Error(
+      `Could not remove the GitMesh dispatcher setting for ${scopeLabel}; no dispatcher files were removed.`,
+    );
+  }
+
+  const remainingValues = readHookPathValues(scopeArgs, repoRoot);
+  const expectedRemainingValues = configuredValues.filter(
+    (_value, index) => index !== matchingIndexes[0],
+  );
+  if (
+    remainingValues.length !== expectedRemainingValues.length ||
+    remainingValues.some((value, index) => value !== expectedRemainingValues[index])
+  ) {
+    throw new Error(
+      `The GitMesh dispatcher setting was removed for ${scopeLabel}, but the remaining settings could not be verified; dispatcher files were left in place.`,
+    );
+  }
+  if (!dispatcherIsManaged(dispatchDirectory)) {
+    throw new Error(
+      `GitMesh chaining was disabled for ${scopeLabel}, but the dispatcher changed during cleanup; its files were left in place.`,
+    );
+  }
+  try {
+    fs.rmSync(dispatchDirectory, { recursive: true, force: false });
+  } catch {
+    throw new Error(
+      `GitMesh chaining was disabled for ${scopeLabel}, but the verified dispatcher directory could not be removed.`,
+    );
+  }
+  console.log(
+    `Disabled GitMesh chaining for ${scopeLabel} and removed the verified dispatcher directory. Other configuration scopes and hooks were left unchanged.`,
   );
 }
 
@@ -960,8 +1188,8 @@ function installWorktreeLocalHook(repoRoot, desiredHooksPath) {
 }
 
 function installHook(args = process.argv.slice(2)) {
-  const { worktreeLocal, chainExisting, status } = parseOptions(args);
-  if (!status) requireHookFile();
+  const { worktreeLocal, chainExisting, status, disableChain } = parseOptions(args);
+  if (!status && !disableChain) requireHookFile();
   const rootResult = runGit(["rev-parse", "--show-toplevel"], ROOT);
   if (rootResult.status !== 0) {
     throw new Error("Run this setup from inside a Git working tree; no Git configuration was changed.");
@@ -981,6 +1209,10 @@ function installHook(args = process.argv.slice(2)) {
   }
   if (status) {
     reportHookStatus(repoRoot);
+    return;
+  }
+  if (disableChain) {
+    disableChainedHook(repoRoot, worktreeLocal);
     return;
   }
   const desiredHooksPath = path.relative(repoRoot, HOOK_DIRECTORY).split(path.sep).join("/");
