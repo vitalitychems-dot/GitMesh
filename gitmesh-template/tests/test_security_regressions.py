@@ -1491,6 +1491,54 @@ process.on("exit", saveCapture);
             source_path.unlink(missing_ok=True)
             source_path.write_bytes(original_content)
 
+    def test_local_credential_check_reports_all_files_needing_repair(self):
+        core_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        readme_path = self.source_root / "README.md"
+        sync_path = self.source_root / "sync-public-source.mjs"
+        private_path = self.source_root / "SovereignMeshVault/ledger_matrix/private-record.json"
+        original_core = core_path.read_bytes()
+        original_readme = readme_path.read_bytes()
+        original_sync = sync_path.read_bytes()
+        oversized_sentinel = b"OVERSIZED_AGGREGATE_SOURCE_SENTINEL"
+        private_sentinel = "PRIVATE_RECORD_SENTINEL"
+        credential = "ghp_" + "K" * 36
+        credential_line = f"// temporary credential fixture: {credential}"
+
+        try:
+            core_path.write_bytes(oversized_sentinel + b"x" * (512 * 1024))
+            readme_path.unlink()
+            readme_path.symlink_to(private_path)
+            sync_text = original_sync.decode("utf-8").rstrip("\r\n")
+            credential_line_number = len(sync_text.splitlines()) + 1
+            sync_path.write_text(f"{sync_text}\n{credential_line}\n", encoding="utf-8")
+
+            result = self.run_sync(token_value=None, args=("--check-credentials",))
+            output = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Local credential check could not inspect every allowlisted source file", output)
+            self.assertIn(core_path.name, output)
+            self.assertIn("512 KiB", output)
+            self.assertIn(readme_path.name, output)
+            self.assertIn("not a symlink or hard link", output)
+            self.assertIn(sync_path.name, output)
+            self.assertIn(f"line {credential_line_number}", output)
+            self.assertIn("rerun --check-credentials", output)
+            self.assertIn("No GitHub requests were made", output)
+            self.assertNotIn(credential, output)
+            self.assertNotIn(credential_line, output)
+            self.assertNotIn(oversized_sentinel.decode(), output)
+            self.assertNotIn(private_sentinel, output)
+            self.assert_safe_failure_output(result)
+
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
+            self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            core_path.write_bytes(original_core)
+            readme_path.unlink(missing_ok=True)
+            readme_path.write_bytes(original_readme)
+            sync_path.write_bytes(original_sync)
+
     def test_local_credential_check_guides_non_text_repair_without_leaking(self):
         source_path = self.source_root / "README.md"
         original_content = source_path.read_bytes()

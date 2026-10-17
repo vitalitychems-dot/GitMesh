@@ -84,6 +84,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely",
   "test_local_credential_check_reports_location_without_exposing_value",
   "test_local_credential_check_repairs_unavailable_linked_and_oversized_sources",
+  "test_local_credential_check_reports_all_files_needing_repair",
   "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
   "test_precommit_hook_blocks_every_supported_credential_pattern",
@@ -509,6 +510,31 @@ function readSourceContent(sourcePath, source, operation = "sync") {
   }
 }
 
+function credentialFindingErrorMessage(credentialFindings) {
+  const locations = credentialFindings.map(({ source, credentialLines }) => {
+    const lineLabel = credentialLines.length === 1
+      ? `line ${credentialLines[0]}`
+      : `lines ${credentialLines.join(", ")}`;
+    return `${source} (${lineLabel})`;
+  });
+  const hasMultipleLocations = credentialFindings.some(
+    ({ credentialLines }) => credentialLines.length > 1,
+  ) || credentialFindings.length > 1;
+  const removalGuidance = credentialFindings.length > 1
+    ? "Remove the values from these files"
+    : hasMultipleLocations
+      ? "Remove the values from this file"
+      : "Remove the value from this file";
+  const rotationGuidance = hasMultipleLocations
+    ? "Rotate them only if they were already shared or published elsewhere."
+    : "Rotate it only if it was already shared or published elsewhere.";
+  return (
+    `Refusing to sync source files containing a credential-like value: ${locations.join("; ")}. ` +
+    `${removalGuidance}; use Replit Secrets for runtime credentials. ` +
+    `${rotationGuidance} No GitHub requests were made.`
+  );
+}
+
 function readSourceFiles({
   validateSyntax = true,
   validateCredentials = true,
@@ -518,51 +544,56 @@ function readSourceFiles({
   const allowlistedFiles = javascriptOnly
     ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
     : ALLOWED_FILES;
-  const sourceFiles = allowlistedFiles.map(({ source, target }) => {
-    const sourcePath = path.join(ROOT, source);
-    const content = readSourceContent(sourcePath, source, operation);
-    if (content.includes(0)) {
-      throw nonTextSourceError(source, operation);
-    }
-    let text;
+  const sourceFiles = [];
+  const sourceReadFailures = [];
+  for (const { source, target } of allowlistedFiles) {
     try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(content);
-    } catch {
-      throw nonTextSourceError(source, operation);
+      const sourcePath = path.join(ROOT, source);
+      const content = readSourceContent(sourcePath, source, operation);
+      if (content.includes(0)) {
+        throw nonTextSourceError(source, operation);
+      }
+      let text;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+      } catch {
+        throw nonTextSourceError(source, operation);
+      }
+      sourceFiles.push({
+        source,
+        target,
+        content,
+        credentialLines: validateCredentials ? findEmbeddedCredentialLines(text) : [],
+      });
+    } catch (error) {
+      if (operation !== "local-check") throw error;
+      sourceReadFailures.push(
+        error instanceof Error
+          ? error.message
+          : `Refusing to check source file: ${source}.`,
+      );
     }
-    return {
-      source,
-      target,
-      content,
-      credentialLines: validateCredentials ? findEmbeddedCredentialLines(text) : [],
-    };
-  });
+  }
   const credentialFindings = sourceFiles.filter(({ credentialLines }) =>
     credentialLines.length > 0
   );
-  if (validateCredentials && credentialFindings.length > 0) {
-    const locations = credentialFindings.map(({ source, credentialLines }) => {
-      const lineLabel = credentialLines.length === 1
-        ? `line ${credentialLines[0]}`
-        : `lines ${credentialLines.join(", ")}`;
-      return `${source} (${lineLabel})`;
-    });
-    const hasMultipleLocations = credentialFindings.some(
-      ({ credentialLines }) => credentialLines.length > 1,
-    ) || credentialFindings.length > 1;
-    const removalGuidance = credentialFindings.length > 1
-      ? "Remove the values from these files"
-      : hasMultipleLocations
-        ? "Remove the values from this file"
-        : "Remove the value from this file";
-    const rotationGuidance = hasMultipleLocations
-      ? "Rotate them only if they were already shared or published elsewhere."
-      : "Rotate it only if it was already shared or published elsewhere.";
+  const credentialFailure = validateCredentials && credentialFindings.length > 0
+    ? credentialFindingErrorMessage(credentialFindings)
+    : null;
+  if (operation === "local-check" && sourceReadFailures.length > 0) {
+    const repairItems = [
+      ...sourceReadFailures,
+      ...(credentialFailure ? [credentialFailure] : []),
+    ].map((message) => message.replace(/\s*No GitHub requests were made\.$/, ""));
     throw new Error(
-      `Refusing to sync source files containing a credential-like value: ${locations.join("; ")}. ` +
-      `${removalGuidance}; use Replit Secrets for runtime credentials. ` +
-      `${rotationGuidance} No GitHub requests were made.`,
+      "Local credential check could not inspect every allowlisted source file. " +
+      "Repair the files listed below, then rerun --check-credentials:\n" +
+      repairItems.map((message) => `- ${message}`).join("\n") +
+      "\nNo GitHub requests were made.",
     );
+  }
+  if (validateCredentials && credentialFindings.length > 0) {
+    throw new Error(credentialFailure);
   }
   if (validateSyntax) {
     for (const { source, content } of sourceFiles) {
