@@ -740,7 +740,13 @@ function checkLocalSource() {
   );
 }
 
-function runStagedGitCommand(args, cwd, failureMessage) {
+const STAGED_GIT_TIMEOUT_STAGE = Object.freeze({
+  REPOSITORY_LOOKUP: "repository lookup",
+  PATH_LISTING: "staged path listing",
+  BLOB_READING: "staged blob reading",
+});
+
+function runStagedGitCommand(args, cwd, failureMessage, timeoutStage) {
   const env = { ...process.env };
   delete env.GITHUB_TOKEN;
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_PREFIX"]) {
@@ -755,7 +761,9 @@ function runStagedGitCommand(args, cwd, failureMessage) {
   });
   if (result.error?.code === "ETIMEDOUT") {
     throw new Error(
-      "Git timed out while checking staged source files. Check whether another Git process is stuck and whether the repository is responsive, then retry the commit. The staged source check failed closed. No GitHub requests were made.",
+      `Git timed out during ${timeoutStage} while checking staged source files. ` +
+      "Check whether another Git process is stuck and whether the repository is responsive, then retry the commit. " +
+      "The staged source check failed closed. No GitHub requests were made.",
     );
   }
   if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
@@ -1376,6 +1384,7 @@ function checkStagedCredentials() {
     ["rev-parse", "--show-toplevel"],
     ROOT,
     "Could not locate the Git repository to inspect staged source files.",
+    STAGED_GIT_TIMEOUT_STAGE.REPOSITORY_LOOKUP,
   );
   let gitRootText;
   try {
@@ -1421,6 +1430,7 @@ function checkStagedCredentials() {
     ],
     gitRoot,
     "Could not inspect staged allowlisted source files. Check that the staged index is readable and not locked, resolve any Git index errors, then stage the intended files again and retry the commit.",
+    STAGED_GIT_TIMEOUT_STAGE.PATH_LISTING,
   ).toString("utf8").split("\0").filter(Boolean);
   const stagedSources = [...new Set(
     stagedNames.map((name) => sourceByGitPath.get(name)).filter(Boolean),
@@ -1447,6 +1457,7 @@ function checkStagedCredentials() {
       ["cat-file", "-s", `:0:${gitPath}`],
       gitRoot,
       `Could not safely inspect the staged source file size: ${source}. Check that the staged index is readable, resolve any conflicts or Git index errors, then stage the intended file state again and retry the commit.`,
+      STAGED_GIT_TIMEOUT_STAGE.BLOB_READING,
     ).toString("utf8").trim();
     if (!/^(?:0|[1-9]\d*)$/.test(sizeOutput)) {
       throw new Error(
@@ -1462,6 +1473,7 @@ function checkStagedCredentials() {
       ["show", `:0:${gitPath}`],
       gitRoot,
       `Could not safely read staged source file: ${source}. Check that the staged index is readable, resolve any conflicts or Git index errors, then stage the intended file state again and retry the commit.`,
+      STAGED_GIT_TIMEOUT_STAGE.BLOB_READING,
     );
     if (content.length > MAX_SOURCE_BYTES) {
       throw oversizedStagedSourceError(source, gitPath);
