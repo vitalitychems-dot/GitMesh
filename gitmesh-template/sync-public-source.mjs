@@ -110,6 +110,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_blocks_staged_javascript_syntax_errors_from_index",
   "test_precommit_hook_passes_clean_staged_javascript",
   "test_precommit_hook_blocks_every_supported_credential_pattern",
+  "test_precommit_hook_allows_near_miss_credential_strings_without_network",
   "test_precommit_hook_blocks_oversized_staged_source_with_safe_repair_steps",
   "test_precommit_hook_vectors_cover_every_scanner_pattern",
   "test_precommit_hook_reports_credentials_from_every_staged_source_file",

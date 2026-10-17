@@ -94,6 +94,47 @@ CREDENTIAL_HOOK_TEST_CASES = {
         ("PGP private key", "-----BEGIN PGP PRIVATE KEY-----"),
     ),
 }
+CREDENTIAL_HOOK_NEAR_MISS_CASES = {
+    "github-prefixed-token": (
+        ("below-minimum", "ghp_" + "A" * 29),
+        ("invalid-character", "ghp_" + "B" * 15 + "." + "C" * 15),
+    ),
+    "github-fine-grained-token": (
+        ("below-minimum", "github_pat_" + "D" * 29),
+        ("invalid-character", "github_pat_" + "E" * 15 + "." + "F" * 15),
+    ),
+    "gitlab-token": (
+        ("below-minimum", "glpat-" + "G" * 19),
+        ("invalid-character", "glpat-" + "H" * 10 + "." + "I" * 10),
+    ),
+    "npm-token": (
+        ("below-minimum", "npm_" + "J" * 29),
+        ("invalid-character", "npm_" + "K" * 15 + "." + "L" * 15),
+    ),
+    "slack-token": (
+        ("below-minimum", "xoxb-" + "M" * 19),
+        ("invalid-character", "xoxb-" + "N" * 10 + "." + "O" * 10),
+    ),
+    "google-api-key": (
+        ("below-minimum", "AIza" + "P" * 34),
+        ("invalid-character", "AIza" + "Q" * 17 + "." + "R" * 18),
+    ),
+    "openai-prefixed-key": (
+        ("below-minimum", "sk-proj-" + "S" * 19),
+        ("invalid-character", "sk-proj-" + "T" * 10 + "." + "U" * 10),
+    ),
+    "openai-legacy-key": (
+        ("below-minimum", "sk-" + "V" * 39),
+        ("invalid-character", "sk-" + "W" * 20 + "." + "X" * 20),
+    ),
+    "stripe-secret-key": (
+        ("below-minimum", "sk_live_" + "Y" * 19),
+        ("invalid-character", "sk_test_" + "Z" * 10 + "." + "a" * 10),
+    ),
+    "private-key-header": (
+        ("invalid-character", "-----BEGIN PRIVATE.KEY-----"),
+    ),
+}
 
 
 def reported_changed_paths(output):
@@ -3808,6 +3849,29 @@ class PreCommitHookTests(unittest.TestCase):
                 )
                 self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_allows_near_miss_credential_strings_without_network(self):
+        hook_env = self.hook_environment_without_github_token()
+        self.assertNotIn("GITHUB_TOKEN", hook_env)
+
+        for pattern_id, near_miss_cases in CREDENTIAL_HOOK_NEAR_MISS_CASES.items():
+            for case_kind, near_miss in near_miss_cases:
+                with self.subTest(pattern=pattern_id, case=case_kind):
+                    source_line = f"near_miss_{pattern_id.replace('-', '_')}={near_miss}"
+                    self.readme.write_text(f"safe source context\n{source_line}\n")
+                    staged = self.run_git(["add", "gitmesh-template/README.md"])
+                    self.assertEqual(staged.returncode, 0, staged.stderr)
+                    result = self.run_git(
+                        ["commit", "-m", f"allow harmless {pattern_id} near miss"],
+                        env=hook_env,
+                    )
+                    output = result.stdout + result.stderr
+                    self.assertEqual(result.returncode, 0, output)
+                    self.assertIn("Credential check passed:", output)
+                    self.assertIn("No GitHub requests were made", output)
+                    self.assertNotIn("Credential-like values were found", output)
+                    self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+                    self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_vectors_cover_every_scanner_pattern(self):
         scanner_source = SYNC.read_text(encoding="utf-8")
         pattern_block = re.search(
@@ -3850,6 +3914,29 @@ class PreCommitHookTests(unittest.TestCase):
             all(CREDENTIAL_HOOK_TEST_CASES[pattern_id] for pattern_id in scanner_ids),
             "Every scanner credential pattern needs at least one synthetic hook test value.",
         )
+        near_miss_ids = set(CREDENTIAL_HOOK_NEAR_MISS_CASES)
+        missing_near_misses = sorted(scanner_ids - near_miss_ids)
+        stale_near_misses = sorted(near_miss_ids - scanner_ids)
+        self.assertFalse(
+            missing_near_misses or stale_near_misses,
+            "Add near-miss cases for every scanner pattern. "
+            f"Missing cases: {missing_near_misses}; stale cases: {stale_near_misses}.",
+        )
+        for pattern_id in scanner_ids:
+            case_kinds = {
+                case_kind
+                for case_kind, _value in CREDENTIAL_HOOK_NEAR_MISS_CASES[pattern_id]
+            }
+            expected_case_kinds = (
+                {"invalid-character"}
+                if pattern_id == "private-key-header"
+                else {"below-minimum", "invalid-character"}
+            )
+            self.assertEqual(
+                case_kinds,
+                expected_case_kinds,
+                f"Near-miss cases for {pattern_id} must cover {sorted(expected_case_kinds)}.",
+            )
 
     def test_precommit_hook_rejects_non_text_staged_files_without_leaking_contents(self):
         non_text_cases = (
