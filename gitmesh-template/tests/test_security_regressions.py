@@ -4792,6 +4792,29 @@ class HookInstallerTests(unittest.TestCase):
         )
         self.assertEqual(self.git_config_snapshot(selected_worktree), before_status)
 
+        moved_worktree = self.repo_root / "standalone-moved-selected-worktree"
+        moved = self.run_git_at(
+            standalone_root,
+            ["worktree", "move", str(selected_worktree), str(moved_worktree)],
+        )
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertFalse(selected_worktree.exists())
+        self.assertTrue(moved_worktree.is_dir())
+        selected_worktree = moved_worktree
+        self.assertEqual(
+            pathlib.Path(
+                self.run_git_at(selected_worktree, ["rev-parse", "--show-toplevel"]).stdout.strip()
+            ),
+            selected_worktree,
+        )
+        moved_configured_path = self.run_git_at(
+            selected_worktree,
+            ["config", "--worktree", "--get", "core.hooksPath"],
+        )
+        self.assertEqual(moved_configured_path.returncode, 0, moved_configured_path.stderr)
+        self.assertEqual(moved_configured_path.stdout.strip(), "hooks")
+        self.assertTrue((selected_worktree / "hooks" / "pre-commit").is_file())
+
         for untouched in (standalone_root, sibling_worktree):
             self.assertEqual(
                 self.run_git_at(
