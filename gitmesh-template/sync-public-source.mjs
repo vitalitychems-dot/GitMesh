@@ -61,6 +61,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_rotation_failure_recovery_and_never_reuses_active_sigil",
   "test_sync_publishes_only_the_fixed_source_allowlist",
   "test_sync_stops_safely_when_object_creation_returns_unreadable_json",
+  "test_sync_stops_safely_when_contents_response_returns_unreadable_json",
   "test_normal_sync_stops_safely_on_malformed_object_ids",
   "test_dry_run_uses_selected_branch_and_encodes_ref_route",
   "test_dry_run_retries_consistently_on_selected_branch",

@@ -875,6 +875,45 @@ process.on("exit", saveCapture);
                 self.assertEqual(write_routes, expected_write_routes)
                 self.assertFalse(any(request["method"] == "PATCH" for request in requests))
 
+    def test_sync_stops_safely_when_contents_response_returns_unreadable_json(self):
+        self.set_remote_snapshot()
+        readme = self.source_root / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nUnreadable contents response test marker.\n")
+        body_sentinel = "UNTRUSTED_CONTENT_RESPONSE_BODY_SENTINEL"
+        result = self.run_sync(
+            malformed_json_at="GET /contents/projects/local-vault/README.md",
+            malformed_json_body=body_sentinel,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "GitHub returned an invalid response during GET /contents/projects/local-vault/README.md",
+            result.stderr,
+        )
+        self.assertNotIn(body_sentinel, output)
+        self.assertNotIn("Synced ", output)
+        self.assertNotIn("Commit: ", output)
+        self.assertEqual(reported_changed_paths(result.stdout), [])
+        self.assert_safe_failure_output(result)
+        self.assert_no_source_contents_in_output(output)
+
+        capture = json.loads(self.capture.read_text())
+        requests = capture["requests"]
+        self.assertTrue(all(request["hasExpectedBearer"] for request in requests))
+        self.assertEqual(
+            [request["method"] for request in requests],
+            ["GET", "GET", "GET"],
+        )
+        self.assertTrue(requests[-1]["path"].endswith("/contents/projects/local-vault/README.md"))
+        self.assertEqual(
+            [
+                request for request in requests
+                if request["method"] in ("POST", "PATCH")
+            ],
+            [],
+        )
+
     def test_normal_sync_stops_safely_on_malformed_object_ids(self):
         readme = self.source_root / "README.md"
         original_content = readme.read_bytes()
