@@ -88,6 +88,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
   "test_precommit_hook_blocks_every_supported_credential_pattern",
+  "test_precommit_hook_blocks_oversized_staged_source_with_safe_repair_steps",
   "test_precommit_hook_vectors_cover_every_scanner_pattern",
   "test_precommit_hook_reports_credentials_from_every_staged_source_file",
   "test_precommit_hook_blocks_when_node_is_too_old_without_leaking_output",
@@ -651,6 +652,15 @@ function runStagedGitCommand(args, cwd, failureMessage) {
   return result.stdout;
 }
 
+function oversizedStagedSourceError(source, gitPath) {
+  return new Error(
+    `Refusing to check an oversized staged source file: ${source}. ` +
+    `Save a smaller intended version no larger than ${MAX_SOURCE_BYTES / 1024} KiB, then ` +
+    `from the repository root run "git add ${gitPath}" and retry the commit. ` +
+    "No GitHub requests were made.",
+  );
+}
+
 function runHistoryGitCommand(args, cwd, failureMessage, maxBuffer = MAX_HISTORY_COMMAND_OUTPUT_BYTES) {
   const env = { ...process.env };
   delete env.GITHUB_TOKEN;
@@ -979,16 +989,28 @@ function checkStagedCredentials() {
         `Could not map staged source file ${source} to the Git index. No GitHub requests were made.`,
       );
     }
+    const sizeOutput = runStagedGitCommand(
+      ["cat-file", "-s", `:0:${gitPath}`],
+      gitRoot,
+      `Could not safely inspect the staged source file size: ${source}. Check that the staged index is readable, resolve any conflicts or Git index errors, then stage the intended file state again and retry the commit.`,
+    ).toString("utf8").trim();
+    if (!/^(?:0|[1-9]\d*)$/.test(sizeOutput)) {
+      throw new Error(
+        `Could not safely verify the staged source file size: ${source}. ` +
+        "Check the staged index, then stage the intended file state again and retry the commit. " +
+        "No GitHub requests were made.",
+      );
+    }
+    if (BigInt(sizeOutput) > BigInt(MAX_SOURCE_BYTES)) {
+      throw oversizedStagedSourceError(source, gitPath);
+    }
     const content = runStagedGitCommand(
       ["show", `:0:${gitPath}`],
       gitRoot,
       `Could not safely read staged source file: ${source}. Check that the staged index is readable, resolve any conflicts or Git index errors, then stage the intended file state again and retry the commit.`,
     );
     if (content.length > MAX_SOURCE_BYTES) {
-      throw new Error(
-        `Refusing to check an oversized staged source file: ${source}. ` +
-        "Review the file and stage a version within the size limit. No GitHub requests were made.",
-      );
+      throw oversizedStagedSourceError(source, gitPath);
     }
     if (content.includes(0)) {
       throw new Error(

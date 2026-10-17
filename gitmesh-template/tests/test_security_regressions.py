@@ -2893,6 +2893,39 @@ class PreCommitHookTests(unittest.TestCase):
                 )
                 self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_blocks_oversized_staged_source_with_safe_repair_steps(self):
+        oversized_sentinel = b"OVERSIZED_STAGED_SOURCE_SENTINEL"
+        oversized_content = oversized_sentinel + b"x" * (2 * 1024 * 1024)
+        self.readme.write_bytes(oversized_content)
+        self.run_git(["add", "gitmesh-template/README.md"])
+
+        # The staged blob remains oversized even though the working tree is repaired.
+        self.readme.write_bytes(self.baseline_readme)
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        result = self.run_git(
+            ["commit", "-m", "must be blocked for oversized staged source"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Refusing to check an oversized staged source file: README.md", output)
+        self.assertIn("Save a smaller intended version no larger than 512 KiB", output)
+        self.assertIn(
+            'from the repository root run "git add gitmesh-template/README.md" and retry the commit',
+            output,
+        )
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn(oversized_sentinel.decode(), output)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+        self.assertNotIn("network request attempted", output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(
+            self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+            "gitmesh-template/README.md",
+        )
+        self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_reports_unicode_separator_lines_without_exposing_content(self):
         first_secret = "ghp_" + "U" * 36
         second_secret = "github_pat_" + "V" * 40
