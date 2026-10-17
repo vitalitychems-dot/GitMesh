@@ -39,6 +39,7 @@ const EMBEDDED_CREDENTIAL_PATTERNS = [
 const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_rotation_failure_recovery_and_never_reuses_active_sigil",
   "test_sync_publishes_only_the_fixed_source_allowlist",
+  "test_normal_sync_stops_safely_on_malformed_object_ids",
   "test_unchanged_source_skips_blob_tree_commit_and_branch_update",
   "test_dry_run_with_no_changes_reports_no_commit_and_makes_no_writes",
   "test_dry_run_lists_only_changed_paths_without_contents_or_writes",
