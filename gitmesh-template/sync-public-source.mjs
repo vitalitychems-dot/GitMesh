@@ -93,6 +93,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_chain_existing_worktree_scope_does_not_change_sibling_settings",
   "test_hook_setup_refuses_worktree_opt_in_without_worktree_config_support",
   "test_hook_setup_uses_local_hooks_path_when_gitmesh_is_repository_root",
+  "test_hook_setup_uses_standalone_hooks_path_only_for_selected_worktree",
   "test_embedded_credentials_report_lines_for_unicode_separators_without_leaking",
   "test_embedded_credentials_report_lines_for_mixed_line_breaks_without_leaking",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
