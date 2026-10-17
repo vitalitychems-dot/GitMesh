@@ -15,6 +15,8 @@ const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_HISTORY_FINDINGS = 1000;
 const MAX_HISTORY_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
 const HISTORY_SCAN_TIMEOUT_MS = 120_000;
+const MAX_PUSH_HOOK_INPUT_BYTES = 64 * 1024;
+const MAX_PUSH_HOOK_UPDATES = 100;
 const GIT_COMMIT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const ALLOWED_FILES = [
   {
@@ -98,6 +100,9 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_blocks_when_staged_index_cannot_be_read",
   "test_precommit_hook_reports_staged_git_timeout_safely_without_github_token",
   "test_precommit_hook_passes_clean_source_and_ignores_unrelated_files",
+  "test_pre_push_hook_blocks_outgoing_credentials_without_exposing_them",
+  "test_pre_push_hook_allows_clean_outgoing_commits_without_github_access",
+  "test_pre_push_hook_is_opt_in_by_default",
   "test_hook_setup_enables_only_repository_local_path_when_safe",
   "test_hook_setup_preserves_existing_local_hooks_path",
   "test_hook_setup_preserves_multiple_local_hooks_paths",
@@ -111,6 +116,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_hook_status_reports_inactive_setup_without_writing_config",
   "test_hook_status_reports_manual_hook_integration_without_writing_config",
   "test_chain_existing_hooks_run_first_and_preserve_configuration",
+  "test_chain_existing_pre_push_replays_ref_input_to_gitmesh_after_existing_hook",
   "test_chain_existing_hook_failure_stops_before_gitmesh",
   "test_chain_existing_gitmesh_failure_happens_after_existing_hook",
   "test_chain_existing_worktree_scope_does_not_change_sibling_settings",
@@ -694,12 +700,119 @@ function runHistoryGitCommand(args, cwd, failureMessage, maxBuffer = MAX_HISTORY
   return result.stdout;
 }
 
+function runPushGitCommand(args, cwd, failureMessage, maxBuffer = MAX_HISTORY_COMMAND_OUTPUT_BYTES) {
+  const env = { ...process.env };
+  delete env.GITHUB_TOKEN;
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_PREFIX"]) {
+    delete env[name];
+  }
+  env.GIT_OPTIONAL_LOCKS = "0";
+  env.GIT_TERMINAL_PROMPT = "0";
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: null,
+    timeout: 15_000,
+    maxBuffer,
+    env,
+  });
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(
+      "Git timed out while checking outgoing source commits. Confirm the repository responds to Git commands, then retry the push. No GitHub requests were made.",
+    );
+  }
+  if (result.error?.code === "ENOBUFS") {
+    throw new Error(
+      "The outgoing source scan exceeded its safe output limit. Split the push into a smaller range, scan the relevant history locally, then retry. No GitHub requests were made.",
+    );
+  }
+  if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
+    throw new Error(`${failureMessage} No GitHub requests were made.`);
+  }
+  return result.stdout;
+}
+
 function decodeHistoryGitOutput(output, failureMessage) {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(output);
   } catch {
     throw new Error(`${failureMessage} No GitHub requests were made.`);
   }
+}
+
+function readPushHookUpdates() {
+  if (process.stdin.isTTY) {
+    throw new Error(
+      "This check must run from Git's pre-push hook so it can inspect the outgoing commits. No GitHub requests were made.",
+    );
+  }
+  const chunks = [];
+  const buffer = Buffer.alloc(8192);
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(0, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      totalBytes += bytesRead;
+      if (totalBytes > MAX_PUSH_HOOK_INPUT_BYTES) {
+        throw new Error("input-limit");
+      }
+      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "input-limit") {
+      throw new Error(
+        "The pre-push update list exceeded its safe size limit. Push fewer refs at once, then retry. No GitHub requests were made.",
+      );
+    }
+    throw new Error(
+      "Could not safely read Git's outgoing ref list. Retry the push after checking the local Git process. No GitHub requests were made.",
+    );
+  }
+
+  let input;
+  try {
+    input = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+  } catch {
+    throw new Error(
+      "Git supplied unreadable outgoing ref data. Push stopped without scanning source contents. No GitHub requests were made.",
+    );
+  }
+
+  const updates = [];
+  for (const line of input.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const fields = line.trim().split(/\s+/);
+    let localOid;
+    let remoteOid;
+    if (fields.length === 4) {
+      [, localOid, , remoteOid] = fields;
+    } else if (fields.length === 3) {
+      [localOid, , remoteOid] = fields;
+    } else {
+      throw new Error(
+        "Git supplied malformed outgoing ref data. Push stopped without scanning source contents. No GitHub requests were made.",
+      );
+    }
+    if (
+      !GIT_COMMIT_ID_PATTERN.test(localOid) ||
+      !GIT_COMMIT_ID_PATTERN.test(remoteOid) ||
+      localOid.length !== remoteOid.length
+    ) {
+      throw new Error(
+        "Git supplied an invalid outgoing object ID. Push stopped without scanning source contents. No GitHub requests were made.",
+      );
+    }
+    updates.push({
+      localOid: localOid.toLowerCase(),
+      remoteOid: remoteOid.toLowerCase(),
+    });
+    if (updates.length > MAX_PUSH_HOOK_UPDATES) {
+      throw new Error(
+        `The pre-push update list exceeded its ${MAX_PUSH_HOOK_UPDATES}-ref limit. Push fewer refs at once, then retry. No GitHub requests were made.`,
+      );
+    }
+  }
+  return updates;
 }
 
 function checkHistoryCredentials(sinceCommit) {
@@ -919,6 +1032,236 @@ function checkHistoryCredentials(sinceCommit) {
   console.log(
     `History credential check passed: scanned ${commitIds.size} commits and ${entries.length} ` +
     `allowlisted source revisions. No credential-like values found. No GitHub requests were made.`,
+  );
+}
+
+function checkPushCredentials() {
+  const updates = readPushHookUpdates();
+  const outgoingUpdates = updates.filter(({ localOid, remoteOid }) =>
+    !/^0+$/.test(localOid) && localOid !== remoteOid
+  );
+  if (outgoingUpdates.length === 0) {
+    console.log(
+      "Pre-push credential check passed: there are no outgoing commits to scan. No GitHub requests were made.",
+    );
+    return;
+  }
+
+  const gitRootOutput = runPushGitCommand(
+    ["rev-parse", "--show-toplevel"],
+    ROOT,
+    "Could not locate the Git repository to inspect outgoing source commits.",
+  );
+  let gitRootText;
+  try {
+    gitRootText = new TextDecoder("utf-8", { fatal: true }).decode(gitRootOutput).trim();
+  } catch {
+    throw new Error(
+      "Could not locate the Git repository to inspect outgoing source commits. No GitHub requests were made.",
+    );
+  }
+  if (!gitRootText) {
+    throw new Error(
+      "Could not locate the Git repository to inspect outgoing source commits. No GitHub requests were made.",
+    );
+  }
+  const gitRoot = path.resolve(gitRootText);
+  const sourceByGitPath = new Map();
+  for (const { source } of ALLOWED_FILES) {
+    const sourcePath = path.resolve(ROOT, source);
+    const relativePath = path.relative(gitRoot, sourcePath);
+    if (
+      path.isAbsolute(relativePath) ||
+      relativePath === ".." ||
+      relativePath.startsWith(`..${path.sep}`)
+    ) {
+      throw new Error(
+        "Could not map allowlisted source files to the Git repository for the outgoing scan. No GitHub requests were made.",
+      );
+    }
+    sourceByGitPath.set(relativePath.split(path.sep).join("/"), source);
+  }
+
+  const entries = [];
+  const seenEntries = new Set();
+  const commitIds = new Set();
+  const scanStartedAt = Date.now();
+  const ensureWithinTimeLimit = () => {
+    if (Date.now() - scanStartedAt > HISTORY_SCAN_TIMEOUT_MS) {
+      throw new Error(
+        "Outgoing source credential scan exceeded its time limit. Split the push into smaller ranges, then retry. No GitHub requests were made.",
+      );
+    }
+  };
+  for (const { localOid, remoteOid } of outgoingUpdates) {
+    ensureWithinTimeLimit();
+    const localCommitOutput = runPushGitCommand(
+      ["rev-parse", "--verify", `${localOid}^{commit}`],
+      gitRoot,
+      "Could not safely resolve an outgoing commit. Verify the local ref and retry the push.",
+    );
+    const localCommit = localCommitOutput.toString("ascii").trim().toLowerCase();
+    if (!GIT_COMMIT_ID_PATTERN.test(localCommit)) {
+      throw new Error(
+        "Git returned an invalid outgoing commit ID. Push stopped without scanning source contents. No GitHub requests were made.",
+      );
+    }
+
+    let revisionRange = localCommit;
+    if (!/^0+$/.test(remoteOid)) {
+      ensureWithinTimeLimit();
+      const remoteCommitOutput = runPushGitCommand(
+        ["rev-parse", "--verify", `${remoteOid}^{commit}`],
+        gitRoot,
+        "Could not safely resolve the remote boundary for outgoing commits. Fetch the pushed ref locally, then retry.",
+      );
+      const remoteCommit = remoteCommitOutput.toString("ascii").trim().toLowerCase();
+      if (!GIT_COMMIT_ID_PATTERN.test(remoteCommit)) {
+        throw new Error(
+          "Git returned an invalid remote boundary commit ID. Push stopped without scanning source contents. No GitHub requests were made.",
+        );
+      }
+      if (remoteCommit === localCommit) continue;
+      revisionRange = `${remoteCommit}..${localCommit}`;
+    }
+
+    ensureWithinTimeLimit();
+    const logOutput = decodeHistoryGitOutput(
+      runPushGitCommand(
+        [
+          "log",
+          "--full-history",
+          "--root",
+          "-m",
+          "--no-renames",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--diff-filter=ACMRT",
+          "--format=%H",
+          "--name-only",
+          revisionRange,
+          "--",
+          ...sourceByGitPath.keys(),
+        ],
+        gitRoot,
+        "Could not safely list outgoing allowlisted source revisions. Verify the local Git history and retry the push.",
+      ),
+      "Git returned unreadable outgoing source revision data.",
+    );
+    let currentCommit = null;
+    for (const line of logOutput.split(/\r?\n/)) {
+      ensureWithinTimeLimit();
+      if (!line) continue;
+      if (GIT_COMMIT_ID_PATTERN.test(line)) {
+        currentCommit = line.toLowerCase();
+        commitIds.add(currentCommit);
+        if (commitIds.size > MAX_HISTORY_COMMITS) {
+          throw new Error(
+            `Outgoing credential scan stopped after reaching its ${MAX_HISTORY_COMMITS}-commit limit. Split the push into smaller ranges and scan each range locally before retrying. No GitHub requests were made.`,
+          );
+        }
+        continue;
+      }
+      const source = sourceByGitPath.get(line);
+      if (!source || !currentCommit) {
+        throw new Error(
+          "Git returned an unexpected outgoing source listing. Push stopped without a complete scan. No GitHub requests were made.",
+        );
+      }
+      const key = `${currentCommit}\0${line}`;
+      if (!seenEntries.has(key)) {
+        seenEntries.add(key);
+        entries.push({ commit: currentCommit, gitPath: line, source });
+      }
+    }
+  }
+
+  if (entries.length === 0) {
+    console.log(
+      "Pre-push credential check passed: no allowlisted source changes were found in outgoing commits. No GitHub requests were made.",
+    );
+    return;
+  }
+
+  let scannedBytes = 0;
+  const findings = [];
+  const seenFindings = new Set();
+  for (const { commit, gitPath, source } of entries) {
+    ensureWithinTimeLimit();
+    const sizeOutput = runPushGitCommand(
+      ["cat-file", "-s", `${commit}:${gitPath}`],
+      gitRoot,
+      `Could not safely inspect outgoing source size for ${source}. Verify the local commit and retry the push.`,
+    ).toString("ascii").trim();
+    if (!/^(?:0|[1-9]\d*)$/.test(sizeOutput)) {
+      throw new Error(
+        `Could not safely verify outgoing source size for ${source}. Push stopped without scanning source contents. No GitHub requests were made.`,
+      );
+    }
+    if (BigInt(sizeOutput) > BigInt(MAX_SOURCE_BYTES)) {
+      throw new Error(
+        `Outgoing credential scan stopped because ${source} in a pushed commit exceeds the ${MAX_SOURCE_BYTES / 1024} KiB per-file limit. Reduce the source file and update the affected commit before pushing. No GitHub requests were made.`,
+      );
+    }
+    const content = runPushGitCommand(
+      ["show", "--no-ext-diff", "--no-textconv", `${commit}:${gitPath}`],
+      gitRoot,
+      `Could not safely read outgoing source revision for ${source}. Verify the local commit and retry the push.`,
+      MAX_SOURCE_BYTES + 1,
+    );
+    if (content.length > MAX_SOURCE_BYTES) {
+      throw new Error(
+        `Outgoing credential scan stopped because ${source} in a pushed commit exceeds the ${MAX_SOURCE_BYTES / 1024} KiB per-file limit. Reduce the source file and update the affected commit before pushing. No GitHub requests were made.`,
+      );
+    }
+    scannedBytes += content.length;
+    if (scannedBytes > MAX_HISTORY_BYTES) {
+      throw new Error(
+        `Outgoing credential scan stopped after reaching its ${MAX_HISTORY_BYTES}-byte source-data limit. Split the push into smaller ranges, then retry. No GitHub requests were made.`,
+      );
+    }
+    if (content.includes(0)) {
+      throw new Error(
+        `Outgoing credential scan stopped because ${source} is not text. Review the affected commit and retry the push. No GitHub requests were made.`,
+      );
+    }
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+    } catch {
+      throw new Error(
+        `Outgoing credential scan stopped because ${source} is not UTF-8 text. Review the affected commit and retry the push. No GitHub requests were made.`,
+      );
+    }
+    for (const line of findEmbeddedCredentialLines(text)) {
+      const key = `${source}\0${line}`;
+      if (!seenFindings.has(key)) {
+        seenFindings.add(key);
+        findings.push({ source, line });
+      }
+      if (findings.length > MAX_HISTORY_FINDINGS) {
+        throw new Error(
+          `Outgoing credential scan stopped after reaching its ${MAX_HISTORY_FINDINGS}-location output limit. Split the push into smaller ranges, then retry. No GitHub requests were made.`,
+        );
+      }
+    }
+  }
+
+  if (findings.length > 0) {
+    const locations = findings.map(
+      ({ source, line }) => `${source} (line ${line})`,
+    );
+    throw new Error(
+      "Credential-like values were found in outgoing GitMesh source changes: " +
+      `${locations.join("; ")}. Push blocked. Review and remove the affected revisions before pushing; ` +
+      "rotate values if they were already shared. No credential values or source lines were printed. " +
+      "No GitHub requests were made.",
+    );
+  }
+
+  console.log(
+    `Pre-push credential check passed: scanned ${commitIds.size} outgoing commits and ${entries.length} ` +
+    "allowlisted source revisions. No credential-like values found. No GitHub requests were made.",
   );
 }
 
@@ -1227,6 +1570,7 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: false,
       checkStagedCredentials: false,
+      checkPushCredentials: false,
       checkHistoryCredentials: false,
       historySince: null,
       checkSyntax: false,
@@ -1237,6 +1581,7 @@ function parseArguments(args) {
       dryRun: true,
       checkCredentials: false,
       checkStagedCredentials: false,
+      checkPushCredentials: false,
       checkHistoryCredentials: false,
       historySince: null,
       checkSyntax: false,
@@ -1247,6 +1592,7 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: true,
       checkStagedCredentials: false,
+      checkPushCredentials: false,
       checkHistoryCredentials: false,
       historySince: null,
       checkSyntax: false,
@@ -1257,6 +1603,7 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: false,
       checkStagedCredentials: true,
+      checkPushCredentials: false,
       checkHistoryCredentials: false,
       historySince: null,
       checkSyntax: false,
@@ -1267,7 +1614,19 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: false,
       checkStagedCredentials: false,
+      checkPushCredentials: false,
       checkHistoryCredentials: true,
+      historySince: null,
+      checkSyntax: false,
+    };
+  }
+  if (args.length === 1 && args[0] === "--check-push-credentials") {
+    return {
+      dryRun: false,
+      checkCredentials: false,
+      checkStagedCredentials: false,
+      checkPushCredentials: true,
+      checkHistoryCredentials: false,
       historySince: null,
       checkSyntax: false,
     };
@@ -1282,6 +1641,7 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: false,
       checkStagedCredentials: false,
+      checkPushCredentials: false,
       checkHistoryCredentials: true,
       historySince: args[2].toLowerCase(),
       checkSyntax: false,
@@ -1292,13 +1652,14 @@ function parseArguments(args) {
       dryRun: false,
       checkCredentials: false,
       checkStagedCredentials: false,
+      checkPushCredentials: false,
       checkHistoryCredentials: false,
       historySince: null,
       checkSyntax: true,
     };
   }
   throw new Error(
-    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-syntax].",
+    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
   );
 }
 
@@ -1367,6 +1728,8 @@ try {
   const options = parseArguments(process.argv.slice(2));
   if (options.checkHistoryCredentials) {
     checkHistoryCredentials(options.historySince);
+  } else if (options.checkPushCredentials) {
+    checkPushCredentials();
   } else if (options.checkStagedCredentials) {
     checkStagedCredentials();
   } else if (options.checkCredentials) {

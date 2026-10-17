@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_DIRECTORY = path.join(ROOT, "hooks");
 const HOOK_FILE = path.join(HOOK_DIRECTORY, "pre-commit");
+const PRE_PUSH_HOOK_FILE = path.join(HOOK_DIRECTORY, "pre-push");
 const SYNC_SCRIPT = path.join(ROOT, "sync-public-source.mjs");
 const DISPATCH_DIRECTORY_NAME = "gitmesh-hooks";
 const DISPATCH_MARKER_NAME = ".gitmesh-dispatch";
 const DISPATCH_MARKER = "GitMesh hook dispatcher v1\n";
+const PRE_PUSH_DISPATCH_MARKER = "GitMesh pre-push dispatcher v1";
 
 function runGit(args, cwd) {
   const env = { ...process.env };
@@ -483,6 +485,137 @@ function createPreCommitDispatcher(originalHookPath) {
   return `${lines.join("\n")}\n`;
 }
 
+function createPrePushDispatcher(originalHookPath) {
+  const lines = [
+    "#!/bin/sh",
+    `# ${DISPATCH_MARKER.trim()}`,
+    `# ${PRE_PUSH_DISPATCH_MARKER}`,
+    "set -u",
+    "umask 077",
+    'hook_input=$(mktemp "${TMPDIR:-/tmp}/gitmesh-pre-push.XXXXXX") || {',
+    '  printf \'%s\\n\' "GitMesh could not safely preserve pre-push ref data; push stopped." >&2',
+    "  exit 1",
+    "}",
+    'cleanup() { rm -f "$hook_input"; }',
+    "trap cleanup EXIT",
+    "trap 'exit 129' HUP",
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+    'if ! cat > "$hook_input"; then',
+    '  printf \'%s\\n\' "GitMesh could not safely read pre-push ref data; push stopped." >&2',
+    "  exit 1",
+    "fi",
+  ];
+  if (originalHookPath) {
+    lines.push("hook_status=0");
+    lines.push(`${shellQuote(originalHookPath)} "$@" < "$hook_input" || hook_status=$?`);
+    lines.push('if [ "$hook_status" -ne 0 ]; then');
+    lines.push('  exit "$hook_status"');
+    lines.push("fi");
+  }
+  lines.push("hook_status=0");
+  lines.push(`${shellQuote(PRE_PUSH_HOOK_FILE)} "$@" < "$hook_input" || hook_status=$?`);
+  lines.push('exit "$hook_status"');
+  return `${lines.join("\n")}\n`;
+}
+
+function hasCurrentPrePushDispatcher(dispatchDirectory) {
+  const hookPath = path.join(dispatchDirectory, "pre-push");
+  try {
+    const hookStatus = inspectExecutableHook(hookPath);
+    if (!hookStatus.executable) return false;
+    const contents = fs.readFileSync(hookPath, "utf8");
+    return contents.startsWith(
+      `#!/bin/sh\n# ${DISPATCH_MARKER.trim()}\n# ${PRE_PUSH_DISPATCH_MARKER}\n`,
+    );
+  } catch {
+    return false;
+  }
+}
+
+function upgradeManagedPrePushDispatcher(dispatchDirectory) {
+  const hookPath = path.join(dispatchDirectory, "pre-push");
+  const existingStatus = inspectExecutableHook(hookPath);
+  let originalPrePushPath = null;
+  if (existingStatus.exists) {
+    if (!existingStatus.executable) {
+      throw new Error(
+        "Could not safely update the existing GitMesh pre-push dispatcher; no Git configuration was changed.",
+      );
+    }
+    let existingContents;
+    try {
+      existingContents = fs.readFileSync(hookPath, "utf8");
+    } catch {
+      throw new Error(
+        "Could not safely update the existing GitMesh pre-push dispatcher; no Git configuration was changed.",
+      );
+    }
+    const backupPath = path.join(dispatchDirectory, "pre-push.gitmesh-original");
+    let backupStatus;
+    try {
+      backupStatus = inspectExecutableHook(backupPath);
+    } catch {
+      throw new Error(
+        "Could not safely update the existing GitMesh pre-push dispatcher; no Git configuration was changed.",
+      );
+    }
+    if (backupStatus.exists) {
+      let backupContents;
+      try {
+        backupContents = fs.readFileSync(backupPath, "utf8");
+      } catch {
+        throw new Error(
+          "Could not safely update the existing GitMesh pre-push dispatcher; no Git configuration was changed.",
+        );
+      }
+      if (!backupStatus.executable || backupContents !== existingContents) {
+        throw new Error(
+          "Could not safely preserve the existing pre-push hook; no Git configuration was changed.",
+        );
+      }
+    } else {
+      try {
+        writeExecutableHook(backupPath, existingContents);
+      } catch {
+        throw new Error(
+          "Could not safely preserve the existing pre-push hook; no Git configuration was changed.",
+        );
+      }
+    }
+    originalPrePushPath = backupPath;
+  }
+
+  let temporaryDirectory;
+  try {
+    const gitMeshHookStatus = inspectExecutableHook(PRE_PUSH_HOOK_FILE);
+    if (!gitMeshHookStatus.executable) {
+      throw new Error("missing-hook");
+    }
+    temporaryDirectory = fs.mkdtempSync(
+      path.join(dispatchDirectory, ".gitmesh-pre-push-"),
+    );
+    const temporaryHookPath = path.join(temporaryDirectory, "pre-push");
+    writeExecutableHook(
+      temporaryHookPath,
+      createPrePushDispatcher(originalPrePushPath),
+    );
+    fs.renameSync(temporaryHookPath, hookPath);
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  } catch {
+    if (temporaryDirectory) {
+      try {
+        fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+      } catch {
+        // Keep filesystem diagnostics out of installer output.
+      }
+    }
+    throw new Error(
+      "Could not safely add the GitMesh pre-push check to the existing dispatcher; no Git configuration was changed.",
+    );
+  }
+}
+
 function dispatcherIsManaged(dispatchDirectory) {
   try {
     const directoryInfo = fs.lstatSync(dispatchDirectory);
@@ -520,6 +653,7 @@ function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
   try {
     temporaryDirectory = fs.mkdtempSync(temporaryDirectoryPrefix);
     let originalPreCommitPath = null;
+    let originalPrePushPath = null;
     let entries;
     try {
       entries = fs.readdirSync(existingHooksDirectory);
@@ -534,6 +668,7 @@ function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
     for (const entry of entries) {
       if (
         entry === "pre-commit" ||
+        entry === "pre-push" ||
         entry.endsWith(".sample") ||
         !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry)
       ) {
@@ -574,9 +709,39 @@ function createDispatcherDirectory(existingHooksDirectory, gitDirectory) {
       }
       originalPreCommitPath = existingPreCommitPath;
     }
+    const existingPrePushPath = path.join(existingHooksDirectory, "pre-push");
+    let prePushStatus;
+    try {
+      prePushStatus = inspectExecutableHook(existingPrePushPath);
+    } catch {
+      throw new Error("Could not safely inspect the existing pre-push hook; no Git configuration was changed.");
+    }
+    if (prePushStatus.exists && !prePushStatus.executable) {
+      throw new Error(
+        "The existing pre-push hook is not an executable file. Make it executable or leave the hook settings unchanged; no Git configuration was changed.",
+      );
+    }
+    if (prePushStatus.executable) {
+      originalPrePushPath = existingPrePushPath;
+    }
+    let gitMeshPrePushStatus;
+    try {
+      gitMeshPrePushStatus = inspectExecutableHook(PRE_PUSH_HOOK_FILE);
+    } catch {
+      throw new Error("Could not safely inspect the GitMesh pre-push hook; no Git configuration was changed.");
+    }
+    if (!gitMeshPrePushStatus.executable) {
+      throw new Error(
+        "The GitMesh pre-push hook is missing or is not executable; no Git configuration was changed.",
+      );
+    }
     writeExecutableHook(
       path.join(temporaryDirectory, "pre-commit"),
       createPreCommitDispatcher(originalPreCommitPath),
+    );
+    writeExecutableHook(
+      path.join(temporaryDirectory, "pre-push"),
+      createPrePushDispatcher(originalPrePushPath),
     );
     fs.writeFileSync(
       path.join(temporaryDirectory, DISPATCH_MARKER_NAME),
@@ -637,6 +802,15 @@ function installChainedHook(repoRoot, worktreeLocal) {
   }
   if (samePath(existingHooksDirectory, dispatchDirectory)) {
     if (dispatcherIsManaged(dispatchDirectory)) {
+      if (!hasCurrentPrePushDispatcher(dispatchDirectory)) {
+        upgradeManagedPrePushDispatcher(dispatchDirectory);
+        console.log(
+          worktreeLocal
+            ? "Updated the existing GitMesh dispatcher for this worktree with the optional pre-push check."
+            : "Updated the existing GitMesh dispatcher for this repository with the optional pre-push check.",
+        );
+        return;
+      }
       console.log(
         worktreeLocal
           ? "The GitMesh dispatcher is already enabled for this worktree."
@@ -691,6 +865,7 @@ function installChainedHook(repoRoot, worktreeLocal) {
   const disableCommand = `git config ${scopeArgs.join(" ")} --unset core.hooksPath ${shellQuote(removalPattern)}`;
   console.log(
     `Enabled the GitMesh dispatcher for ${scopeLabel}. The existing pre-commit hook, if present, runs first, then GitMesh; other executable hooks are forwarded to their original files. ` +
+    `The existing pre-push hook, if present, also runs before GitMesh's optional pre-push check. ` +
     `No global or sibling-worktree settings were changed. To disable it, run: ${disableCommand}`,
   );
 }
