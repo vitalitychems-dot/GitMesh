@@ -3132,6 +3132,68 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_blocks_staged_javascript_syntax_errors_from_index(self):
+        source = self.template_root / "gitmesh-ultimate-core.mjs"
+        clean_worktree_source = source.read_bytes()
+        staged_source = (
+            b"export const cleanSyntax = true;\n"
+            b"const stagedSyntaxSentinel = ; // STAGED_SYNTAX_SOURCE_SENTINEL\n"
+        )
+        source.write_bytes(staged_source)
+        self.run_git(["add", "gitmesh-template/gitmesh-ultimate-core.mjs"])
+
+        # Keep the working-tree copy syntactically clean while the index still
+        # contains the invalid version that would be included in the commit.
+        source.write_bytes(clean_worktree_source)
+        self.assertEqual(source.read_bytes(), clean_worktree_source)
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        result = self.run_git(
+            ["commit", "-m", "must block staged JavaScript syntax errors"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Refusing to commit staged JavaScript that fails Node syntax validation:",
+            output,
+        )
+        self.assertIn("gitmesh-ultimate-core.mjs", output)
+        self.assertRegex(output, r"\(line 2, column \d+\)")
+        self.assertIn("stage the fix, and retry the commit", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn("STAGED_SYNTAX_SOURCE_SENTINEL", output)
+        self.assertNotIn("const stagedSyntaxSentinel = ;", output)
+        self.assertNotIn("[stdin]", output)
+        self.assertNotIn("SyntaxError", output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(source.read_bytes(), clean_worktree_source)
+        self.assertEqual(
+            self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+            "gitmesh-template/gitmesh-ultimate-core.mjs",
+        )
+        self.assertFalse(self.network_marker.exists())
+
+    def test_precommit_hook_passes_clean_staged_javascript(self):
+        source = self.template_root / "gitmesh-ultimate-core.mjs"
+        source.write_bytes(
+            source.read_bytes() + b"\n// Clean staged syntax regression fixture.\n"
+        )
+        self.run_git(["add", "gitmesh-template/gitmesh-ultimate-core.mjs"])
+        result = self.run_git(
+            ["commit", "-m", "allow clean staged JavaScript"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn(
+            "JavaScript syntax passed for 1 staged allowlisted JavaScript source file",
+            output,
+        )
+        self.assertIn("No GitHub requests were made", output)
+        self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_blocks_every_supported_credential_pattern(self):
         credential_cases = [
             case
@@ -3537,7 +3599,7 @@ class PreCommitHookTests(unittest.TestCase):
         self.assertIn("Check whether another Git process is stuck", output)
         self.assertIn("whether the repository is responsive", output)
         self.assertIn("then retry the commit", output)
-        self.assertIn("staged credential check failed closed", output)
+        self.assertIn("staged source check failed closed", output)
         self.assertIn("No GitHub requests were made", output)
         self.assertNotIn("Check that the staged index is readable", output)
         for private_text in (

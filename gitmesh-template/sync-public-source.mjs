@@ -95,6 +95,8 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_reports_all_files_needing_repair",
   "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
+  "test_precommit_hook_blocks_staged_javascript_syntax_errors_from_index",
+  "test_precommit_hook_passes_clean_staged_javascript",
   "test_precommit_hook_blocks_every_supported_credential_pattern",
   "test_precommit_hook_blocks_oversized_staged_source_with_safe_repair_steps",
   "test_precommit_hook_vectors_cover_every_scanner_pattern",
@@ -386,6 +388,7 @@ function validateJavaScriptSyntax(content, source, operation = "sync") {
   if (result.error || result.status !== 0) {
     const isSyntaxCheck = operation === "syntax-check";
     const isCombinedCheck = operation === "combined-check";
+    const isStagedCheck = operation === "staged-check";
     const location = syntaxErrorLocation(result.stderr);
     const locationText = location
       ? ` (line ${location.line}, column ${location.column})`
@@ -394,9 +397,17 @@ function validateJavaScriptSyntax(content, source, operation = "sync") {
       ? "Review and correct this file, save it, then rerun the local syntax check with --check-syntax. "
       : isCombinedCheck
         ? "Review and correct this file, save it, then rerun the combined local source check with --check-local. "
-        : "Review and correct this file, save it, then rerun sync. ";
+        : isStagedCheck
+          ? "Correct the JavaScript file, stage the fix, and retry the commit. "
+          : "Review and correct this file, save it, then rerun sync. ";
     throw new Error(
-      `Refusing to ${isSyntaxCheck || isCombinedCheck ? "check" : "sync"} JavaScript that fails Node syntax validation: ${source}${locationText}. ` +
+      `Refusing to ${
+        isStagedCheck
+          ? "commit staged JavaScript"
+          : isSyntaxCheck || isCombinedCheck
+            ? "check JavaScript"
+            : "sync JavaScript"
+      } that fails Node syntax validation: ${source}${locationText}. ` +
       rerunInstruction +
       "No GitHub requests were made.",
     );
@@ -709,7 +720,7 @@ function runStagedGitCommand(args, cwd, failureMessage) {
   });
   if (result.error?.code === "ETIMEDOUT") {
     throw new Error(
-      "Git timed out while checking staged source files. Check whether another Git process is stuck and whether the repository is responsive, then retry the commit. The staged credential check failed closed. No GitHub requests were made.",
+      "Git timed out while checking staged source files. Check whether another Git process is stuck and whether the repository is responsive, then retry the commit. The staged source check failed closed. No GitHub requests were made.",
     );
   }
   if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
@@ -1380,11 +1391,16 @@ function checkStagedCredentials() {
     stagedNames.map((name) => sourceByGitPath.get(name)).filter(Boolean),
   )];
   if (stagedSources.length === 0) {
-    console.log("Credential check passed: no allowlisted source files are staged.");
+    console.log(
+      "Credential check passed: no allowlisted source files are staged. " +
+      "JavaScript syntax passed for 0 staged allowlisted JavaScript source files. " +
+      "No GitHub requests were made.",
+    );
     return;
   }
 
   const credentialFindings = [];
+  const syntaxFailures = [];
   for (const source of stagedSources) {
     const gitPath = [...sourceByGitPath].find(([, stagedSource]) => stagedSource === source)?.[0];
     if (!gitPath) {
@@ -1430,6 +1446,17 @@ function checkStagedCredentials() {
         "Save it as UTF-8 text and stage it again. No GitHub requests were made.",
       );
     }
+    if (path.extname(source) === ".mjs") {
+      try {
+        validateJavaScriptSyntax(content, source, "staged-check");
+      } catch (error) {
+        syntaxFailures.push(
+          error instanceof Error
+            ? error.message.replace(/\s*No GitHub requests were made\.$/, "")
+            : `Refusing to commit staged JavaScript that fails Node syntax validation: ${source}.`,
+        );
+      }
+    }
     const credentialLines = findEmbeddedCredentialLines(text);
     if (credentialLines.length > 0) {
       credentialFindings.push({ source, credentialLines });
@@ -1461,9 +1488,21 @@ function checkStagedCredentials() {
     );
   }
 
+  if (syntaxFailures.length > 0) {
+    throw new Error(
+      `${syntaxFailures.join("\n")}\nNo GitHub requests were made.`,
+    );
+  }
+
   const fileLabel = stagedSources.length === 1 ? "file" : "files";
+  const stagedJavaScriptSources = stagedSources.filter(
+    (source) => path.extname(source) === ".mjs",
+  );
+  const javascriptFileLabel = stagedJavaScriptSources.length === 1 ? "file" : "files";
   console.log(
-    `Credential check passed: no credential-like values found in ${stagedSources.length} staged allowlisted source ${fileLabel}.`,
+    `Credential check passed: no credential-like values found in ${stagedSources.length} staged allowlisted source ${fileLabel}. ` +
+    `JavaScript syntax passed for ${stagedJavaScriptSources.length} staged allowlisted JavaScript source ${javascriptFileLabel}. ` +
+    "No GitHub requests were made.",
   );
 }
 
