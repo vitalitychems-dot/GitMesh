@@ -10,6 +10,10 @@ const REPOSITORY = "GitMesh";
 const BRANCH = "main";
 const API_ROOT = `https://api.github.com/repos/${OWNER}/${REPOSITORY}`;
 const MAX_SOURCE_BYTES = 512 * 1024;
+const STAGED_GIT_TIMEOUT_ENV = "GITMESH_STAGED_SCAN_TIMEOUT_MS";
+const DEFAULT_STAGED_GIT_TIMEOUT_MS = 15_000;
+const MIN_STAGED_GIT_TIMEOUT_MS = 1_000;
+const MAX_STAGED_GIT_TIMEOUT_MS = 120_000;
 const MAX_HISTORY_COMMITS = 500;
 const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_HISTORY_FINDINGS = 1000;
@@ -108,6 +112,8 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_blocks_when_node_is_missing",
   "test_precommit_hook_blocks_when_staged_index_cannot_be_read",
   "test_precommit_hook_reports_staged_git_timeout_safely_without_github_token",
+  "test_precommit_hook_accepts_bounded_staged_git_timeout_override",
+  "test_precommit_hook_rejects_invalid_staged_git_timeout_settings",
   "test_precommit_hook_passes_clean_source_and_ignores_unrelated_files",
   "test_pre_push_hook_blocks_outgoing_credentials_without_exposing_them",
   "test_pre_push_hook_allows_clean_outgoing_commits_without_github_access",
@@ -746,7 +752,29 @@ const STAGED_GIT_TIMEOUT_STAGE = Object.freeze({
   BLOB_READING: "staged blob reading",
 });
 
-function runStagedGitCommand(args, cwd, failureMessage, timeoutStage) {
+function getStagedGitTimeoutMs() {
+  const configuredTimeout = process.env[STAGED_GIT_TIMEOUT_ENV];
+  if (configuredTimeout === undefined) return DEFAULT_STAGED_GIT_TIMEOUT_MS;
+  if (!/^[0-9]{1,6}$/.test(configuredTimeout)) {
+    throw new Error(
+      `${STAGED_GIT_TIMEOUT_ENV} must be a whole number from ${MIN_STAGED_GIT_TIMEOUT_MS} ` +
+      `to ${MAX_STAGED_GIT_TIMEOUT_MS} milliseconds. The staged source check failed closed. ` +
+      "No GitHub requests were made.",
+    );
+  }
+
+  const timeoutMs = Number(configuredTimeout);
+  if (timeoutMs < MIN_STAGED_GIT_TIMEOUT_MS || timeoutMs > MAX_STAGED_GIT_TIMEOUT_MS) {
+    throw new Error(
+      `${STAGED_GIT_TIMEOUT_ENV} must be a whole number from ${MIN_STAGED_GIT_TIMEOUT_MS} ` +
+      `to ${MAX_STAGED_GIT_TIMEOUT_MS} milliseconds. The staged source check failed closed. ` +
+      "No GitHub requests were made.",
+    );
+  }
+  return timeoutMs;
+}
+
+function runStagedGitCommand(args, cwd, failureMessage, timeoutStage, timeoutMs) {
   const env = { ...process.env };
   delete env.GITHUB_TOKEN;
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_PREFIX"]) {
@@ -755,7 +783,7 @@ function runStagedGitCommand(args, cwd, failureMessage, timeoutStage) {
   const result = spawnSync("git", args, {
     cwd,
     encoding: null,
-    timeout: 15_000,
+    timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
     env,
   });
@@ -1380,11 +1408,13 @@ function checkPushCredentials() {
 }
 
 function checkStagedCredentials() {
+  const timeoutMs = getStagedGitTimeoutMs();
   const gitRootOutput = runStagedGitCommand(
     ["rev-parse", "--show-toplevel"],
     ROOT,
     "Could not locate the Git repository to inspect staged source files.",
     STAGED_GIT_TIMEOUT_STAGE.REPOSITORY_LOOKUP,
+    timeoutMs,
   );
   let gitRootText;
   try {
@@ -1431,6 +1461,7 @@ function checkStagedCredentials() {
     gitRoot,
     "Could not inspect staged allowlisted source files. Check that the staged index is readable and not locked, resolve any Git index errors, then stage the intended files again and retry the commit.",
     STAGED_GIT_TIMEOUT_STAGE.PATH_LISTING,
+    timeoutMs,
   ).toString("utf8").split("\0").filter(Boolean);
   const stagedSources = [...new Set(
     stagedNames.map((name) => sourceByGitPath.get(name)).filter(Boolean),
@@ -1458,6 +1489,7 @@ function checkStagedCredentials() {
       gitRoot,
       `Could not safely inspect the staged source file size: ${source}. Check that the staged index is readable, resolve any conflicts or Git index errors, then stage the intended file state again and retry the commit.`,
       STAGED_GIT_TIMEOUT_STAGE.BLOB_READING,
+      timeoutMs,
     ).toString("utf8").trim();
     if (!/^(?:0|[1-9]\d*)$/.test(sizeOutput)) {
       throw new Error(
@@ -1474,6 +1506,7 @@ function checkStagedCredentials() {
       gitRoot,
       `Could not safely read staged source file: ${source}. Check that the staged index is readable, resolve any conflicts or Git index errors, then stage the intended file state again and retry the commit.`,
       STAGED_GIT_TIMEOUT_STAGE.BLOB_READING,
+      timeoutMs,
     );
     if (content.length > MAX_SOURCE_BYTES) {
       throw oversizedStagedSourceError(source, gitPath);
