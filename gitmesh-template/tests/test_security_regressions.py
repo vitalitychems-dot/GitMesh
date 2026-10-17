@@ -1192,7 +1192,7 @@ process.on("exit", saveCapture);
         result = self.run_sync(args=("--unexpected-option",))
         self.assertEqual(result.returncode, 2)
         self.assertIn(
-            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
+            "Usage: node ./sync-public-source.mjs [--dry-run | --check-local | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
             result.stderr,
         )
         self.assert_safe_failure_output(result)
@@ -1340,6 +1340,122 @@ process.on("exit", saveCapture);
             for event in capture["filesystemReads"]
         )
         self.assertEqual(observed_reads, expected_reads)
+
+    def test_local_source_check_passes_without_token_or_github_requests(self):
+        result = self.run_sync(token_value=None, args=("--check-local",))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no credential-like values found in 3 allowlisted source files", result.stdout)
+        self.assertIn("JavaScript syntax passed for 2 allowlisted JavaScript source files", result.stdout)
+        self.assertIn("No GitHub requests were made", result.stdout)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(capture["preflightCalls"], [])
+        expected_reads = Counter(
+            (method, str((self.source_root / source).resolve()))
+            for source in ALLOWED_SOURCE_NAMES
+            for method in ("lstatSync", "openSync", "readFileSync")
+        )
+        observed_reads = Counter(
+            (event["method"], event["path"])
+            for event in capture["filesystemReads"]
+        )
+        self.assertEqual(observed_reads, expected_reads)
+
+    def test_local_source_check_reports_credentials_without_leaking(self):
+        readme = self.source_root / "README.md"
+        original_content = readme.read_bytes()
+        credential = "ghp_" + "L" * 36
+        source_line = f"example={credential}"
+        try:
+            readme.write_text(f"safe configuration\n{source_line}\n")
+            result = self.run_sync(token_value=None, args=("--check-local",))
+            output = result.stdout + result.stderr
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("credential-like value", result.stderr)
+            self.assertIn("README.md (line 2)", result.stderr)
+            self.assertIn("No GitHub requests were made", result.stderr)
+            self.assertNotIn(credential, output)
+            self.assertNotIn(source_line, output)
+            self.assert_safe_failure_output(result)
+
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
+            self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            readme.write_bytes(original_content)
+
+    def test_local_source_check_reports_syntax_failure_without_leaking(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_content = source_path.read_bytes()
+        invalid_line = "const INVALID_COMBINED_SYNTAX_SENTINEL = ;"
+        invalid_source = f"const SAFE_COMBINED_SYNTAX_CONTEXT = 1;\n{invalid_line}\n"
+        try:
+            source_path.write_text(invalid_source)
+            result = self.run_sync(token_value=None, args=("--check-local",))
+            output = result.stdout + result.stderr
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                f"{source_path.name} (line 2, column {invalid_line.index(';') + 1})",
+                result.stderr,
+            )
+            self.assertIn(
+                "rerun the combined local source check with --check-local",
+                result.stderr,
+            )
+            self.assertIn("No GitHub requests were made", result.stderr)
+            self.assertNotIn(invalid_source, output)
+            self.assertNotIn(invalid_line, output)
+            self.assertNotIn("INVALID_COMBINED_SYNTAX_SENTINEL", output)
+            self.assertNotIn("SyntaxError", output)
+            self.assert_safe_failure_output(result)
+
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
+            self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
+    def test_local_source_check_reports_both_failure_types_without_leaking(self):
+        readme = self.source_root / "README.md"
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_readme = readme.read_bytes()
+        original_source = source_path.read_bytes()
+        credential = "ghp_" + "M" * 36
+        credential_line = f"example={credential}"
+        invalid_line = "const INVALID_BOTH_CHECKS_SENTINEL = ;"
+        invalid_source = f"const SAFE_BOTH_CHECKS_CONTEXT = 1;\n{invalid_line}\n"
+        try:
+            readme.write_text(f"safe configuration\n{credential_line}\n")
+            source_path.write_text(invalid_source)
+            result = self.run_sync(token_value=None, args=("--check-local",))
+            output = result.stdout + result.stderr
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Local source check found 2 issues", result.stderr)
+            self.assertIn("README.md (line 2)", result.stderr)
+            self.assertIn(
+                f"{source_path.name} (line 2, column {invalid_line.index(';') + 1})",
+                result.stderr,
+            )
+            self.assertNotIn(credential, output)
+            self.assertNotIn(credential_line, output)
+            self.assertNotIn(invalid_source, output)
+            self.assertNotIn(invalid_line, output)
+            self.assertNotIn("INVALID_BOTH_CHECKS_SENTINEL", output)
+            self.assertNotIn("SyntaxError", output)
+            self.assertIn("No GitHub requests were made", result.stderr)
+            self.assert_safe_failure_output(result)
+
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
+            self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            readme.write_bytes(original_readme)
+            source_path.write_bytes(original_source)
 
     def test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely(self):
         javascript_sources = [

@@ -84,6 +84,10 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_history_credential_check_accepts_a_since_commit_range",
   "test_history_credential_check_fails_safely_for_large_history",
   "test_history_credential_check_refuses_shallow_repositories",
+  "test_local_source_check_passes_without_token_or_github_requests",
+  "test_local_source_check_reports_credentials_without_leaking",
+  "test_local_source_check_reports_syntax_failure_without_leaking",
+  "test_local_source_check_reports_both_failure_types_without_leaking",
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely",
   "test_local_credential_check_reports_location_without_exposing_value",
@@ -171,19 +175,29 @@ function findEmbeddedCredentialLines(text) {
     );
 }
 
+function isLocalCheckOperation(operation) {
+  return operation === "local-check" || operation === "combined-check";
+}
+
+function localCheckRecoveryCommand(operation) {
+  return operation === "combined-check"
+    ? "local source check with --check-local"
+    : "local credential check with --check-credentials";
+}
+
 function nonTextSourceError(source, operation = "sync") {
-  const isLocalCheck = operation === "local-check";
+  const isLocalCheck = isLocalCheckOperation(operation);
   const isSyntaxCheck = operation === "syntax-check";
+  const rerunInstruction = isSyntaxCheck
+    ? "rerun the local syntax check with --check-syntax"
+    : isLocalCheck
+      ? `rerun the ${localCheckRecoveryCommand(operation)}`
+      : "rerun sync";
   return new Error(
     `Refusing to ${
       isSyntaxCheck ? "check JavaScript in" : isLocalCheck ? "check" : "sync"
     } a non-text source file: ${source}. ` +
-      "Save the intended source as valid UTF-8 plain text, then " +
-      (isSyntaxCheck
-        ? "rerun the local syntax check with --check-syntax. "
-        : isLocalCheck
-          ? "rerun the local credential check with --check-credentials. "
-          : "rerun sync. ") +
+      `Save the intended source as valid UTF-8 plain text, then ${rerunInstruction}. ` +
       "No GitHub requests were made.",
   );
 }
@@ -371,15 +385,19 @@ function validateJavaScriptSyntax(content, source, operation = "sync") {
   });
   if (result.error || result.status !== 0) {
     const isSyntaxCheck = operation === "syntax-check";
+    const isCombinedCheck = operation === "combined-check";
     const location = syntaxErrorLocation(result.stderr);
     const locationText = location
       ? ` (line ${location.line}, column ${location.column})`
       : "";
+    const rerunInstruction = isSyntaxCheck
+      ? "Review and correct this file, save it, then rerun the local syntax check with --check-syntax. "
+      : isCombinedCheck
+        ? "Review and correct this file, save it, then rerun the combined local source check with --check-local. "
+        : "Review and correct this file, save it, then rerun sync. ";
     throw new Error(
-      `Refusing to ${isSyntaxCheck ? "check" : "sync"} JavaScript that fails Node syntax validation: ${source}${locationText}. ` +
-      (isSyntaxCheck
-        ? "Review and correct this file, save it, then rerun the local syntax check with --check-syntax. "
-        : "Review and correct this file, save it, then rerun sync. ") +
+      `Refusing to ${isSyntaxCheck || isCombinedCheck ? "check" : "sync"} JavaScript that fails Node syntax validation: ${source}${locationText}. ` +
+      rerunInstruction +
       "No GitHub requests were made.",
     );
   }
@@ -419,11 +437,11 @@ function validateSourceFileInfo(fileInfo, source, operation = "sync") {
         "No GitHub requests were made.",
       );
     }
-    if (operation === "local-check") {
+    if (isLocalCheckOperation(operation)) {
       throw new Error(
         `Refusing to check an invalid, linked, or oversized source file: ${source}. ` +
         `Replace it with a standalone regular file (not a symlink or hard link) no larger than ` +
-        `${MAX_SOURCE_BYTES / 1024} KiB, then rerun the local credential check with --check-credentials. ` +
+        `${MAX_SOURCE_BYTES / 1024} KiB, then rerun the ${localCheckRecoveryCommand(operation)}. ` +
         "No GitHub requests were made.",
       );
     }
@@ -455,10 +473,10 @@ function readSourceContent(sourcePath, source, operation = "sync") {
         "Review and save the intended file state, then rerun the local syntax check with --check-syntax. No GitHub requests were made.",
       );
     }
-    if (operation === "local-check") {
+    if (isLocalCheckOperation(operation)) {
       throw new Error(
         `Refusing to check an unavailable source file: ${source}. ` +
-        "Restore or recreate the intended file at this path, then rerun the local credential check with --check-credentials. " +
+        `Restore or recreate the intended file at this path, then rerun the ${localCheckRecoveryCommand(operation)}. ` +
         "No GitHub requests were made.",
       );
     }
@@ -497,10 +515,10 @@ function readSourceContent(sourcePath, source, operation = "sync") {
         "Review and save the intended file state, then rerun the local syntax check with --check-syntax. No GitHub requests were made.",
       );
     }
-    if (operation === "local-check") {
+    if (isLocalCheckOperation(operation)) {
       throw new Error(
         `Refusing to check a source file that changed or could not be safely opened: ${source}. ` +
-        "Restore it as a standalone regular file, save it, then rerun the local credential check with --check-credentials. " +
+        `Restore it as a standalone regular file, save it, then rerun the ${localCheckRecoveryCommand(operation)}. ` +
         "No GitHub requests were made.",
       );
     }
@@ -575,7 +593,7 @@ function readSourceFiles({
         credentialLines: validateCredentials ? findEmbeddedCredentialLines(text) : [],
       });
     } catch (error) {
-      if (operation !== "local-check") throw error;
+      if (!isLocalCheckOperation(operation)) throw error;
       sourceReadFailures.push(
         error instanceof Error
           ? error.message
@@ -589,6 +607,36 @@ function readSourceFiles({
   const credentialFailure = validateCredentials && credentialFindings.length > 0
     ? credentialFindingErrorMessage(credentialFindings)
     : null;
+  if (operation === "combined-check") {
+    const syntaxFailures = [];
+    if (validateSyntax) {
+      for (const { source, content } of sourceFiles) {
+        if (path.extname(source) !== ".mjs") continue;
+        try {
+          validateJavaScriptSyntax(content, source, operation);
+        } catch (error) {
+          syntaxFailures.push(
+            error instanceof Error
+              ? error.message
+              : `JavaScript syntax validation failed for ${source}.`,
+          );
+        }
+      }
+    }
+    const failures = [
+      ...sourceReadFailures,
+      ...(credentialFailure ? [credentialFailure] : []),
+      ...syntaxFailures,
+    ].map((message) => message.replace(/\s*No GitHub requests were made\.$/, ""));
+    if (failures.length > 0) {
+      throw new Error(
+        `Local source check found ${failures.length} ${failures.length === 1 ? "issue" : "issues"} in the allowlisted source files:\n` +
+        failures.map((message) => `- ${message}`).join("\n") +
+        "\nNo GitHub requests were made.",
+      );
+    }
+    return sourceFiles.map(({ target, content }) => ({ target, content }));
+  }
   if (operation === "local-check" && sourceReadFailures.length > 0) {
     const repairItems = [
       ...sourceReadFailures,
@@ -633,6 +681,16 @@ function checkLocalJavaScriptSyntax() {
   });
   console.log(
     `JavaScript syntax check passed for ${files.length} allowlisted JavaScript source files. No GitHub requests were made.`,
+  );
+}
+
+function checkLocalSource() {
+  const files = readSourceFiles({ operation: "combined-check" });
+  const javascriptFileCount = ALLOWED_FILES.filter(
+    ({ source }) => path.extname(source) === ".mjs",
+  ).length;
+  console.log(
+    `Local source check passed: no credential-like values found in ${files.length} allowlisted source files, and JavaScript syntax passed for ${javascriptFileCount} allowlisted JavaScript source files. No GitHub requests were made.`,
   );
 }
 
@@ -1600,6 +1658,12 @@ function parseArguments(args) {
       checkSyntax: false,
     };
   }
+  if (args.length === 1 && args[0] === "--check-local") {
+    return {
+      dryRun: false,
+      checkLocalSource: true,
+    };
+  }
   if (args.length === 1 && args[0] === "--check-staged-credentials") {
     return {
       dryRun: false,
@@ -1661,7 +1725,7 @@ function parseArguments(args) {
     };
   }
   throw new Error(
-    "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
+    "Usage: node ./sync-public-source.mjs [--dry-run | --check-local | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-push-credentials | --check-syntax].",
   );
 }
 
@@ -1734,6 +1798,8 @@ try {
     checkPushCredentials();
   } else if (options.checkStagedCredentials) {
     checkStagedCredentials();
+  } else if (options.checkLocalSource) {
+    checkLocalSource();
   } else if (options.checkCredentials) {
     checkLocalCredentials();
   } else if (options.checkSyntax) {
