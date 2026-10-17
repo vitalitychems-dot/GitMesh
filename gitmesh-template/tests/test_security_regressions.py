@@ -15,6 +15,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -621,6 +622,7 @@ process.on("exit", saveCapture);
         invalid_sha=None,
         malformed_json_at=None,
         malformed_json_body=None,
+        env_overrides=None,
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -658,6 +660,8 @@ process.on("exit", saveCapture);
                 env.pop(key, None)
             else:
                 env[key] = value
+        if env_overrides:
+            env.update(env_overrides)
         return subprocess.run(
             [
                 "node",
@@ -673,6 +677,28 @@ process.on("exit", saveCapture);
             timeout=30,
             check=False,
         )
+
+    def run_source_git(self, args):
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.source_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def initialize_source_history(self):
+        self.run_source_git(["init", "--quiet"])
+        self.run_source_git(["config", "user.name", "GitMesh History Test"])
+        self.run_source_git(["config", "user.email", "gitmesh-history-test@example.invalid"])
+        self.run_source_git(["config", "commit.gpgsign", "false"])
+        self.run_source_git(["config", "core.hooksPath", str(self.temp_path / "history-hooks")])
+        self.run_source_git(["add", *ALLOWED_SOURCE_NAMES])
+        self.run_source_git(["commit", "--quiet", "-m", "clean history baseline"])
+        return self.run_source_git(["rev-parse", "HEAD"])
 
     def assert_safe_failure_output(self, result):
         combined = result.stdout + result.stderr
@@ -1149,9 +1175,130 @@ process.on("exit", saveCapture);
         result = self.run_sync(args=("--unexpected-option",))
         self.assertEqual(result.returncode, 2)
         self.assertIn(
-            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-staged-credentials | --check-syntax].",
+            "Usage: node ./sync-public-source.mjs [--dry-run | --check-credentials | --check-history-credentials [--since <full-commit-sha>] | --check-staged-credentials | --check-syntax].",
             result.stderr,
         )
+        self.assert_safe_failure_output(result)
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+
+    def test_history_credential_check_reports_removed_values_without_leaking(self):
+        base_commit = self.initialize_source_history()
+        readme = self.source_root / "README.md"
+        clean_readme = readme.read_bytes()
+        history_token = "ghp_" + "H" * 36
+        private_line = f"GITHUB_TOKEN={history_token}"
+        readme.write_text(f"SAFE_HISTORY_HEADER\n{private_line}\nSAFE_HISTORY_FOOTER\n")
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(["commit", "--quiet", "-m", "temporary credential test fixture"])
+        credential_commit = self.run_source_git(["rev-parse", "HEAD"])
+        readme.write_bytes(clean_readme)
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(["commit", "--quiet", "-m", "remove temporary test fixture"])
+        head_before_scan = self.run_source_git(["rev-parse", "HEAD"])
+        expected_args = (
+            ("--check-history-credentials",),
+            ("--check-history-credentials", "--since", base_commit),
+        )
+
+        for args in expected_args:
+            with self.subTest(args=args):
+                result = self.run_sync(token_value=None, args=args)
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(credential_commit, output)
+                self.assertIn("README.md (line 2)", output)
+                self.assertIn("No GitHub requests were made", output)
+                self.assertNotIn(history_token, output)
+                self.assertNotIn(private_line, output)
+                self.assertNotIn("SAFE_HISTORY_HEADER", output)
+                self.assert_safe_failure_output(result)
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+                self.assertEqual(capture["preflightCalls"], [])
+
+        self.assertEqual(self.run_source_git(["rev-parse", "HEAD"]), head_before_scan)
+        self.assertEqual(readme.read_bytes(), clean_readme)
+
+    def test_history_credential_check_accepts_a_since_commit_range(self):
+        self.initialize_source_history()
+        readme = self.source_root / "README.md"
+        clean_readme = readme.read_bytes()
+        history_token = "ghp_" + "J" * 36
+        readme.write_text(f"SAFE_HISTORY_HEADER\nGITHUB_TOKEN={history_token}\n")
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(["commit", "--quiet", "-m", "temporary credential test fixture"])
+        credential_commit = self.run_source_git(["rev-parse", "HEAD"])
+        readme.write_bytes(clean_readme)
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(["commit", "--quiet", "-m", "remove temporary test fixture"])
+        head_before_scan = self.run_source_git(["rev-parse", "HEAD"])
+
+        result = self.run_sync(
+            token_value=None,
+            args=("--check-history-credentials", "--since", credential_commit),
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("History credential check passed", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn(history_token, output)
+        self.assert_safe_failure_output(result)
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(capture["preflightCalls"], [])
+        self.assertEqual(self.run_source_git(["rev-parse", "HEAD"]), head_before_scan)
+        self.assertEqual(readme.read_bytes(), clean_readme)
+
+    def test_history_credential_check_fails_safely_for_large_history(self):
+        self.initialize_source_history()
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        wrapper_dir = self.temp_path / "history-git-wrapper"
+        wrapper_dir.mkdir()
+        wrapper = wrapper_dir / "git"
+        wrapper.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys\n"
+            "if len(sys.argv) > 1 and sys.argv[1] == 'log':\n"
+            "    for index in range(501):\n"
+            "        print(f'{index + 1:040x}')\n"
+            "        print('README.md')\n"
+            "    raise SystemExit(0)\n"
+            f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = os.pathsep.join((str(wrapper_dir), env.get("PATH", "")))
+        head_before_scan = self.run_source_git(["rev-parse", "HEAD"])
+
+        result = self.run_sync(
+            token_value=None,
+            args=("--check-history-credentials",),
+            env_overrides={"PATH": env["PATH"]},
+        )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("500-commit limit", output)
+        self.assertIn("--since <full-commit-sha>", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assert_safe_failure_output(result)
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(self.run_source_git(["rev-parse", "HEAD"]), head_before_scan)
+
+    def test_history_credential_check_refuses_shallow_repositories(self):
+        head_commit = self.initialize_source_history()
+        shallow_file = self.source_root / ".git" / "shallow"
+        shallow_file.write_text(f"{head_commit}\n", encoding="utf-8")
+
+        result = self.run_sync(token_value=None, args=("--check-history-credentials",))
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("complete history in a shallow clone", output)
+        self.assertIn("Use a full clone", output)
+        self.assertIn("No GitHub requests were made", output)
         self.assert_safe_failure_output(result)
         capture = json.loads(self.capture.read_text())
         self.assertEqual(capture["requests"], [])
