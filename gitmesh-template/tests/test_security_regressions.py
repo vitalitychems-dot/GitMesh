@@ -296,6 +296,8 @@ const capture = process.env.GITMESH_TEST_CAPTURE;
 const remoteContents = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REMOTE_CONTENTS, "utf8"));
 const base = "/repos/vitalitychems-dot/GitMesh";
 const initialCommitSha = process.env.GITMESH_TEST_INITIAL_SHA;
+const invalidShaStage = process.env.GITMESH_TEST_INVALID_SHA_STAGE;
+const invalidSha = process.env.GITMESH_TEST_INVALID_SHA;
 let mainRefReadCount = 0;
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
 childProcess.spawnSync = (command, ...args) => {
@@ -463,13 +465,18 @@ globalThis.fetch = async (input, init = {}) => {
     let previewSha = initialCommitSha;
     if (mainRefReadCount > 1 && movedHeadSha) previewSha = movedHeadSha;
     if (mainRefReadCount > 2 && secondMovedHeadSha) previewSha = secondMovedHeadSha;
+    if (invalidShaStage === "main-ref") previewSha = invalidSha;
     data = {
       object: {
         sha: previewSha,
       },
     };
   } else if (method === "GET" && url.pathname === base + "/git/commits/" + initialCommitSha) {
-    data = { tree: { sha: "b".repeat(40) } };
+    data = {
+      tree: {
+        sha: invalidShaStage === "base-tree" ? invalidSha : "b".repeat(40),
+      },
+    };
   } else if (method === "GET" && url.pathname.startsWith(base + "/contents/")) {
     const target = url.pathname.slice((base + "/contents/").length);
     const remoteEntry = remoteContents[target];
@@ -489,13 +496,17 @@ globalThis.fetch = async (input, init = {}) => {
       data = remoteEntry;
     }
   } else if (method === "POST" && url.pathname === base + "/git/blobs") {
-    data = { sha: "1".repeat(40) };
+    data = { sha: invalidShaStage === "blob" ? invalidSha : "1".repeat(40) };
   } else if (method === "POST" && url.pathname === base + "/git/trees") {
-    data = { sha: "c".repeat(40) };
+    data = { sha: invalidShaStage === "tree" ? invalidSha : "c".repeat(40) };
   } else if (method === "POST" && url.pathname === base + "/git/commits") {
-    data = { sha: "d".repeat(40) };
+    data = { sha: invalidShaStage === "commit" ? invalidSha : "d".repeat(40) };
   } else if (method === "PATCH" && url.pathname === base + "/git/refs/heads/main") {
-    data = { object: { sha: body.sha } };
+    data = {
+      object: {
+        sha: invalidShaStage === "updated-ref" ? invalidSha : body.sha,
+      },
+    };
   } else {
     throw new Error("Unexpected mocked GitHub request.");
   }
@@ -529,6 +540,8 @@ process.on("exit", saveCapture);
         moved_head_sha=None,
         second_moved_head_sha=None,
         fail_ref=None,
+        invalid_sha_stage=None,
+        invalid_sha=None,
     ):
         env = os.environ.copy()
         env["GITMESH_TEST_CAPTURE"] = str(self.capture)
@@ -555,6 +568,8 @@ process.on("exit", saveCapture);
             ("GITMESH_TEST_MOVED_HEAD_SHA", moved_head_sha),
             ("GITMESH_TEST_SECOND_MOVED_HEAD_SHA", second_moved_head_sha),
             ("GITMESH_TEST_FAIL_REF", fail_ref),
+            ("GITMESH_TEST_INVALID_SHA_STAGE", invalid_sha_stage),
+            ("GITMESH_TEST_INVALID_SHA", invalid_sha),
         ):
             if value is None:
                 env.pop(key, None)
@@ -665,6 +680,72 @@ process.on("exit", saveCapture);
             b"PRIVATE_WORKSPACE_SENTINEL",
         ):
             self.assertNotIn(sentinel, uploaded_contents)
+
+    def test_normal_sync_stops_safely_on_malformed_object_ids(self):
+        readme = self.source_root / "README.md"
+        original_content = readme.read_bytes()
+        changed_content = original_content + b"\nLocal-only malformed SHA test marker.\n"
+        stages = {
+            "main-ref": ("main branch commit", []),
+            "base-tree": ("base tree", []),
+            "blob": ("blob SHA", ["/git/blobs"]),
+            "tree": ("tree SHA", ["/git/blobs", "/git/trees"]),
+            "commit": ("commit SHA", ["/git/blobs", "/git/trees", "/git/commits"]),
+            "updated-ref": (
+                None,
+                ["/git/blobs", "/git/trees", "/git/commits", "/git/refs/heads/main"],
+            ),
+        }
+        repository_prefix = "/repos/vitalitychems-dot/GitMesh"
+        for stage, (label, expected_write_routes) in stages.items():
+            with self.subTest(stage=stage):
+                readme.write_bytes(changed_content)
+                self.set_remote_snapshot({
+                    "projects/local-vault/README.md": base64.b64encode(
+                        original_content
+                    ).decode("ascii"),
+                })
+                invalid_sha = f"UNTRUSTED_INVALID_{stage.upper()}_SHA_SENTINEL"
+                result = self.run_sync(
+                    invalid_sha_stage=stage,
+                    invalid_sha=invalid_sha,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                if label is None:
+                    self.assertIn("GitHub did not confirm the source sync commit", result.stderr)
+                else:
+                    self.assertIn(f"invalid {label}", result.stderr)
+                    self.assertIn("sync stopped", result.stderr)
+                self.assertNotIn(invalid_sha, output)
+                self.assertNotIn("Synced ", output)
+                self.assertEqual(reported_changed_paths(result.stdout), [])
+                self.assert_safe_failure_output(result)
+                self.assert_no_source_contents_in_output(output)
+
+                capture = json.loads(self.capture.read_text())
+                requests = capture["requests"]
+                self.assertTrue(all(request["hasExpectedBearer"] for request in requests))
+                self.assertNotIn(invalid_sha, json.dumps(requests))
+                content_reads = [
+                    request for request in requests
+                    if request["method"] == "GET" and "/contents/" in request["path"]
+                ]
+                if stage == "main-ref":
+                    self.assertEqual(content_reads, [])
+                else:
+                    self.assertEqual(len(content_reads), 3)
+                    self.assertEqual(
+                        [request["ref"] for request in content_reads],
+                        [INITIAL_COMMIT_SHA] * 3,
+                    )
+                write_routes = [
+                    request["path"][len(repository_prefix):]
+                    for request in requests
+                    if request["method"] in ("POST", "PATCH")
+                ]
+                self.assertEqual(write_routes, expected_write_routes)
 
     def test_unchanged_source_skips_blob_tree_commit_and_branch_update(self):
         self.set_remote_snapshot()
