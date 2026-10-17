@@ -4530,13 +4530,13 @@ class HookInstallerTests(unittest.TestCase):
     def run_git(self, args):
         return self.run_git_at(self.repo_root, args)
 
-    def run_installer(self, cwd=None, args=(), installer_path=None):
+    def run_installer(self, cwd=None, args=(), installer_path=None, env=None):
         cwd = cwd or self.repo_root
         installer_path = installer_path or cwd / "gitmesh-template" / HOOK_INSTALLER.name
         return subprocess.run(
             ["node", str(installer_path), *args],
             cwd=cwd,
-            env=self.env,
+            env=self.env if env is None else env,
             capture_output=True,
             text=True,
             timeout=30,
@@ -4587,6 +4587,95 @@ class HookInstallerTests(unittest.TestCase):
             output,
         )
         self.assertEqual(self.git_config_snapshot(self.repo_root), before)
+
+    def test_hook_status_scope_fallback_identifies_repository_and_worktree_settings(self):
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        fake_git_directory = self.repo_root / "legacy-git-bin"
+        fake_git_directory.mkdir()
+        fake_git = fake_git_directory / "git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "config" ] && [ "$2" = "--show-scope" ]; then\n'
+            '  : > "$GITMESH_SCOPE_FALLBACK_MARKER"\n'
+            "  printf '%s\\n' 'option --show-scope is unavailable' >&2\n"
+            "  exit 129\n"
+            "fi\n"
+            'exec "$GITMESH_TEST_REAL_GIT" "$@"\n'
+        )
+        fake_git.chmod(0o755)
+        legacy_git_env = self.env.copy()
+        legacy_git_env["PATH"] = (
+            str(fake_git_directory) + os.pathsep + legacy_git_env["PATH"]
+        )
+        legacy_git_env["GITMESH_TEST_REAL_GIT"] = str(real_git)
+        scope_fallback_marker = self.repo_root / "scope-fallback-was-used"
+        legacy_git_env["GITMESH_SCOPE_FALLBACK_MARKER"] = str(scope_fallback_marker)
+
+        configured_local = self.run_git(
+            ["config", "--local", "core.hooksPath", "gitmesh-template/hooks"]
+        )
+        self.assertEqual(configured_local.returncode, 0, configured_local.stderr)
+        repository_config_before = self.git_config_snapshot(self.repo_root)
+        repository_status = self.run_installer(
+            args=("--status",),
+            env=legacy_git_env,
+        )
+        repository_output = repository_status.stdout + repository_status.stderr
+        self.assertEqual(repository_status.returncode, 0, repository_output)
+        self.assertTrue(scope_fallback_marker.is_file())
+        self.assertIn("GitMesh pre-commit check: active", repository_output)
+        self.assertIn("Scope: repository-local", repository_output)
+        self.assertIn(
+            "To disable this GitMesh setup, run: git config --local --unset core.hooksPath '^gitmesh-template/hooks$'",
+            repository_output,
+        )
+        self.assertEqual(
+            self.git_config_snapshot(self.repo_root),
+            repository_config_before,
+        )
+        scope_fallback_marker.unlink()
+
+        configured_extension = self.run_git(
+            ["config", "--local", "extensions.worktreeConfig", "true"]
+        )
+        self.assertEqual(configured_extension.returncode, 0, configured_extension.stderr)
+        worktree_root = self.repo_root / "legacy-git-scope-worktree"
+        added = self.run_git(
+            ["worktree", "add", "--detach", str(worktree_root), "HEAD"]
+        )
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        configured_worktree = self.run_git_at(
+            worktree_root,
+            ["config", "--worktree", "core.hooksPath", "gitmesh-template/hooks"],
+        )
+        self.assertEqual(configured_worktree.returncode, 0, configured_worktree.stderr)
+        worktree_config_before = self.git_config_snapshot(worktree_root)
+        repository_config_before_worktree_status = self.git_config_snapshot(self.repo_root)
+
+        worktree_status = self.run_installer(
+            cwd=worktree_root,
+            args=("--status",),
+            env=legacy_git_env,
+        )
+        worktree_output = worktree_status.stdout + worktree_status.stderr
+        self.assertEqual(worktree_status.returncode, 0, worktree_output)
+        self.assertTrue(scope_fallback_marker.is_file())
+        self.assertIn("GitMesh pre-commit check: active", worktree_output)
+        self.assertIn("Scope: worktree-local", worktree_output)
+        self.assertIn(
+            "To disable this GitMesh setup, run: git config --worktree --unset core.hooksPath '^gitmesh-template/hooks$'",
+            worktree_output,
+        )
+        self.assertEqual(
+            self.git_config_snapshot(worktree_root),
+            worktree_config_before,
+        )
+        self.assertEqual(
+            self.git_config_snapshot(self.repo_root),
+            repository_config_before_worktree_status,
+        )
+        self.assertEqual(self.global_config.read_text(), "")
 
     def test_hook_status_reports_inherited_repository_local_setup_as_shared(self):
         worktree_root = self.repo_root / "status-inherited-linked-worktree"
