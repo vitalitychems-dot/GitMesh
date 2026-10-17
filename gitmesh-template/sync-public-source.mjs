@@ -49,6 +49,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_unchanged_source_skips_blob_tree_commit_and_branch_update",
   "test_dry_run_with_no_changes_reports_no_commit_and_makes_no_writes",
   "test_dry_run_lists_only_changed_paths_without_contents_or_writes",
+  "test_dry_run_rejects_malformed_initial_and_first_comparison_commit_ids",
   "test_unknown_sync_option_stops_before_github_request",
   "test_malformed_remote_files_stop_before_any_github_write",
   "test_unsafe_local_sources_stop_before_github_and_do_not_leak_contents",
