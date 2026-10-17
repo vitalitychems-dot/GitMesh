@@ -414,6 +414,17 @@ childProcess.spawnSync = (command, ...args) => {
         output: [],
       };
     }
+    if (mode === "interrupt") {
+      return {
+        error: undefined,
+        status: null,
+        signal: "SIGINT",
+        stdout: childOutput,
+        stderr: childStderr,
+        pid: 123,
+        output: [],
+      };
+    }
     if (mode === "output-limit") {
       return {
         error: { code: "ENOBUFS", message: childOutput },
@@ -2688,7 +2699,6 @@ process.on("exit", saveCapture);
                 (),
                 "Install or upgrade Python to 3.9 or newer, make python3 available on PATH, then rerun the regression checks and sync",
             ),
-            ("timeout", "python timeout", (), "preflight timed out"),
         )
         recognized_failure_stderr = None
         for preflight_mode, mode, args, expected_summary in cases:
@@ -2828,6 +2838,63 @@ process.on("exit", saveCapture);
                 self.assert_safe_failure_output(result)
                 capture = json.loads(self.capture.read_text())
                 self.assertEqual(capture["requests"], [])
+
+    def test_security_preflight_timeout_and_interruption_are_clear_and_private(self):
+        stdout_output = (
+            "PREFLIGHT_CHILD_STDOUT_SENTINEL\n"
+            "PREFLIGHT_SOURCE_CONTENT_SENTINEL\n"
+            "ghp_" + "T" * 36
+        )
+        stderr_output = (
+            "PREFLIGHT_CHILD_STDERR_SENTINEL\n"
+            "PREFLIGHT_PRIVATE_DIAGNOSTIC_SENTINEL\n"
+        )
+        cases = (
+            ("timeout", "Security regression preflight timed out"),
+            ("interrupt", "Python security regression preflight was interrupted"),
+        )
+
+        for preflight_mode, expected_summary in cases:
+            with self.subTest(preflight_mode=preflight_mode):
+                result = self.run_sync(
+                    preflight_mode=preflight_mode,
+                    preflight_output=stdout_output,
+                    preflight_stderr=stderr_output,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(expected_summary, result.stderr)
+                self.assertIn(
+                    "Run locally from the workspace root: "
+                    "python3 gitmesh-template/tests/test_security_regressions.py.",
+                    result.stderr,
+                )
+                self.assertIn("No GitHub requests were made", result.stderr)
+                if preflight_mode == "interrupt":
+                    self.assertNotIn("preflight timed out", result.stderr.lower())
+                else:
+                    self.assertNotIn("preflight was interrupted", result.stderr)
+                for private_output in (
+                    stdout_output,
+                    stderr_output,
+                    "PREFLIGHT_CHILD_STDOUT_SENTINEL",
+                    "PREFLIGHT_SOURCE_CONTENT_SENTINEL",
+                    "PREFLIGHT_CHILD_STDERR_SENTINEL",
+                    "PREFLIGHT_PRIVATE_DIAGNOSTIC_SENTINEL",
+                    "ghp_" + "T" * 36,
+                    FAKE_GITHUB_TOKEN,
+                ):
+                    self.assertNotIn(private_output, output)
+                self.assert_safe_failure_output(result)
+
+                capture = json.loads(self.capture.read_text())
+                self.assertEqual(capture["requests"], [])
+                self.assertEqual(len(capture["preflightCalls"]), 2)
+                self.assertFalse(
+                    any(call["hasGitHubToken"] for call in capture["preflightCalls"])
+                )
 
     def test_security_preflight_output_limit_hides_child_output_and_stops_before_github(self):
         stdout_output = (
