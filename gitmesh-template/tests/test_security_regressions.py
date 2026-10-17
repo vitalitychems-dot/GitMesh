@@ -2367,6 +2367,69 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_blocks_every_supported_credential_pattern(self):
+        credential_cases = [
+            ("GitHub personal token", "ghp_" + "A" * 36),
+            ("GitHub OAuth token", "gho_" + "B" * 36),
+            ("GitHub user token", "ghu_" + "C" * 36),
+            ("GitHub server token", "ghs_" + "D" * 36),
+            ("GitHub refresh token", "ghr_" + "E" * 36),
+            ("GitHub fine-grained token", "github_pat_" + "F" * 40),
+            ("GitLab personal access token", "glpat-" + "G" * 24),
+            ("npm token", "npm_" + "H" * 32),
+            ("Slack bot token", "xoxb-" + "I" * 24),
+            ("Slack app token", "xoxa-" + "J" * 24),
+            ("Slack user token", "xoxp-" + "K" * 24),
+            ("Slack refresh token", "xoxr-" + "L" * 24),
+            ("Slack service token", "xoxs-" + "M" * 24),
+            ("Google API key", "AIza" + "N" * 35),
+            ("OpenAI project key", "sk-proj-" + "O" * 24),
+            ("OpenAI admin key", "sk-admin-" + "P" * 24),
+            ("OpenAI service account key", "sk-svcacct-" + "Q" * 24),
+            ("OpenAI legacy key", "sk-" + "R" * 40),
+            ("Stripe live secret", "sk_live_" + "S" * 24),
+            ("Stripe test secret", "sk_test_" + "T" * 24),
+            ("unencrypted private key", "-----BEGIN PRIVATE KEY-----"),
+            ("encrypted private key", "-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+            ("RSA private key", "-----BEGIN RSA PRIVATE KEY-----"),
+            ("EC private key", "-----BEGIN EC PRIVATE KEY-----"),
+            ("DSA private key", "-----BEGIN DSA PRIVATE KEY-----"),
+            ("OpenSSH private key", "-----BEGIN OPENSSH PRIVATE KEY-----"),
+            ("PGP private key", "-----BEGIN PGP PRIVATE KEY-----"),
+        ]
+        hook_env = self.hook_environment_without_github_token()
+        self.assertNotIn("GITHUB_TOKEN", hook_env)
+
+        for label, credential in credential_cases:
+            with self.subTest(credential_family=label):
+                source_line = f"staged_credential_{label.replace(' ', '_')}={credential}"
+                self.readme.write_text(f"safe source context\n{source_line}\n")
+                self.run_git(["add", "gitmesh-template/README.md"])
+
+                # Restore the worktree so this commit verifies the staged blob.
+                self.readme.write_bytes(self.baseline_readme)
+                original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+                result = self.run_git(
+                    ["commit", "-m", "each credential family must be blocked"],
+                    env=hook_env,
+                )
+                output = result.stdout + result.stderr
+                safe_output = output.replace(credential, "[redacted test credential]")
+
+                self.assertNotEqual(result.returncode, 0, safe_output)
+                self.assertIn("README.md (line 2)", output)
+                self.assertIn("No GitHub requests were made", output)
+                self.assertFalse(credential in output, safe_output)
+                self.assertFalse(source_line in output, safe_output)
+                self.assertFalse("safe source context" in output, safe_output)
+                self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+                self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+                self.assertEqual(
+                    self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+                    "gitmesh-template/README.md",
+                )
+                self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_rejects_non_text_staged_files_without_leaking_contents(self):
         non_text_cases = (
             ("invalid UTF-8", b"\xffINVALID_UTF8_STAGED_CONTENT_SENTINEL"),
