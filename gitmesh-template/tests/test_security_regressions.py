@@ -2518,6 +2518,83 @@ class PreCommitHookTests(unittest.TestCase):
                 )
                 self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_reports_credentials_from_every_staged_source_file(self):
+        staged_sources = [
+            (
+                self.template_root / "README.md",
+                "gitmesh-template/README.md",
+                "README_TOKEN",
+                "ghp_" + "A" * 36,
+                ["SAFE_README_HEADER"],
+                2,
+            ),
+            (
+                self.template_root / "gitmesh-ultimate-core.mjs",
+                "gitmesh-template/gitmesh-ultimate-core.mjs",
+                "CONSOLE_TOKEN",
+                "github_pat_" + "B" * 40,
+                ["SAFE_CONSOLE_HEADER", "SAFE_CONSOLE_CONTEXT"],
+                3,
+            ),
+            (
+                self.template_root / "sync-public-source.mjs",
+                "gitmesh-template/sync-public-source.mjs",
+                "SYNC_TOKEN",
+                "glpat-" + "C" * 24,
+                ["SAFE_SYNC_HEADER", "SAFE_SYNC_CONTEXT_ONE", "SAFE_SYNC_CONTEXT_TWO"],
+                4,
+            ),
+        ]
+        original_contents = {
+            file_path: file_path.read_bytes()
+            for file_path, *_ in staged_sources
+        }
+        private_texts = []
+        expected_locations = []
+        for file_path, git_path, variable_name, credential, safe_context, line_number in staged_sources:
+            source_line = f"{variable_name}={credential}"
+            staged_text = "\n".join([*safe_context, source_line, "SAFE_SOURCE_FOOTER"]) + "\n"
+            file_path.write_bytes(staged_text.encode("utf-8"))
+            self.run_git(["add", git_path])
+            private_texts.extend([credential, source_line, *safe_context, "SAFE_SOURCE_FOOTER"])
+            expected_locations.append(f"{file_path.name} (line {line_number})")
+
+        # The hook must inspect each staged blob, not the restored working tree.
+        for file_path, original_content in original_contents.items():
+            file_path.write_bytes(original_content)
+
+        hook_env = self.hook_environment_without_github_token()
+        self.assertNotIn("GITHUB_TOKEN", hook_env)
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        result = self.run_git(
+            ["commit", "-m", "all staged source findings must be reported"],
+            env=hook_env,
+        )
+        output = result.stdout + result.stderr
+        safe_output = output
+        for private_text in [*private_texts, FAKE_GITHUB_TOKEN]:
+            safe_output = safe_output.replace(private_text, "[redacted test content]")
+
+        self.assertNotEqual(result.returncode, 0, safe_output)
+        self.assertIn(
+            "Refusing to commit staged source files containing a credential-like value:",
+            output,
+            safe_output,
+        )
+        for location in expected_locations:
+            self.assertIn(location, output, safe_output)
+        self.assertIn("Remove the values from these staged files", output, safe_output)
+        self.assertIn("No GitHub requests were made", output, safe_output)
+        for private_text in private_texts:
+            self.assertFalse(private_text in output, safe_output)
+        self.assertFalse(FAKE_GITHUB_TOKEN in output, safe_output)
+        self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+        self.assertEqual(
+            self.run_git(["diff", "--cached", "--name-only"]).stdout.strip().splitlines(),
+            sorted(git_path for _, git_path, *_ in staged_sources),
+        )
+        self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_blocks_when_node_is_missing(self):
         credential = "ghp_" + "N" * 36
         source_sentinel = "NODE_MISSING_STAGED_SOURCE_SENTINEL"
