@@ -136,6 +136,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking",
   "test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
+  "test_security_preflight_timeout_and_interruption_are_clear_and_private",
   "test_security_preflight_output_limit_hides_child_output_and_stops_before_github",
   "test_preflight_safe_name_allowlist_matches_regression_tests",
   "test_missing_preflight_harness_has_safe_recovery_guidance",
