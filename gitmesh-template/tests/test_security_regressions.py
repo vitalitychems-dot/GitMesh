@@ -964,6 +964,7 @@ process.on("exit", saveCapture);
 
     def test_dry_run_with_no_changes_reports_no_commit_and_makes_no_writes(self):
         self.set_remote_snapshot()
+        self.assertRegex(INITIAL_COMMIT_SHA, r"^[a-f0-9]{40}$")
         result = self.run_sync(args=("--dry-run",))
         self.assertEqual(result.returncode, 0)
         self.assertIn("Dry run:", result.stdout)
@@ -1150,49 +1151,56 @@ process.on("exit", saveCapture);
         source_sentinel = "DRY_RUN_INVALID_HEAD_SOURCE_SENTINEL"
         readme.write_bytes(readme.read_bytes() + f"\n{source_sentinel}\n".encode())
 
-        cases = (
+        invalid_commit_ids = (
+            ("non-hex", "UNTRUSTED_COMMIT_ID_SENTINEL"),
+            ("one hex digit short", "b" * 39),
+            ("one hex digit long", "c" * 41),
+            ("64 lowercase hex digits", "d" * 64),
+            ("uppercase hex", "E" * 40),
+        )
+        stages = (
             ("dry-run-initial-ref", 1, []),
             ("dry-run-first-comparison-ref", 2, [INITIAL_COMMIT_SHA] * 3),
         )
-        for stage, expected_head_reads, expected_content_refs in cases:
-            with self.subTest(stage=stage):
-                invalid_sha = f"UNTRUSTED_{stage.upper()}_COMMIT_ID_SENTINEL"
-                result = self.run_sync(
-                    args=("--dry-run",),
-                    invalid_sha_stage=stage,
-                    invalid_sha=invalid_sha,
-                )
-                output = result.stdout + result.stderr
+        for stage, expected_head_reads, expected_content_refs in stages:
+            for invalid_kind, invalid_sha in invalid_commit_ids:
+                with self.subTest(stage=stage, invalid_kind=invalid_kind):
+                    result = self.run_sync(
+                        args=("--dry-run",),
+                        invalid_sha_stage=stage,
+                        invalid_sha=invalid_sha,
+                    )
+                    output = result.stdout + result.stderr
 
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("invalid main branch commit", result.stderr)
-                self.assertIn("Rerun the dry run before publishing", result.stderr)
-                self.assertIn("No GitHub changes were made", result.stderr)
-                for preview_success in ("Dry run:", "would be published", "already match"):
-                    self.assertNotIn(preview_success, output)
-                self.assertNotIn(invalid_sha, output)
-                self.assertEqual(reported_changed_paths(result.stdout), [])
-                self.assert_safe_failure_output(result)
-                self.assert_no_source_contents_in_output(output)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("invalid main branch commit", result.stderr)
+                    self.assertIn("Rerun the dry run before publishing", result.stderr)
+                    self.assertIn("No GitHub changes were made", result.stderr)
+                    for preview_success in ("Dry run:", "would be published", "already match"):
+                        self.assertNotIn(preview_success, output)
+                    self.assertNotIn(invalid_sha, output)
+                    self.assertEqual(reported_changed_paths(result.stdout), [])
+                    self.assert_safe_failure_output(result)
+                    self.assert_no_source_contents_in_output(output)
 
-                capture = json.loads(self.capture.read_text())
-                requests = capture["requests"]
-                head_reads = [
-                    request for request in requests
-                    if request["path"] ==
-                    "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
-                ]
-                content_reads = [
-                    request for request in requests
-                    if request["method"] == "GET" and "/contents/" in request["path"]
-                ]
-                self.assertEqual(len(head_reads), expected_head_reads)
-                self.assertEqual(
-                    [request["ref"] for request in content_reads],
-                    expected_content_refs,
-                )
-                self.assertNotIn(invalid_sha, json.dumps(requests))
-                self.assertTrue(all(request["method"] == "GET" for request in requests))
+                    capture = json.loads(self.capture.read_text())
+                    requests = capture["requests"]
+                    head_reads = [
+                        request for request in requests
+                        if request["path"] ==
+                        "/repos/vitalitychems-dot/GitMesh/git/ref/heads/main"
+                    ]
+                    content_reads = [
+                        request for request in requests
+                        if request["method"] == "GET" and "/contents/" in request["path"]
+                    ]
+                    self.assertEqual(len(head_reads), expected_head_reads)
+                    self.assertEqual(
+                        [request["ref"] for request in content_reads],
+                        expected_content_refs,
+                    )
+                    self.assertNotIn(invalid_sha, json.dumps(requests))
+                    self.assertTrue(all(request["method"] == "GET" for request in requests))
 
     def test_dry_run_refreshes_once_when_main_advances(self):
         self.set_remote_snapshot()
