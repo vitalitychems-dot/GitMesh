@@ -1973,6 +1973,41 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_rejects_non_text_staged_files_without_leaking_contents(self):
+        non_text_cases = (
+            ("invalid UTF-8", b"\xffINVALID_UTF8_STAGED_CONTENT_SENTINEL"),
+            ("NUL byte", b"\x00NUL_STAGED_CONTENT_SENTINEL"),
+        )
+
+        for case_name, content in non_text_cases:
+            with self.subTest(case=case_name):
+                self.readme.write_bytes(content)
+                self.run_git(["add", "gitmesh-template/README.md"])
+
+                # Ensure validation reads the staged blob rather than the working tree.
+                self.readme.write_bytes(self.baseline_readme)
+                original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+                result = self.run_git(
+                    ["commit", "-m", f"must be blocked for {case_name}"],
+                    env=self.hook_environment_without_github_token(),
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("non-text staged source file: README.md", output)
+                self.assertIn("Save it as UTF-8 text and stage it again", output)
+                self.assertIn("No GitHub requests were made", output)
+                self.assertNotIn(str(self.readme), output)
+                self.assertNotIn(content.decode("latin1"), output)
+                self.assertNotIn("network request attempted", output)
+                self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+                self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+                self.assertEqual(
+                    self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+                    "gitmesh-template/README.md",
+                )
+                self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_reports_unicode_separator_lines_without_exposing_content(self):
         first_secret = "ghp_" + "U" * 36
         second_secret = "github_pat_" + "V" * 40
