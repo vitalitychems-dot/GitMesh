@@ -3893,6 +3893,86 @@ class PreCommitHookTests(unittest.TestCase):
         self.assertFalse(execution_marker.exists())
         self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_blocks_when_node_version_output_is_empty_or_malformed(self):
+        credential = "ghp_" + "P" * 36
+        staged_source_line = f"staged_secret={credential}"
+        source_sentinel = "INVALID_NODE_STAGED_SOURCE_SENTINEL"
+        self.readme.write_text(f"{staged_source_line}\n{source_sentinel}\n")
+        self.run_git(["add", "gitmesh-template/README.md"])
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        path_with_invalid_node = self.repo_root / "path-with-invalid-node-version"
+        path_with_invalid_node.mkdir()
+        for command in ("git", "dirname"):
+            executable = shutil.which(command)
+            self.assertIsNotNone(executable, f"required test executable not found: {command}")
+            (path_with_invalid_node / command).symlink_to(executable)
+
+        execution_marker = self.repo_root / "invalid-node-version-scanner-was-used"
+        node_shim = path_with_invalid_node / "node"
+        node_shim.write_text(
+            "#!/bin/sh\n"
+            'if [ "${1-}" = "--version" ]; then\n'
+            '  printf "%s" "${GITMESH_TEST_NODE_VERSION_STDOUT-}"\n'
+            '  printf "%s\\n" "${GITMESH_TEST_NODE_VERSION_STDERR-}" >&2\n'
+            "  exit 0\n"
+            "fi\n"
+            'printf "%s\\n" "NODE_VERSION_SCANNER_LAUNCH_SENTINEL" > "$GITMESH_TEST_NODE_EXECUTION_MARKER"\n'
+            'printf "%s\\n" "NODE_VERSION_SCANNER_OUTPUT_SENTINEL" >&2\n'
+            "exit 1\n"
+        )
+        node_shim.chmod(0o755)
+
+        cases = (
+            ("empty", ""),
+            ("malformed", "NODE_VERSION_STDOUT_SENTINEL"),
+            ("version with trailing text", "v20.0.0 NODE_VERSION_TRAILING_TEXT_SENTINEL"),
+        )
+        version_stderr = "NODE_VERSION_STDERR_SENTINEL"
+        for label, version_output in cases:
+            with self.subTest(output=label):
+                env = self.hook_environment_without_github_token()
+                env["PATH"] = str(path_with_invalid_node)
+                env["GITMESH_TEST_NODE_EXECUTION_MARKER"] = str(execution_marker)
+                env["GITMESH_TEST_NODE_VERSION_STDOUT"] = version_output
+                env["GITMESH_TEST_NODE_VERSION_STDERR"] = version_stderr
+                result = self.run_git(
+                    ["commit", "-m", "must be blocked by an unverifiable Node version"],
+                    env=env,
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("could not verify the Node.js version", output)
+                self.assertIn("Node.js 20 or newer is required", output)
+                self.assertIn("Install or upgrade Node.js to 20 or newer", output)
+                self.assertIn("ensure node --version reports v20 or newer", output)
+                self.assertIn("retry the commit", output)
+                self.assertIn("No staged content was inspected", output)
+                self.assertIn("No GitHub requests were made", output)
+                private_output = (
+                    version_stderr,
+                    "NODE_VERSION_STDOUT_SENTINEL",
+                    "NODE_VERSION_TRAILING_TEXT_SENTINEL",
+                    "NODE_VERSION_SCANNER_LAUNCH_SENTINEL",
+                    "NODE_VERSION_SCANNER_OUTPUT_SENTINEL",
+                    staged_source_line,
+                    source_sentinel,
+                    credential,
+                    FAKE_GITHUB_TOKEN,
+                )
+                for private_text in private_output:
+                    self.assertNotIn(private_text, output)
+                if version_output:
+                    self.assertNotIn(version_output, output)
+                self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+                self.assertEqual(
+                    self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+                    "gitmesh-template/README.md",
+                )
+                self.assertFalse(execution_marker.exists())
+                self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_reports_staged_git_timeout_safely_without_github_token(self):
         credential = "ghp_" + "T" * 36
         staged_source_line = f"staged_secret={credential}"
