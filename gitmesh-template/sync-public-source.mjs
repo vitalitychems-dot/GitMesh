@@ -103,6 +103,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_history_credential_check_fails_safely_for_large_history",
   "test_history_credential_check_refuses_shallow_repositories",
   "test_local_source_check_passes_without_token_or_github_requests",
+  "test_local_source_check_passes_with_token_without_github_requests",
   "test_local_source_check_reports_credentials_without_leaking",
   "test_local_source_check_reports_syntax_failure_without_leaking",
   "test_local_source_check_reports_both_failure_types_without_leaking",
