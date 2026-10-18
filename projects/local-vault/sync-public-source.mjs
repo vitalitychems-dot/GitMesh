@@ -86,6 +86,31 @@ function requireSha(value, label) {
   return value;
 }
 
+function invalidSourceMessage(source, fileInfo, syntaxOnly) {
+  if (!syntaxOnly) {
+    return `Refusing to sync an invalid or oversized source file: ${source}`;
+  }
+  if (fileInfo.isSymbolicLink()) {
+    return (
+      `JavaScript source ${source} is a symbolic link. ` +
+      "Replace it with a regular file, then rerun --check-syntax. " +
+      "No GitHub requests were made."
+    );
+  }
+  if (fileInfo.size > BigInt(MAX_SOURCE_BYTES)) {
+    return (
+      `JavaScript source ${source} exceeds the ${MAX_SOURCE_BYTES / 1024} KiB limit. ` +
+      `Reduce it to ${MAX_SOURCE_BYTES / 1024} KiB or less, then rerun --check-syntax. ` +
+      "No GitHub requests were made."
+    );
+  }
+  return (
+    `JavaScript source ${source} is not a regular file. ` +
+    "Restore it as a regular file, then rerun --check-syntax. " +
+    "No GitHub requests were made."
+  );
+}
+
 function readSourceFiles({ syntaxOnly = false } = {}) {
   const sourceFiles = syntaxOnly
     ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
@@ -94,9 +119,8 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
     const sourcePath = path.join(ROOT, source);
     const isJavaScript = path.extname(source) === ".mjs";
     const fileInfo = fs.lstatSync(sourcePath, { bigint: true });
-    if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.size > BigInt(MAX_SOURCE_BYTES)) {
-      const action = syntaxOnly ? "check" : "sync";
-      throw new Error(`Refusing to ${action} an invalid or oversized source file: ${source}`);
+    if (fileInfo.isSymbolicLink() || fileInfo.size > BigInt(MAX_SOURCE_BYTES) || !fileInfo.isFile()) {
+      throw new Error(invalidSourceMessage(source, fileInfo, syntaxOnly));
     }
     const content = fs.readFileSync(sourcePath);
     const currentInfo = fs.lstatSync(sourcePath, { bigint: true });
