@@ -1653,6 +1653,70 @@ process.on("exit", saveCapture);
         self.assertEqual(self.run_source_git(["rev-parse", "HEAD"]), head_before_scan)
         self.assertEqual(readme.read_bytes(), clean_readme)
 
+    def test_history_credential_check_rejects_valid_non_ancestor_since_commit(self):
+        self.initialize_source_history()
+        base_branch = self.run_source_git(["branch", "--show-current"])
+        readme = self.source_root / "README.md"
+        history_token = "ghp_" + "N" * 36
+        private_line = f"GITHUB_TOKEN={history_token}"
+        readme.write_text(
+            f"SAFE_HISTORY_HEADER\n{private_line}\nSAFE_HISTORY_FOOTER\n",
+            encoding="utf-8",
+        )
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(["commit", "--quiet", "-m", "credential on current history"])
+        credential_commit = self.run_source_git(["rev-parse", "HEAD"])
+
+        self.run_source_git(["checkout", "-b", "unrelated-history-boundary"])
+        readme.write_text("SAFE_UNRELATED_BOUNDARY_CONTENT\n", encoding="utf-8")
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(["commit", "--quiet", "-m", "valid non-ancestor boundary"])
+        since_commit = self.run_source_git(["rev-parse", "HEAD"])
+        self.assertEqual(
+            self.run_source_git(["rev-parse", "--verify", f"{since_commit}^{{commit}}"]),
+            since_commit,
+        )
+
+        self.run_source_git(["checkout", base_branch])
+        head_before_scan = self.run_source_git(["rev-parse", "HEAD"])
+        self.assertEqual(head_before_scan, credential_commit)
+        self.assertNotEqual(since_commit, head_before_scan)
+        self.assertEqual(
+            self.run_source_git(["merge-base", since_commit, "HEAD"]),
+            credential_commit,
+        )
+        self.assertEqual(self.run_source_git(["rev-list", f"{since_commit}..HEAD"]), "")
+
+        result = self.run_sync(
+            token_value=None,
+            args=("--check-history-credentials", "--since", since_commit),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "The --since commit must be an ancestor of the current HEAD",
+            output,
+        )
+        self.assertIn("No history was scanned", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn("History credential check passed", output)
+        self.assertNotIn("Credential-like values were found", output)
+        for private_text in (
+            history_token,
+            private_line,
+            "SAFE_HISTORY_HEADER",
+            "SAFE_HISTORY_FOOTER",
+            "SAFE_UNRELATED_BOUNDARY_CONTENT",
+        ):
+            self.assertNotIn(private_text, output)
+        self.assert_safe_failure_output(result)
+        self.assertEqual(self.run_source_git(["rev-parse", "HEAD"]), head_before_scan)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(capture["preflightCalls"], [])
+
     def test_history_credential_check_fails_safely_for_large_history(self):
         self.initialize_source_history()
         real_git = shutil.which("git")
