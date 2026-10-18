@@ -1825,7 +1825,16 @@ process.on("exit", saveCapture);
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("credential-like value", result.stderr)
+            self.assertIn(
+                "Refusing to check local source files containing a credential-like value",
+                result.stderr,
+            )
             self.assertIn("README.md (line 2)", result.stderr)
+            self.assertIn(
+                "Rerun the local source check with --check-local after removing the reported value.",
+                result.stderr,
+            )
+            self.assertNotIn("Refusing to sync source files", result.stderr)
             self.assertIn("No GitHub requests were made", result.stderr)
             self.assertNotIn(credential, output)
             self.assertNotIn(source_line, output)
@@ -1886,6 +1895,15 @@ process.on("exit", saveCapture);
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Local source check found 2 issues", result.stderr)
+            self.assertIn(
+                "Refusing to check local source files containing a credential-like value",
+                result.stderr,
+            )
+            self.assertIn(
+                "Rerun the local source check with --check-local after removing the reported value.",
+                result.stderr,
+            )
+            self.assertNotIn("Refusing to sync source files", result.stderr)
             self.assertIn("README.md (line 2)", result.stderr)
             self.assertIn(
                 f"{source_path.name} (line 2, column {invalid_line.index(';') + 1})",
@@ -1982,8 +2000,17 @@ process.on("exit", saveCapture);
 
         result = self.run_sync(token_value=None, args=("--check-credentials",))
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Refusing to check local source files containing a credential-like value",
+            result.stderr,
+        )
         self.assertIn(f"{source_path.name} (line 1)", result.stderr)
         self.assertIn("Remove the value from this file", result.stderr)
+        self.assertIn(
+            "Rerun the local credential check with --check-credentials after removing the reported value.",
+            result.stderr,
+        )
+        self.assertNotIn("Refusing to sync source files", result.stderr)
         self.assertIn("No GitHub requests were made", result.stderr)
         self.assertNotIn(credential, result.stdout + result.stderr)
         self.assertNotIn(source_line, result.stdout + result.stderr)
@@ -2651,12 +2678,27 @@ process.on("exit", saveCapture);
                     result = self.run_sync(args=args, token_value=token_value)
                     output = result.stdout + result.stderr
                     self.assertNotEqual(result.returncode, 0)
+                    warning = (
+                        "Refusing to sync source files containing a credential-like value:"
+                        if mode == "sync"
+                        else "Refusing to check local source files containing a credential-like value:"
+                    )
                     self.assertEqual(
-                        result.stderr.count(
-                            "Refusing to sync source files containing a credential-like value:"
-                        ),
+                        result.stderr.count(warning),
                         1,
                     )
+                    if mode == "local check without token":
+                        self.assertIn(
+                            "Rerun the local credential check with --check-credentials after removing the reported value.",
+                            result.stderr,
+                        )
+                        self.assertNotIn(
+                            "Refusing to sync source files containing a credential-like value:",
+                            result.stderr,
+                        )
+                    else:
+                        self.assertNotIn("Refusing to check local source files", result.stderr)
+                        self.assertNotIn("Rerun the local credential check", result.stderr)
                     self.assertIn("README.md (line 2)", result.stderr)
                     self.assertIn("gitmesh-ultimate-core.mjs (line 3)", result.stderr)
                     self.assertIn("; ", result.stderr)

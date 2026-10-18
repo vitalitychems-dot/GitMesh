@@ -656,7 +656,8 @@ function readSourceContent(sourcePath, source, operation = "sync") {
   }
 }
 
-function credentialFindingErrorMessage(credentialFindings) {
+function credentialFindingErrorMessage(credentialFindings, operation = "sync") {
+  const isLocalCheck = isLocalCheckOperation(operation);
   const locations = credentialFindings.map(({ source, credentialLines }) => {
     const lineLabel = credentialLines.length === 1
       ? `line ${credentialLines[0]}`
@@ -674,10 +675,13 @@ function credentialFindingErrorMessage(credentialFindings) {
   const rotationGuidance = hasMultipleLocations
     ? "Rotate them only if they were already shared or published elsewhere."
     : "Rotate it only if it was already shared or published elsewhere.";
+  const rerunGuidance = isLocalCheck
+    ? ` Rerun the ${localCheckRecoveryCommand(operation)} after removing the reported value.`
+    : "";
   return (
-    `Refusing to sync source files containing a credential-like value: ${locations.join("; ")}. ` +
+    `Refusing to ${isLocalCheck ? "check local" : "sync"} source files containing a credential-like value: ${locations.join("; ")}. ` +
     `${removalGuidance}; use Replit Secrets for runtime credentials. ` +
-    `${rotationGuidance} No GitHub requests were made.`
+    `${rotationGuidance}${rerunGuidance} No GitHub requests were made.`
   );
 }
 
@@ -724,7 +728,7 @@ function readSourceFiles({
     credentialLines.length > 0
   );
   const credentialFailure = validateCredentials && credentialFindings.length > 0
-    ? credentialFindingErrorMessage(credentialFindings)
+    ? credentialFindingErrorMessage(credentialFindings, operation)
     : null;
   if (operation === "combined-check") {
     const syntaxFailures = [];
