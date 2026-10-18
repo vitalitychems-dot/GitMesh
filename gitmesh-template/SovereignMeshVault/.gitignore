@@ -1,0 +1,7 @@
+active_sigil.hash
+security_audit.log
+drops_inbound/
+bundles_outbound/
+ledger_matrix/*
+!ledger_matrix/
+!ledger_matrix/*.json
