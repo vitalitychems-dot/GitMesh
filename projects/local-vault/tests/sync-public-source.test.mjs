@@ -138,7 +138,7 @@ function assertSafeSyntaxFailure(fixture, expectedMessage) {
   }
 }
 
-function runSyncWithBranchSha(t, branchSha) {
+function runSyncWithBranchSha(t, branchSha, mode = "success") {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-branch-sha-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
 
@@ -147,6 +147,7 @@ function runSyncWithBranchSha(t, branchSha) {
   const requestLog = path.join(tempDir, "github-requests.json");
   const fakeToken = "test-only-not-a-real-token";
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
+  const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
 
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
@@ -176,6 +177,12 @@ function runSyncWithBranchSha(t, branchSha) {
       "    return response({ object: { sha: branchSha } });",
       "  }",
       '  if (method === "GET" && url.endsWith(`/git/commits/${branchSha}`)) {',
+      '    if (process.env.GITMESH_TEST_MODE === "base-commit-invalid-json") {',
+      "      return {",
+      "        ok: true,",
+      "        json: async () => { throw new Error(process.env.GITMESH_TEST_RESPONSE_SENTINEL); },",
+      "      };",
+      "    }",
       "    return response({ tree: { sha: baseTreeSha } });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/blobs")) {',
@@ -203,6 +210,8 @@ function runSyncWithBranchSha(t, branchSha) {
       PATH: process.env.PATH ?? "",
       GITHUB_TOKEN: fakeToken,
       GITMESH_TEST_BRANCH_SHA: branchSha,
+      GITMESH_TEST_MODE: mode,
+      GITMESH_TEST_RESPONSE_SENTINEL: privateResponseBody,
       GITMESH_TEST_REQUEST_LOG: requestLog,
       NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
     },
@@ -213,6 +222,7 @@ function runSyncWithBranchSha(t, branchSha) {
     requests: JSON.parse(fs.readFileSync(requestLog, "utf8")),
     fakeToken,
     privateSource,
+    privateResponseBody,
   };
 }
 
@@ -267,6 +277,29 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
   assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
   assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+});
+
+test("normal sync stops when the base-commit response JSON is unreadable", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "base-commit-invalid-json");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    `GitHub returned an invalid response during GET /git/commits/${branchSha}.`,
+  );
+  assert.deepEqual(fixture.requests, [
+    { method: "GET", url: `${apiRoot}/git/ref/heads/main` },
+    { method: "GET", url: `${apiRoot}/git/commits/${branchSha}` },
+  ]);
+  assert.ok(!fixture.output.includes(fixture.privateResponseBody), "response body leaked in output");
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  assert.ok(
+    fixture.requests.every(({ method }) => method === "GET"),
+    "sync attempted a write after the unreadable base-commit response",
+  );
 });
 
 test("syntax-check output overflow is private and stops source sync before GitHub", (t) => {
