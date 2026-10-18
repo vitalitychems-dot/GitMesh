@@ -138,6 +138,137 @@ function assertSafeSyntaxFailure(fixture, expectedMessage) {
   }
 }
 
+function runSyncWithBranchSha(t, branchSha) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-branch-sha-"));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+
+  const scriptPath = path.join(tempDir, "sync-public-source.mjs");
+  const preloadPath = path.join(tempDir, "mock-github-branch-sha.mjs");
+  const requestLog = path.join(tempDir, "github-requests.json");
+  const fakeToken = "test-only-not-a-real-token";
+  const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
+
+  for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
+    fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
+  }
+  fs.appendFileSync(path.join(tempDir, "README.md"), `\n${privateSource}\n`);
+  fs.writeFileSync(requestLog, "[]");
+  fs.writeFileSync(
+    preloadPath,
+    [
+      'import fs from "node:fs";',
+      'const response = (value) => ({ ok: true, json: async () => value });',
+      "const requests = [];",
+      "const branchSha = process.env.GITMESH_TEST_BRANCH_SHA;",
+      'const baseTreeSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";',
+      'const newTreeSha = "cccccccccccccccccccccccccccccccccccccccc";',
+      'const commitSha = "dddddddddddddddddddddddddddddddddddddddd";',
+      'const blobSha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";',
+      "globalThis.fetch = async (url, options = {}) => {",
+      '  const method = options.method ?? "GET";',
+      "  const request = { method, url };",
+      '  if (method === "POST" && url.endsWith("/git/trees")) {',
+      '    request.treePaths = JSON.parse(options.body).tree.map((entry) => entry.path);',
+      "  }",
+      "  requests.push(request);",
+      "  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));",
+      '  if (method === "GET" && url.endsWith("/git/ref/heads/main")) {',
+      "    return response({ object: { sha: branchSha } });",
+      "  }",
+      '  if (method === "GET" && url.endsWith(`/git/commits/${branchSha}`)) {',
+      "    return response({ tree: { sha: baseTreeSha } });",
+      "  }",
+      '  if (method === "POST" && url.endsWith("/git/blobs")) {',
+      "    return response({ sha: blobSha });",
+      "  }",
+      '  if (method === "POST" && url.endsWith("/git/trees")) {',
+      "    return response({ sha: newTreeSha });",
+      "  }",
+      '  if (method === "POST" && url.endsWith("/git/commits")) {',
+      "    return response({ sha: commitSha });",
+      "  }",
+      '  if (method === "PATCH" && url.endsWith("/git/refs/heads/main")) {',
+      "    return response({ object: { sha: commitSha } });",
+      "  }",
+      '  throw new Error("unexpected mocked GitHub request");',
+      "};",
+    ].join("\n"),
+  );
+
+  const result = spawnSync(process.execPath, [scriptPath], {
+    cwd: tempDir,
+    encoding: "utf8",
+    timeout: 30_000,
+    env: {
+      PATH: process.env.PATH ?? "",
+      GITHUB_TOKEN: fakeToken,
+      GITMESH_TEST_BRANCH_SHA: branchSha,
+      GITMESH_TEST_REQUEST_LOG: requestLog,
+      NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
+    },
+  });
+  return {
+    output: result.stdout + result.stderr,
+    result,
+    requests: JSON.parse(fs.readFileSync(requestLog, "utf8")),
+    fakeToken,
+    privateSource,
+  };
+}
+
+for (const [label, branchSha] of [
+  ["39-character lowercase SHA", "a".repeat(39)],
+  ["41-character lowercase SHA", "a".repeat(41)],
+  ["64-character lowercase SHA", "a".repeat(64)],
+  ["uppercase SHA", "A".repeat(40)],
+]) {
+  test(`normal sync rejects invalid ${label} before any writes`, (t) => {
+    const fixture = runSyncWithBranchSha(t, branchSha);
+    const expectedRefUrl =
+      "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/ref/heads/main";
+
+    assert.equal(fixture.result.status, 1, fixture.output);
+    assert.equal(
+      fixture.output.trim(),
+      "GitHub returned an invalid main branch commit; sync stopped.",
+    );
+    assert.deepEqual(fixture.requests, [{ method: "GET", url: expectedRefUrl }]);
+    assert.ok(!fixture.output.includes(branchSha), "malformed SHA leaked in output");
+    assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+    assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  });
+}
+
+test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha);
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 0, fixture.output);
+  assert.ok(fixture.output.includes("Synced 3 allowlisted source files"));
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/trees`],
+      ["POST", `${apiRoot}/git/commits`],
+      ["PATCH", `${apiRoot}/git/refs/heads/main`],
+    ],
+  );
+  assert.deepEqual(fixture.requests[5].treePaths, [
+    "projects/local-vault/gitmesh-ultimate-core.mjs",
+    "projects/local-vault/README.md",
+    "projects/local-vault/sync-public-source.mjs",
+  ]);
+  assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+});
+
 test("syntax-check output overflow is private and stops source sync before GitHub", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "enobufs");
   assertSafeSyntaxFailure(
