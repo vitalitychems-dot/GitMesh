@@ -47,6 +47,8 @@ This is separate from vault data transfer and makes an outbound HTTPS request to
 
 Run from this folder with `node ./sync-public-source.mjs`. It updates only the three fixed source paths listed in the script, on `main`, and uses a non-force ref update. It does not stage, read, or upload local vault data, bundles, or other workspace files. Do not put the token in a `.env` file, source file, Git remote URL, or command-line argument.
 
+JavaScript syntax validation times out after 10 seconds. Each GitHub API request times out after 20 seconds. These are fixed limits; there is no repository-specific or environment override.
+
 ## Security regression checks
 
 From the Replit workspace root, run `node --test projects/local-vault/tests/sync-public-source.test.mjs`. The checks use temporary files and mocked GitHub requests; they do not access the active vault or make network requests. Node.js is required; Python is not used.

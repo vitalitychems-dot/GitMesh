@@ -8,6 +8,51 @@ import test from "node:test";
 
 const SOURCE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+function timeoutFromSource(source, pattern, label) {
+  const match = source.match(pattern);
+  assert.ok(match, `could not find the ${label} timeout in sync-public-source.mjs`);
+  return Number(match[1].replaceAll("_", ""));
+}
+
+test("README timeout guidance matches the fixed source-sync limits", () => {
+  const implementation = fs.readFileSync(
+    path.join(SOURCE_DIR, "sync-public-source.mjs"),
+    "utf8",
+  );
+  const readme = fs.readFileSync(path.join(SOURCE_DIR, "README.md"), "utf8");
+  const syntaxTimeoutMs = timeoutFromSource(
+    implementation,
+    /\btimeout:\s*([\d_]+)/,
+    "Node syntax validation",
+  );
+  const githubTimeoutMs = timeoutFromSource(
+    implementation,
+    /AbortSignal\.timeout\(([\d_]+)\)/,
+    "GitHub request",
+  );
+
+  assert.equal(syntaxTimeoutMs % 1000, 0, "Node syntax timeout must use whole seconds");
+  assert.equal(githubTimeoutMs % 1000, 0, "GitHub request timeout must use whole seconds");
+  assert.ok(
+    readme.includes(
+      `JavaScript syntax validation times out after ${syntaxTimeoutMs / 1000} seconds.`,
+    ),
+    `README must document the ${syntaxTimeoutMs} ms syntax-validation timeout`,
+  );
+  assert.ok(
+    readme.includes(
+      `Each GitHub API request times out after ${githubTimeoutMs / 1000} seconds.`,
+    ),
+    `README must document the ${githubTimeoutMs} ms GitHub request timeout`,
+  );
+  assert.ok(
+    readme.includes(
+      "These are fixed limits; there is no repository-specific or environment override.",
+    ),
+    "README must explain that timeout values cannot be overridden",
+  );
+});
+
 function runSyncWithSyntaxResult(t, mode) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-syntax-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
