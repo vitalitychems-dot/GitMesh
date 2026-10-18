@@ -3679,6 +3679,99 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertNotEqual(remote_ref.returncode, 0)
 
+    def test_pre_push_hook_reports_multiple_files_in_stable_order(self):
+        remote = self.configure_push_remote()
+        outgoing_sources = [
+            (
+                self.template_root / "README.md",
+                "gitmesh-template/README.md",
+                "README_TOKEN",
+                "ghp_" + "A" * 36,
+                ["SAFE_README_HEADER"],
+                2,
+            ),
+            (
+                self.template_root / "gitmesh-ultimate-core.mjs",
+                "gitmesh-template/gitmesh-ultimate-core.mjs",
+                "// CONSOLE_TOKEN",
+                "github_pat_" + "B" * 40,
+                ["// SAFE_CONSOLE_HEADER", "// SAFE_CONSOLE_CONTEXT"],
+                3,
+            ),
+            (
+                self.template_root / "sync-public-source.mjs",
+                "gitmesh-template/sync-public-source.mjs",
+                "// SYNC_TOKEN",
+                "glpat-" + "C" * 24,
+                [
+                    "// SAFE_SYNC_HEADER",
+                    "// SAFE_SYNC_CONTEXT_ONE",
+                    "// SAFE_SYNC_CONTEXT_TWO",
+                ],
+                4,
+            ),
+        ]
+        expected_locations = [
+            f"{file_path.name} (line {line_number})"
+            for file_path, _git_path, _name, _credential, _context, line_number
+            in outgoing_sources
+        ]
+        original_contents = {
+            file_path: file_path.read_bytes()
+            for file_path, *_ in outgoing_sources
+        }
+        private_texts = []
+        # The report order is repository-relative path order, even when staging is reversed.
+        for file_path, git_path, variable_name, credential, safe_context, _line_number in reversed(outgoing_sources):
+            source_line = f"{variable_name}={credential}"
+            file_path.write_text(
+                "\n".join([*safe_context, source_line, "SAFE_SOURCE_FOOTER"]) + "\n",
+                encoding="utf-8",
+            )
+            staged = self.run_git(["add", git_path])
+            self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+            private_texts.extend([credential, source_line, *safe_context, "SAFE_SOURCE_FOOTER"])
+
+        # Keep the working-tree scanner executable; the outgoing scan reads committed blobs.
+        for file_path, original_content in original_contents.items():
+            file_path.write_bytes(original_content)
+
+        commit = self.run_git(
+            ["commit", "--no-verify", "-m", "create outgoing multi-file credential findings"]
+        )
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+        pushed_commit = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        hook_env = self.hook_environment_without_github_token()
+        hook_env["GITHUB_TOKEN"] = FAKE_GITHUB_TOKEN
+        result = self.run_git(
+            ["push", "origin", "HEAD:refs/heads/main"],
+            env=hook_env,
+        )
+        output = result.stdout + result.stderr
+        safe_output = output
+        for private_text in [*private_texts, FAKE_GITHUB_TOKEN]:
+            safe_output = safe_output.replace(private_text, "[redacted test content]")
+
+        self.assertNotEqual(result.returncode, 0, safe_output)
+        self.assertIn(
+            "Credential-like values were found in outgoing GitMesh source changes:",
+            output,
+            safe_output,
+        )
+        self.assertIn("; ".join(expected_locations), output, safe_output)
+        self.assertIn("Push blocked", output, safe_output)
+        self.assertIn("No GitHub requests were made", output, safe_output)
+        for private_text in private_texts:
+            self.assertNotIn(private_text, output, safe_output)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, output, safe_output)
+        self.assertNotIn(pushed_commit, output, safe_output)
+        self.assertNotIn("network request attempted", output, safe_output)
+        self.assertFalse(self.network_marker.exists())
+        remote_ref = self.run_git(
+            ["--git-dir", str(remote), "rev-parse", "--verify", "refs/heads/main"]
+        )
+        self.assertNotEqual(remote_ref.returncode, 0)
+
     def test_pre_push_hook_allows_clean_outgoing_commits_without_github_access(self):
         remote = self.configure_push_remote()
         self.readme.write_text(self.baseline_readme.decode() + "\nClean outgoing change.\n")

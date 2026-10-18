@@ -126,6 +126,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_rejects_invalid_staged_git_timeout_settings",
   "test_precommit_hook_passes_clean_source_and_ignores_unrelated_files",
   "test_pre_push_hook_blocks_outgoing_credentials_without_exposing_them",
+  "test_pre_push_hook_reports_multiple_files_in_stable_order",
   "test_pre_push_hook_allows_clean_outgoing_commits_without_github_access",
   "test_pre_push_hook_is_opt_in_by_default",
   "test_hook_setup_enables_only_repository_local_path_when_safe",
@@ -1430,7 +1431,7 @@ function checkPushCredentials() {
       const key = `${source}\0${line}`;
       if (!seenFindings.has(key)) {
         seenFindings.add(key);
-        findings.push({ source, line });
+        findings.push({ source, gitPath, line });
       }
       if (findings.length > MAX_HISTORY_FINDINGS) {
         throw new Error(
@@ -1440,6 +1441,13 @@ function checkPushCredentials() {
     }
   }
 
+  // Keep outgoing diagnostics stable by repository-relative path, then source line.
+  findings.sort((left, right) => {
+    if (left.gitPath !== right.gitPath) {
+      return left.gitPath < right.gitPath ? -1 : 1;
+    }
+    return left.line - right.line;
+  });
   if (findings.length > 0) {
     const locations = findings.map(
       ({ source, line }) => `${source} (line ${line})`,
