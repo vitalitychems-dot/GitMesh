@@ -4380,6 +4380,95 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_reports_all_staged_source_repair_issues(self):
+        readme = self.readme
+        core_source = self.template_root / "gitmesh-ultimate-core.mjs"
+        sync_source = self.template_root / "sync-public-source.mjs"
+        original_contents = {
+            readme: readme.read_bytes(),
+            core_source: core_source.read_bytes(),
+            sync_source: sync_source.read_bytes(),
+        }
+        credential = "ghp_" + "R" * 36
+        credential_line = f"staged_secret={credential}"
+        syntax_sentinel = "PRIVATE_MULTI_FILE_SYNTAX_SENTINEL"
+        oversized_sentinel = b"PRIVATE_MULTI_FILE_OVERSIZED_SENTINEL"
+        staged_contents = {
+            readme: f"SAFE_README_CONTEXT\n{credential_line}\n".encode("utf-8"),
+            core_source: (
+                "export const stagedRepair = true;\n"
+                f"const stagedRepairBroken = ; // {syntax_sentinel}\n"
+            ).encode("utf-8"),
+            sync_source: oversized_sentinel + b"\n" + b"x" * (2 * 1024 * 1024),
+        }
+        git_paths = [
+            "gitmesh-template/README.md",
+            "gitmesh-template/gitmesh-ultimate-core.mjs",
+            "gitmesh-template/sync-public-source.mjs",
+        ]
+        original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        try:
+            for file_path, content in staged_contents.items():
+                file_path.write_bytes(content)
+            added = self.run_git(["add", *git_paths])
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+
+            # The hook must inspect all three staged blobs, even though the
+            # working tree is restored before the commit is attempted.
+            for file_path, content in original_contents.items():
+                file_path.write_bytes(content)
+
+            result = self.run_git(
+                ["commit", "-m", "report every staged source repair issue"],
+                env=self.hook_environment_without_github_token(),
+            )
+            output = result.stdout + result.stderr
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Refusing to commit: these staged allowlisted source files need repair",
+                output,
+            )
+            self.assertIn("README.md (line 2: GitHub token)", output)
+            self.assertIn("Remove the value from this staged file", output)
+            self.assertIn("gitmesh-ultimate-core.mjs", output)
+            self.assertRegex(output, r"\(line 2, column \d+\)")
+            self.assertIn("stage the fix, and retry the commit", output)
+            self.assertIn(
+                "Refusing to check an oversized staged source file: sync-public-source.mjs",
+                output,
+            )
+            self.assertIn("Save a smaller intended version no larger than 512 KiB", output)
+            self.assertIn(
+                'from the repository root run "git add gitmesh-template/sync-public-source.mjs" and retry the commit',
+                output,
+            )
+            self.assertIn("No GitHub requests were made", output)
+            for private_text in (
+                credential,
+                credential_line,
+                syntax_sentinel,
+                "const stagedRepairBroken = ;",
+                oversized_sentinel.decode("utf-8"),
+                "SyntaxError",
+                "[stdin]",
+                "network request attempted",
+                FAKE_GITHUB_TOKEN,
+            ):
+                self.assertNotIn(private_text, output)
+            self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
+            self.assertEqual(
+                self.run_git(["diff", "--cached", "--name-only"]).stdout.strip().splitlines(),
+                git_paths,
+            )
+            for file_path, content in original_contents.items():
+                self.assertEqual(file_path.read_bytes(), content)
+            self.assertFalse(self.network_marker.exists())
+        finally:
+            for file_path, content in original_contents.items():
+                file_path.write_bytes(content)
+
     def test_precommit_hook_passes_clean_staged_javascript(self):
         source = self.template_root / "gitmesh-ultimate-core.mjs"
         source.write_bytes(
