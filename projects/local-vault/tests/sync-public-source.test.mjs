@@ -148,6 +148,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
   const fakeToken = "test-only-not-a-real-token";
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
+  const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
 
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
@@ -174,6 +175,17 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       "  requests.push(request);",
       "  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));",
       '  if (method === "GET" && url.endsWith("/git/ref/heads/main")) {',
+      '    if (process.env.GITMESH_TEST_MODE === "branch-http-503") {',
+      "      return {",
+      "        ok: false,",
+      "        status: 503,",
+      "        statusText: process.env.GITMESH_TEST_RESPONSE_SENTINEL,",
+      "        json: async () => { throw new Error(process.env.GITMESH_TEST_RESPONSE_SENTINEL); },",
+      "      };",
+      "    }",
+      '    if (process.env.GITMESH_TEST_MODE === "branch-network-error") {',
+      "      throw new Error(process.env.GITMESH_TEST_NETWORK_SENTINEL);",
+      "    }",
       '    if (process.env.GITMESH_TEST_MODE === "branch-invalid-json") {',
       "      return {",
       "        ok: true,",
@@ -218,6 +230,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       GITMESH_TEST_BRANCH_SHA: branchSha,
       GITMESH_TEST_MODE: mode,
       GITMESH_TEST_RESPONSE_SENTINEL: privateResponseBody,
+      GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
       GITMESH_TEST_REQUEST_LOG: requestLog,
       NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
     },
@@ -229,6 +242,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
     fakeToken,
     privateSource,
     privateResponseBody,
+    privateNetworkError,
   };
 }
 
@@ -327,6 +341,35 @@ test("normal sync stops when the branch response JSON is unreadable", (t) => {
     "sync attempted a source read or write after the unreadable branch response",
   );
 });
+
+for (const [mode, label, expectedMessage] of [
+  [
+    "branch-http-503",
+    "HTTP 503",
+    "GitHub request failed with HTTP 503 during GET /git/ref/heads/main. " +
+      "Check the connection and retry; sync stopped.",
+  ],
+  [
+    "branch-network-error",
+    "a network failure",
+    "GitHub request failed during GET /git/ref/heads/main. " +
+      "Check the connection and retry; sync stopped.",
+  ],
+]) {
+  test(`normal sync gives safe rerun guidance for ${label} on the branch lookup`, (t) => {
+    const fixture = runSyncWithBranchSha(t, "a".repeat(40), mode);
+    const expectedRefUrl =
+      "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/ref/heads/main";
+
+    assert.equal(fixture.result.status, 1, fixture.output);
+    assert.equal(fixture.output.trim(), expectedMessage);
+    assert.deepEqual(fixture.requests, [{ method: "GET", url: expectedRefUrl }]);
+    assert.ok(!fixture.output.includes(fixture.privateResponseBody), "response data leaked in output");
+    assert.ok(!fixture.output.includes(fixture.privateNetworkError), "network diagnostic leaked in output");
+    assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+    assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  });
+}
 
 test("syntax-check output overflow is private and stops source sync before GitHub", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "enobufs");
