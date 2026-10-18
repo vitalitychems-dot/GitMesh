@@ -138,6 +138,8 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_pre_push_hook_blocks_outgoing_credentials_without_exposing_them",
   "test_pre_push_hook_reports_multiple_files_in_stable_order",
   "test_pre_push_hook_allows_clean_outgoing_commits_without_github_access",
+  "test_pre_push_hook_blocks_credentials_pushed_to_existing_branch",
+  "test_pre_push_hook_allows_clean_update_to_existing_branch",
   "test_pre_push_hook_is_opt_in_by_default",
   "test_hook_setup_enables_only_repository_local_path_when_safe",
   "test_hook_setup_preserves_existing_local_hooks_path",
