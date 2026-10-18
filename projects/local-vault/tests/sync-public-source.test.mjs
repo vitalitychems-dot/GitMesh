@@ -100,6 +100,9 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
     fs.unlinkSync(sourcePath);
     fs.mkdirSync(sourcePath);
     fs.writeFileSync(path.join(sourcePath, "private-data"), privateSource);
+  } else if (mode === "eacces-open") {
+    fs.appendFileSync(sourcePath, `\n// ${privateSource}\n`);
+    fs.appendFileSync(scriptPath, `\n// ${privateSource}\n`);
   } else if (mode !== "success") {
     fs.writeFileSync(sourcePath, `export const ${privateSource} = ;\n`);
   } else {
@@ -115,6 +118,11 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
       "const originalReadFileSync = fs.readFileSync.bind(fs);",
       "let sourceChangedDuringRead = false;",
       "fs.readFileSync = (file, ...args) => {",
+      '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "eacces-open" && typeof file === "string" && file.endsWith("sync-public-source.mjs")) {',
+      `    const error = new Error("EACCES: permission denied ${privateNodeOutput}");`,
+      '    error.code = "EACCES";',
+      "    throw error;",
+      "  }",
       "  const content = originalReadFileSync(file, ...args);",
       '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "changed-during-read" && !sourceChangedDuringRead && typeof file === "string" && file.endsWith("gitmesh-ultimate-core.mjs")) {',
       "    sourceChangedDuringRead = true;",
@@ -126,7 +134,7 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
       '  if (command === process.execPath && Array.isArray(args) && args.includes("--check")) {',
       '    fs.writeFileSync(process.env.GITMESH_TEST_SYNTAX_MARKER, "invoked");',
       '    const mode = process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE;',
-      '    if (mode === "syntax" || mode === "success") return originalSpawnSync(command, args, options);',
+      '    if (mode === "syntax" || mode === "success" || mode === "eacces-open") return originalSpawnSync(command, args, options);',
       '    const errorCode = mode === "timeout" ? "ETIMEDOUT" : "ENOBUFS";',
       "    return {",
       `      error: mode === "interrupted" ? undefined : Object.assign(new Error("${privateNodeOutput}"), { code: errorCode }),`,
@@ -170,7 +178,17 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
     result,
     syntaxMarker,
     fetchMarker,
-    privateTexts: [privateSource, privateNodeOutput, fakeToken, "ENOBUFS", "[stdin]", "SyntaxError"],
+    scriptPath,
+    privateTexts: [
+      privateSource,
+      privateNodeOutput,
+      fakeToken,
+      "ENOBUFS",
+      "[stdin]",
+      "SyntaxError",
+      "EACCES",
+      "permission denied",
+    ],
   };
 }
 
@@ -465,6 +483,25 @@ test("genuine syntax errors still report invalid JavaScript without parser outpu
       "gitmesh-ultimate-core.mjs. Correct the JavaScript and retry the source sync. " +
       "No GitHub requests were made.",
   );
+});
+
+test("normal sync stops safely when an allowlisted source cannot be opened", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "eacces-open");
+  const { output, result, syntaxMarker, fetchMarker, scriptPath, privateTexts } = fixture;
+
+  assert.notEqual(result.status, 0, output);
+  assert.equal(
+    output.trim(),
+    "JavaScript source sync-public-source.mjs could not be opened. " +
+      "Check its permissions and confirm the file still exists, then retry the source sync. " +
+      "No GitHub requests were made.",
+  );
+  assert.ok(fs.existsSync(syntaxMarker), "earlier source validation was not reached");
+  assert.ok(!fs.existsSync(fetchMarker), "source sync attempted a GitHub request");
+  assert.ok(!output.includes(scriptPath), "absolute filesystem path leaked");
+  for (const privateText of privateTexts) {
+    assert.ok(!output.includes(privateText), `private diagnostic leaked: ${privateText}`);
+  }
 });
 
 for (const [mode, problem, expectedReason] of [

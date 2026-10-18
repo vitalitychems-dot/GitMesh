@@ -122,7 +122,19 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
     if (fileInfo.isSymbolicLink() || fileInfo.size > BigInt(MAX_SOURCE_BYTES) || !fileInfo.isFile()) {
       throw new Error(invalidSourceMessage(source, fileInfo, syntaxOnly));
     }
-    const content = fs.readFileSync(sourcePath);
+    let content;
+    try {
+      content = fs.readFileSync(sourcePath);
+    } catch {
+      const fileLabel = isJavaScript ? "JavaScript source" : "Source file";
+      const repairInstruction = syntaxOnly
+        ? "Check its permissions and confirm the file still exists, then rerun --check-syntax."
+        : "Check its permissions and confirm the file still exists, then retry the source sync.";
+      throw new Error(
+        `${fileLabel} ${source} could not be opened. ${repairInstruction} ` +
+        "No GitHub requests were made.",
+      );
+    }
     const currentInfo = fs.lstatSync(sourcePath, { bigint: true });
     if (!sameFileSnapshot(fileInfo, currentInfo) || BigInt(content.length) !== fileInfo.size) {
       const retryInstruction = syntaxOnly
