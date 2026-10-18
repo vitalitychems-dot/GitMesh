@@ -4290,6 +4290,93 @@ class PreCommitHookTests(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(remote_head, local_head)
 
+    def test_pre_push_hook_blocks_credentials_pushed_to_existing_branch(self):
+        remote = self.configure_push_remote()
+        seed = self.run_git(
+            ["push", "--no-verify", "origin", "HEAD:refs/heads/main"]
+        )
+        self.assertEqual(seed.returncode, 0, seed.stdout + seed.stderr)
+        baseline_head = self.run_git(
+            ["--git-dir", str(remote), "rev-parse", "refs/heads/main"]
+        ).stdout.strip()
+        self.assertEqual(
+            baseline_head,
+            self.run_git(["rev-parse", "HEAD"]).stdout.strip(),
+        )
+
+        credential = "ghp_" + "S" * 36
+        private_context = "PRIVATE_EXISTING_BRANCH_SOURCE_SENTINEL"
+        credential_line = f"staged_secret={credential}"
+        self.readme.write_text(
+            f"{private_context}\n{credential_line}\n",
+            encoding="utf-8",
+        )
+        self.run_git(["add", "gitmesh-template/README.md"])
+        commit = self.run_git(
+            ["commit", "--no-verify", "-m", "commit secret after existing remote tip"]
+        )
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+
+        pushed_commit = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        result = self.run_git(
+            ["push", "origin", "HEAD:refs/heads/main"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Credential-like values were found in outgoing GitMesh source changes", output)
+        self.assertIn("README.md (line 2)", output)
+        self.assertIn("Push blocked", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn(credential, output)
+        self.assertNotIn(credential_line, output)
+        self.assertNotIn(private_context, output)
+        self.assertNotIn(pushed_commit, output)
+        self.assertNotIn("network request attempted", output)
+        self.assertFalse(self.network_marker.exists())
+        remote_head = self.run_git(
+            ["--git-dir", str(remote), "rev-parse", "refs/heads/main"]
+        ).stdout.strip()
+        self.assertEqual(remote_head, baseline_head)
+
+    def test_pre_push_hook_allows_clean_update_to_existing_branch(self):
+        remote = self.configure_push_remote()
+        seed = self.run_git(
+            ["push", "--no-verify", "origin", "HEAD:refs/heads/main"]
+        )
+        self.assertEqual(seed.returncode, 0, seed.stdout + seed.stderr)
+        baseline_head = self.run_git(
+            ["--git-dir", str(remote), "rev-parse", "refs/heads/main"]
+        ).stdout.strip()
+
+        self.readme.write_text(
+            self.baseline_readme.decode("utf-8") + "\nClean update to existing branch.\n",
+            encoding="utf-8",
+        )
+        self.run_git(["add", "gitmesh-template/README.md"])
+        commit = self.run_git(["commit", "-m", "clean update to existing remote branch"])
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+        local_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        result = self.run_git(
+            ["push", "origin", "HEAD:refs/heads/main"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Pre-push credential check passed", output)
+        self.assertIn("scanned 1 outgoing commits", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn("network request attempted", output)
+        self.assertFalse(self.network_marker.exists())
+        remote_head = self.run_git(
+            ["--git-dir", str(remote), "rev-parse", "refs/heads/main"]
+        ).stdout.strip()
+        self.assertNotEqual(remote_head, baseline_head)
+        self.assertEqual(remote_head, local_head)
+
     def test_pre_push_hook_is_opt_in_by_default(self):
         remote = self.configure_push_remote(enable_check=False)
         credential = "ghp_" + "M" * 36
