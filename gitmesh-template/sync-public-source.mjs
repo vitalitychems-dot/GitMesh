@@ -37,17 +37,18 @@ const ALLOWED_FILES = [
   },
 ];
 const EMBEDDED_CREDENTIAL_PATTERNS = [
-  { id: "github-prefixed-token", pattern: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/ },
-  { id: "github-fine-grained-token", pattern: /\bgithub_pat_[A-Za-z0-9_]{30,}\b/ },
-  { id: "gitlab-token", pattern: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
-  { id: "npm-token", pattern: /\bnpm_[A-Za-z0-9]{30,}\b/ },
-  { id: "slack-token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/ },
-  { id: "google-api-key", pattern: /\bAIza[0-9A-Za-z_-]{35}\b/ },
-  { id: "openai-prefixed-key", pattern: /\bsk-(?:proj|admin|svcacct)-[A-Za-z0-9_-]{20,}\b/ },
-  { id: "openai-legacy-key", pattern: /\bsk-[A-Za-z0-9]{40,}\b/ },
-  { id: "stripe-secret-key", pattern: /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/ },
+  { id: "github-prefixed-token", family: "GitHub token", pattern: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/ },
+  { id: "github-fine-grained-token", family: "GitHub fine-grained token", pattern: /\bgithub_pat_[A-Za-z0-9_]{30,}\b/ },
+  { id: "gitlab-token", family: "GitLab token", pattern: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
+  { id: "npm-token", family: "npm token", pattern: /\bnpm_[A-Za-z0-9]{30,}\b/ },
+  { id: "slack-token", family: "Slack token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/ },
+  { id: "google-api-key", family: "Google API key", pattern: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+  { id: "openai-prefixed-key", family: "OpenAI API key", pattern: /\bsk-(?:proj|admin|svcacct)-[A-Za-z0-9_-]{20,}\b/ },
+  { id: "openai-legacy-key", family: "OpenAI API key", pattern: /\bsk-[A-Za-z0-9]{40,}\b/ },
+  { id: "stripe-secret-key", family: "Stripe secret key", pattern: /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/ },
   {
     id: "private-key-header",
+    family: "Private key",
     pattern: /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/,
   },
 ];
@@ -232,14 +233,23 @@ function encodedBranchName(branch) {
   return encodeURIComponent(branch);
 }
 
-function findEmbeddedCredentialLines(text) {
+function findEmbeddedCredentialFindings(text) {
   return text
     .split(/\r\n|[\n\r\u2028\u2029]/)
-    .flatMap((line, index) =>
-      EMBEDDED_CREDENTIAL_PATTERNS.some(({ pattern }) => pattern.test(line))
-        ? [index + 1]
-        : [],
-    );
+    .flatMap((line, index) => {
+      const families = [...new Set(
+        EMBEDDED_CREDENTIAL_PATTERNS
+          .filter(({ pattern }) => pattern.test(line))
+          .map(({ family }) => family),
+      )];
+      return families.length > 0
+        ? [{ line: index + 1, families }]
+        : [];
+    });
+}
+
+function findEmbeddedCredentialLines(text) {
+  return findEmbeddedCredentialFindings(text).map(({ line }) => line);
 }
 
 function isLocalCheckOperation(operation) {
@@ -1600,21 +1610,22 @@ function checkStagedCredentials() {
         );
       }
     }
-    const credentialLines = findEmbeddedCredentialLines(text);
-    if (credentialLines.length > 0) {
-      credentialFindings.push({ source, credentialLines });
+    const credentialMatches = findEmbeddedCredentialFindings(text);
+    if (credentialMatches.length > 0) {
+      credentialFindings.push({ source, credentialMatches });
     }
   }
 
   if (credentialFindings.length > 0) {
-    const locations = credentialFindings.map(({ source, credentialLines }) => {
-      const lineLabel = credentialLines.length === 1
-        ? `line ${credentialLines[0]}`
-        : `lines ${credentialLines.join(", ")}`;
+    const locations = credentialFindings.map(({ source, credentialMatches }) => {
+      const lineLabel = credentialMatches
+        .map(({ line, families }) => `line ${line}: ${families.join(", ")}`)
+        .join("; ");
       return `${source} (${lineLabel})`;
     });
     const hasMultipleLocations = credentialFindings.some(
-      ({ credentialLines }) => credentialLines.length > 1,
+      ({ credentialMatches }) => credentialMatches.length > 1 ||
+        credentialMatches.some(({ families }) => families.length > 1),
     ) || credentialFindings.length > 1;
     const removalGuidance = credentialFindings.length > 1
       ? "Remove the values from these staged files"

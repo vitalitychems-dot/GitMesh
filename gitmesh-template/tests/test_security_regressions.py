@@ -94,6 +94,18 @@ CREDENTIAL_HOOK_TEST_CASES = {
         ("PGP private key", "-----BEGIN PGP PRIVATE KEY-----"),
     ),
 }
+CREDENTIAL_HOOK_FAMILY_LABELS = {
+    "github-prefixed-token": "GitHub token",
+    "github-fine-grained-token": "GitHub fine-grained token",
+    "gitlab-token": "GitLab token",
+    "npm-token": "npm token",
+    "slack-token": "Slack token",
+    "google-api-key": "Google API key",
+    "openai-prefixed-key": "OpenAI API key",
+    "openai-legacy-key": "OpenAI API key",
+    "stripe-secret-key": "Stripe secret key",
+    "private-key-header": "Private key",
+}
 CREDENTIAL_HOOK_NEAR_MISS_CASES = {
     "github-prefixed-token": (
         ("below-minimum", "ghp_" + "A" * 29),
@@ -3832,7 +3844,7 @@ class PreCommitHookTests(unittest.TestCase):
         output = result.stdout + result.stderr
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("README.md (line 2)", output)
+        self.assertIn("README.md (line 2: GitHub token)", output)
         self.assertIn("Remove the value from this staged file", output)
         self.assertIn("No GitHub requests were made", output)
         self.assertNotIn(credential, output)
@@ -3908,15 +3920,15 @@ class PreCommitHookTests(unittest.TestCase):
 
     def test_precommit_hook_blocks_every_supported_credential_pattern(self):
         credential_cases = [
-            case
-            for pattern_cases in CREDENTIAL_HOOK_TEST_CASES.values()
-            for case in pattern_cases
+            (pattern_id, label, credential)
+            for pattern_id, pattern_cases in CREDENTIAL_HOOK_TEST_CASES.items()
+            for label, credential in pattern_cases
         ]
         hook_env = self.hook_environment_without_github_token()
         self.assertNotIn("GITHUB_TOKEN", hook_env)
 
-        for label, credential in credential_cases:
-            with self.subTest(credential_family=label):
+        for pattern_id, label, credential in credential_cases:
+            with self.subTest(credential_family=pattern_id, token_variant=label):
                 source_line = f"staged_credential_{label.replace(' ', '_')}={credential}"
                 self.readme.write_text(f"safe source context\n{source_line}\n")
                 self.run_git(["add", "gitmesh-template/README.md"])
@@ -3932,7 +3944,10 @@ class PreCommitHookTests(unittest.TestCase):
                 safe_output = output.replace(credential, "[redacted test credential]")
 
                 self.assertNotEqual(result.returncode, 0, safe_output)
-                self.assertIn("README.md (line 2)", output)
+                self.assertIn(
+                    f"README.md (line 2: {CREDENTIAL_HOOK_FAMILY_LABELS[pattern_id]})",
+                    output,
+                )
                 self.assertIn("No GitHub requests were made", output)
                 self.assertFalse(credential in output, safe_output)
                 self.assertFalse(source_line in output, safe_output)
@@ -3984,6 +3999,10 @@ class PreCommitHookTests(unittest.TestCase):
             r'\bid\s*:\s*"([a-z0-9-]+)"',
             pattern_block_text,
         )
+        scanner_pattern_families = re.findall(
+            r'\bfamily\s*:\s*"([^"]+)"',
+            pattern_block_text,
+        )
         scanner_pattern_count = len(re.findall(r"\bpattern\s*:", pattern_block_text))
 
         self.assertEqual(
@@ -4009,6 +4028,16 @@ class PreCommitHookTests(unittest.TestCase):
         self.assertTrue(
             all(CREDENTIAL_HOOK_TEST_CASES[pattern_id] for pattern_id in scanner_ids),
             "Every scanner credential pattern needs at least one synthetic hook test value.",
+        )
+        self.assertEqual(
+            scanner_pattern_ids,
+            list(CREDENTIAL_HOOK_FAMILY_LABELS),
+            "Every scanner pattern needs a stable, safe family label in registry order.",
+        )
+        self.assertEqual(
+            scanner_pattern_families,
+            list(CREDENTIAL_HOOK_FAMILY_LABELS.values()),
+            "Keep user-facing family labels aligned with the scanner pattern registry.",
         )
         near_miss_ids = set(CREDENTIAL_HOOK_NEAR_MISS_CASES)
         missing_near_misses = sorted(scanner_ids - near_miss_ids)
@@ -4135,7 +4164,10 @@ class PreCommitHookTests(unittest.TestCase):
                 output = result.stdout + result.stderr
 
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("README.md (lines 2, 4)", output)
+                self.assertIn(
+                    "README.md (line 2: GitHub token; line 4: GitHub fine-grained token)",
+                    output,
+                )
                 self.assertIn("No GitHub requests were made", output)
                 for private_text in (
                     first_secret,
@@ -4162,6 +4194,7 @@ class PreCommitHookTests(unittest.TestCase):
                 "gitmesh-template/README.md",
                 "README_TOKEN",
                 "ghp_" + "A" * 36,
+                "GitHub token",
                 ["SAFE_README_HEADER"],
                 2,
             ),
@@ -4170,6 +4203,7 @@ class PreCommitHookTests(unittest.TestCase):
                 "gitmesh-template/gitmesh-ultimate-core.mjs",
                 "CONSOLE_TOKEN",
                 "github_pat_" + "B" * 40,
+                "GitHub fine-grained token",
                 ["SAFE_CONSOLE_HEADER", "SAFE_CONSOLE_CONTEXT"],
                 3,
             ),
@@ -4178,6 +4212,7 @@ class PreCommitHookTests(unittest.TestCase):
                 "gitmesh-template/sync-public-source.mjs",
                 "SYNC_TOKEN",
                 "glpat-" + "C" * 24,
+                "GitLab token",
                 ["SAFE_SYNC_HEADER", "SAFE_SYNC_CONTEXT_ONE", "SAFE_SYNC_CONTEXT_TWO"],
                 4,
             ),
@@ -4188,12 +4223,12 @@ class PreCommitHookTests(unittest.TestCase):
         }
         private_texts = []
         expected_locations = [
-            f"{file_path.name} (line {line_number})"
-            for file_path, _git_path, _variable_name, _credential, _safe_context, line_number
+            f"{file_path.name} (line {line_number}: {family})"
+            for file_path, _git_path, _variable_name, _credential, family, _safe_context, line_number
             in staged_sources
         ]
         # Diagnostics are documented in repository-relative path order, not staging order.
-        for file_path, git_path, variable_name, credential, safe_context, _line_number in reversed(staged_sources):
+        for file_path, git_path, variable_name, credential, _family, safe_context, _line_number in reversed(staged_sources):
             source_line = f"{variable_name}={credential}"
             staged_text = "\n".join([*safe_context, source_line, "SAFE_SOURCE_FOOTER"]) + "\n"
             file_path.write_bytes(staged_text.encode("utf-8"))
@@ -4266,6 +4301,7 @@ class PreCommitHookTests(unittest.TestCase):
                 "gitmesh-template/README.md",
                 "README_TOKEN",
                 "ghp_" + "A" * 36,
+                "GitHub token",
                 ["SAFE_README_HEADER"],
                 2,
             ),
@@ -4274,6 +4310,7 @@ class PreCommitHookTests(unittest.TestCase):
                 "gitmesh-template/gitmesh-ultimate-core.mjs",
                 "CONSOLE_TOKEN",
                 "github_pat_" + "B" * 40,
+                "GitHub fine-grained token",
                 ["SAFE_CONSOLE_HEADER", "SAFE_CONSOLE_CONTEXT"],
                 3,
             ),
@@ -4282,6 +4319,7 @@ class PreCommitHookTests(unittest.TestCase):
                 "gitmesh-template/sync-public-source.mjs",
                 "SYNC_TOKEN",
                 "glpat-" + "C" * 24,
+                "GitLab token",
                 ["SAFE_SYNC_HEADER", "SAFE_SYNC_CONTEXT_ONE", "SAFE_SYNC_CONTEXT_TWO"],
                 4,
             ),
@@ -4292,14 +4330,14 @@ class PreCommitHookTests(unittest.TestCase):
         }
         private_texts = []
         expected_locations = []
-        for file_path, git_path, variable_name, credential, safe_context, line_number in staged_sources:
+        for file_path, git_path, variable_name, credential, family, safe_context, line_number in staged_sources:
             source_line = f"{variable_name}={credential}"
             staged_text = "\n".join([*safe_context, source_line, "SAFE_SOURCE_FOOTER"]) + "\n"
             file_path.write_bytes(staged_text.encode("utf-8"))
             staged = self.run_git_at(worktree_root, ["add", git_path])
             self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
             private_texts.extend([credential, source_line, *safe_context, "SAFE_SOURCE_FOOTER"])
-            expected_locations.append(f"{file_path.name} (line {line_number})")
+            expected_locations.append(f"{file_path.name} (line {line_number}: {family})")
 
         # The linked-worktree hook must inspect the staged blobs, not restored files.
         for file_path, original_content in original_contents.items():
@@ -5281,7 +5319,7 @@ class HookInstallerTests(unittest.TestCase):
             0,
             output.replace(credential, "[redacted test credential]"),
         )
-        self.assertIn("README.md (line 1)", output)
+        self.assertIn("README.md (line 1: GitHub token)", output)
         self.assertNotIn(credential, output)
         self.assertEqual(
             self.run_git_at(selected_worktree, ["rev-parse", "HEAD"]).stdout.strip(),
@@ -5412,7 +5450,7 @@ class HookInstallerTests(unittest.TestCase):
         commit = self.run_git(["commit", "-m", "installer enabled hook"])
         output = commit.stdout + commit.stderr
         self.assertNotEqual(commit.returncode, 0)
-        self.assertIn("README.md (line 1)", output)
+        self.assertIn("README.md (line 1: GitHub token)", output)
         self.assertNotIn(credential, output)
 
     def test_chain_existing_hooks_run_first_and_preserve_configuration(self):
@@ -6089,7 +6127,7 @@ class HookInstallerTests(unittest.TestCase):
         commit = self.run_git_at(worktree_root, ["commit", "-m", "linked worktree hook check"])
         output = commit.stdout + commit.stderr
         self.assertNotEqual(commit.returncode, 0, output.replace(credential, "[redacted test credential]"))
-        self.assertIn("README.md (line 1)", output)
+        self.assertIn("README.md (line 1: GitHub token)", output)
         self.assertNotIn(credential, output)
         self.assertEqual(
             self.run_git_at(worktree_root, ["rev-parse", "HEAD"]).stdout.strip(),
@@ -6168,7 +6206,7 @@ class HookInstallerTests(unittest.TestCase):
             0,
             output.replace(credential, "[redacted test credential]"),
         )
-        self.assertIn("README.md (line 1)", output)
+        self.assertIn("README.md (line 1: GitHub token)", output)
         self.assertNotIn(credential, output)
         self.assertEqual(
             self.run_git_at(moved_root, ["rev-parse", "HEAD"]).stdout.strip(),
@@ -6356,7 +6394,7 @@ class HookInstallerTests(unittest.TestCase):
             output.replace(credential, "[redacted test credential]"),
         )
         self.assertIn("custom-pre-commit-ran", output)
-        self.assertIn("README.md (line 1)", output)
+        self.assertIn("README.md (line 1: GitHub token)", output)
         self.assertIn(
             "Refusing to commit staged source files containing a credential-like value",
             output,
