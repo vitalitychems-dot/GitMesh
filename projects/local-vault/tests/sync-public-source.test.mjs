@@ -53,7 +53,11 @@ test("README timeout guidance matches the fixed source-sync limits", () => {
   );
 });
 
-function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
+function runSyncWithSyntaxResult(
+  t,
+  mode,
+  { checkOnly = false, tokenPresent = !checkOnly } = {},
+) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-syntax-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
 
@@ -172,7 +176,7 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
     GITMESH_TEST_SOURCE_SENTINEL: privateSource,
     NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
   };
-  if (!checkOnly) env.GITHUB_TOKEN = fakeToken;
+  if (tokenPresent) env.GITHUB_TOKEN = fakeToken;
   const result = spawnSync(process.execPath, [
     scriptPath,
     ...(checkOnly ? ["--check-syntax"] : []),
@@ -190,6 +194,8 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
     fetchMarker,
     scriptPath,
     privateSource,
+    fakeToken,
+    tokenPresent,
     privateTexts: [
       privateSource,
       privateNodeOutput,
@@ -596,6 +602,35 @@ test("--check-syntax succeeds without a GitHub token or network request", (t) =>
   for (const privateText of fixture.privateTexts) {
     assert.ok(!fixture.output.includes(privateText), `source content leaked: ${privateText}`);
   }
+});
+
+test("--check-syntax succeeds with a GitHub token and performs no sync requests", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "success", {
+    checkOnly: true,
+    tokenPresent: true,
+  });
+
+  assert.equal(fixture.tokenPresent, true, "the parent process did not receive a fake token");
+  assert.equal(fixture.result.status, 0, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "JavaScript syntax validation passed for 2 files: " +
+      "gitmesh-ultimate-core.mjs, sync-public-source.mjs.",
+  );
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(fs.existsSync(fixture.syntaxMarker), "the syntax subprocess was not exercised");
+  assert.ok(!fs.existsSync(fixture.fetchMarker), "syntax-only command attempted a GitHub request or write");
+
+  const invocations = fs
+    .readFileSync(fixture.syntaxInvocationLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((entry) => JSON.parse(entry));
+  assert.equal(invocations.length, 2, "not every JavaScript file received a syntax check");
+  assert.ok(
+    invocations.every((invocation) => !Object.hasOwn(invocation.env, "GITHUB_TOKEN")),
+    "syntax subprocess inherited the GitHub token",
+  );
 });
 
 test("syntax validation rejects a source file that changes during inspection", (t) => {
