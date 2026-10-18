@@ -130,3 +130,81 @@ test("genuine syntax errors still report invalid JavaScript without parser outpu
       "No GitHub requests were made.",
   );
 });
+
+test("GitHub request timeout stops sync without leaking source or continuing writes", (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-timeout-"));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+
+  const scriptPath = path.join(tempDir, "sync-public-source.mjs");
+  const preloadPath = path.join(tempDir, "simulate-fetch-timeout.mjs");
+  const requestLog = path.join(tempDir, "github-requests.json");
+  const fakeToken = "test-only-not-a-real-token";
+  const privateSource = "PRIVATE_SOURCE_CONTENT_SENTINEL";
+  const privateFetchError = "PRIVATE_FETCH_TIMEOUT_SENTINEL";
+
+  for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
+    fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
+  }
+  fs.appendFileSync(
+    path.join(tempDir, "gitmesh-ultimate-core.mjs"),
+    `\n// ${privateSource}\n`,
+  );
+  fs.writeFileSync(
+    preloadPath,
+    [
+      'import fs from "node:fs";',
+      "globalThis.fetch = async (url, options = {}) => {",
+      "  const requests = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REQUEST_LOG, \"utf8\") || \"[]\");",
+      '  requests.push({ method: options.method ?? "GET", url });',
+      '  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));',
+      '  if (url.endsWith("/git/ref/heads/main")) {',
+      '    return { ok: true, json: async () => ({ object: { sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }) };',
+      "  }",
+      '  if (url.endsWith("/git/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")) {',
+      '    return { ok: true, json: async () => ({ tree: { sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }) };',
+      "  }",
+      `  const error = new Error("${privateFetchError}");`,
+      '  error.name = "TimeoutError";',
+      "  throw error;",
+      "};",
+    ].join("\n"),
+  );
+  fs.writeFileSync(requestLog, "[]");
+
+  const result = spawnSync(process.execPath, [scriptPath], {
+    cwd: tempDir,
+    encoding: "utf8",
+    timeout: 30_000,
+    env: {
+      PATH: process.env.PATH ?? "",
+      GITHUB_TOKEN: fakeToken,
+      GITMESH_TEST_REQUEST_LOG: requestLog,
+      NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
+    },
+  });
+  const output = result.stdout + result.stderr;
+
+  assert.equal(result.status, 1, output);
+  assert.equal(
+    output.trim(),
+    "GitHub request timed out during POST /git/blobs. " +
+      "Check the connection and retry; sync stopped.",
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(requestLog, "utf8")), [
+    {
+      method: "GET",
+      url: "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/ref/heads/main",
+    },
+    {
+      method: "GET",
+      url: "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    },
+    {
+      method: "POST",
+      url: "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/blobs",
+    },
+  ]);
+  assert.ok(!output.includes(fakeToken), "GitHub token leaked in timeout output");
+  assert.ok(!output.includes(privateSource), "source content leaked in timeout output");
+  assert.ok(!output.includes(privateFetchError), "raw fetch error leaked in timeout output");
+});
