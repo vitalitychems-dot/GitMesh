@@ -114,6 +114,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
   "test_precommit_hook_blocks_staged_javascript_syntax_errors_from_index",
+  "test_precommit_hook_reports_all_staged_source_repair_issues",
   "test_precommit_hook_passes_clean_staged_javascript",
   "test_precommit_hook_blocks_every_supported_credential_pattern",
   "test_precommit_hook_allows_near_miss_credential_strings_without_network",
@@ -1590,6 +1591,7 @@ function checkStagedCredentials() {
   }
 
   const credentialFindings = [];
+  const stagedSourceFailures = [];
   const syntaxFailures = [];
   for (const source of stagedSources) {
     const gitPath = [...sourceByGitPath].find(([, stagedSource]) => stagedSource === source)?.[0];
@@ -1613,7 +1615,11 @@ function checkStagedCredentials() {
       );
     }
     if (BigInt(sizeOutput) > BigInt(MAX_SOURCE_BYTES)) {
-      throw oversizedStagedSourceError(source, gitPath);
+      stagedSourceFailures.push({
+        source,
+        message: oversizedStagedSourceError(source, gitPath).message,
+      });
+      continue;
     }
     const content = runStagedGitCommand(
       ["show", `:0:${gitPath}`],
@@ -1623,32 +1629,43 @@ function checkStagedCredentials() {
       timeoutMs,
     );
     if (content.length > MAX_SOURCE_BYTES) {
-      throw oversizedStagedSourceError(source, gitPath);
+      stagedSourceFailures.push({
+        source,
+        message: oversizedStagedSourceError(source, gitPath).message,
+      });
+      continue;
     }
     if (content.includes(0)) {
-      throw new Error(
-        `Refusing to check a non-text staged source file: ${source}. ` +
-        "Save it as UTF-8 text and stage it again. No GitHub requests were made.",
-      );
+      stagedSourceFailures.push({
+        source,
+        message:
+          `Refusing to check a non-text staged source file: ${source}. ` +
+          "Save it as UTF-8 text and stage it again. No GitHub requests were made.",
+      });
+      continue;
     }
     let text;
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(content);
     } catch {
-      throw new Error(
-        `Refusing to check a non-text staged source file: ${source}. ` +
-        "Save it as UTF-8 text and stage it again. No GitHub requests were made.",
-      );
+      stagedSourceFailures.push({
+        source,
+        message:
+          `Refusing to check a non-text staged source file: ${source}. ` +
+          "Save it as UTF-8 text and stage it again. No GitHub requests were made.",
+      });
+      continue;
     }
     if (path.extname(source) === ".mjs") {
       try {
         validateJavaScriptSyntax(content, source, "staged-check");
       } catch (error) {
-        syntaxFailures.push(
-          error instanceof Error
+        syntaxFailures.push({
+          source,
+          message: error instanceof Error
             ? error.message.replace(/\s*No GitHub requests were made\.$/, "")
             : `Refusing to commit staged JavaScript that fails Node syntax validation: ${source}.`,
-        );
+        });
       }
     }
     const credentialMatches = findEmbeddedCredentialFindings(text);
@@ -1657,6 +1674,7 @@ function checkStagedCredentials() {
     }
   }
 
+  let credentialFailure = null;
   if (credentialFindings.length > 0) {
     const locations = credentialFindings.map(({ source, credentialMatches }) => {
       const lineLabel = credentialMatches
@@ -1676,16 +1694,35 @@ function checkStagedCredentials() {
     const rotationGuidance = hasMultipleLocations
       ? "Rotate them only if they were already shared or published elsewhere."
       : "Rotate it only if it was already shared or published elsewhere.";
-    throw new Error(
-      `Refusing to commit staged source files containing a credential-like value: ${locations.join("; ")}. ` +
-      `${removalGuidance} and stage the fix; use Replit Secrets for runtime credentials. ` +
-      `${rotationGuidance} No GitHub requests were made.`,
-    );
+    credentialFailure = {
+      source: credentialFindings[0].source,
+      message:
+        `Refusing to commit staged source files containing a credential-like value: ${locations.join("; ")}. ` +
+        `${removalGuidance} and stage the fix; use Replit Secrets for runtime credentials. ` +
+        `${rotationGuidance} No GitHub requests were made.`,
+    };
   }
 
-  if (syntaxFailures.length > 0) {
+  const stagedFailures = [
+    ...stagedSourceFailures,
+    ...syntaxFailures,
+    ...(credentialFailure ? [credentialFailure] : []),
+  ].sort(
+    (left, right) => stagedSources.indexOf(left.source) - stagedSources.indexOf(right.source),
+  );
+  if (stagedFailures.length === 1) {
     throw new Error(
-      `${syntaxFailures.join("\n")}\nNo GitHub requests were made.`,
+      `${stagedFailures[0].message.replace(/\s*No GitHub requests were made\.$/, "")}\n` +
+      "No GitHub requests were made.",
+    );
+  }
+  if (stagedFailures.length > 1) {
+    throw new Error(
+      "Refusing to commit: these staged allowlisted source files need repair:\n" +
+      `${stagedFailures
+        .map(({ message }) => `- ${message.replace(/\s*No GitHub requests were made\.$/, "")}`)
+        .join("\n")}\n` +
+      "No GitHub requests were made.",
     );
   }
 
