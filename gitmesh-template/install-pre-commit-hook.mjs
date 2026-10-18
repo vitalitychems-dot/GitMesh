@@ -429,7 +429,41 @@ function hookSettingDisableCommand(setting, hookPath, copiedHook, repoRoot, mana
   return `git config ${scopeFlag} --unset core.hooksPath ${shellQuote(valuePattern)}`;
 }
 
+function reportOutgoingPushCredentialScanStatus(repoRoot) {
+  const result = runGit(
+    ["config", "--bool", "--get", "gitmesh.prePushCredentialCheck"],
+    repoRoot,
+  );
+  let status = "could not verify";
+  if (result.status === 1) {
+    status = "disabled";
+  } else if (result.status === 0) {
+    try {
+      const value = decodeGitOutput(
+        result.stdout,
+        "Could not safely read the outgoing push credential scan setting.",
+      );
+      if (value === "true") status = "enabled";
+      else if (value === "false") status = "disabled";
+    } catch {
+      // Report an unknown state without exposing Git configuration diagnostics.
+    }
+  }
+
+  console.log(`GitMesh outgoing push credential scan: ${status}`);
+  if (status === "disabled") {
+    console.log(
+      "To enable it for this repository, run: git config --local gitmesh.prePushCredentialCheck true",
+    );
+  } else if (status === "could not verify") {
+    console.log(
+      "Set gitmesh.prePushCredentialCheck to true or false; no Git configuration was changed.",
+    );
+  }
+}
+
 function reportHookStatus(repoRoot) {
+  reportOutgoingPushCredentialScanStatus(repoRoot);
   const activeHooksDirectory = effectiveHooksDirectory(repoRoot);
   const setting = activeHookPathSetting(repoRoot, activeHooksDirectory);
   const preCommitPath = path.join(activeHooksDirectory, "pre-commit");
