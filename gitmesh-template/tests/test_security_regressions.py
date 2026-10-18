@@ -1524,6 +1524,83 @@ process.on("exit", saveCapture);
         self.assertEqual(self.run_source_git(["rev-parse", "HEAD"]), head_before_scan)
         self.assertEqual(readme.read_bytes(), clean_readme)
 
+    def test_history_credential_check_reports_merge_resolution_credentials_without_leaking(self):
+        self.initialize_source_history()
+        readme = self.source_root / "README.md"
+        base_branch = self.run_source_git(["branch", "--show-current"])
+
+        self.run_source_git(["checkout", "-b", "history-conflict-side"])
+        readme.write_text("SAFE_CONFLICT_SIDE_PARENT\n", encoding="utf-8")
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(["commit", "--quiet", "-m", "safe side parent"])
+        side_parent = self.run_source_git(["rev-parse", "HEAD"])
+
+        self.run_source_git(["checkout", base_branch])
+        readme.write_text("SAFE_CONFLICT_MAIN_PARENT\n", encoding="utf-8")
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(["commit", "--quiet", "-m", "safe main parent"])
+        main_parent = self.run_source_git(["rev-parse", "HEAD"])
+
+        merge = subprocess.run(
+            ["git", "merge", "history-conflict-side"],
+            cwd=self.source_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        merge_output = merge.stdout + merge.stderr
+        self.assertNotEqual(merge.returncode, 0, merge_output)
+        self.assertIn("CONFLICT", merge_output)
+
+        history_token = "ghp_" + "M" * 36
+        private_line = f"GITHUB_TOKEN={history_token}"
+        merge_source = f"SAFE_MERGE_HEADER\n{private_line}\nSAFE_MERGE_FOOTER\n"
+        readme.write_text(merge_source, encoding="utf-8")
+        self.run_source_git(["add", "README.md"])
+        self.run_source_git(
+            ["commit", "--quiet", "-m", "resolve conflict with synthetic credential"]
+        )
+        merge_commit = self.run_source_git(["rev-parse", "HEAD"])
+        merge_parents = self.run_source_git(
+            ["rev-list", "--parents", "-n", "1", "HEAD"]
+        ).split()
+        self.assertEqual(merge_parents[0], merge_commit)
+        self.assertEqual(set(merge_parents[1:]), {main_parent, side_parent})
+
+        for parent in merge_parents[1:]:
+            parent_source = self.run_source_git(["show", f"{parent}:README.md"])
+            self.assertNotIn(history_token, parent_source)
+            self.assertNotIn(private_line, parent_source)
+
+        result = self.run_sync(
+            token_value=None,
+            args=("--check-history-credentials",),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        expected_location = f"{merge_commit} README.md (line 2)"
+        self.assertEqual(output.count(expected_location), 1)
+        self.assertEqual(output.count("README.md (line "), 1)
+        for parent in merge_parents[1:]:
+            self.assertNotIn(parent, output)
+        for private_text in (
+            history_token,
+            private_line,
+            "SAFE_MERGE_HEADER",
+            "SAFE_MERGE_FOOTER",
+            "SAFE_CONFLICT_MAIN_PARENT",
+            "SAFE_CONFLICT_SIDE_PARENT",
+        ):
+            self.assertNotIn(private_text, output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(capture["preflightCalls"], [])
+
     def test_history_credential_check_accepts_a_since_commit_range(self):
         self.initialize_source_history()
         readme = self.source_root / "README.md"
