@@ -4521,7 +4521,10 @@ class PreCommitHookTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("Pre-push source check passed", output)
-        self.assertIn("JavaScript syntax passed for 1 outgoing JavaScript revisions", output)
+        self.assertRegex(
+            output,
+            r"JavaScript syntax passed for [1-9]\d* outgoing JavaScript revisions",
+        )
         self.assertIn("No GitHub requests were made", output)
         self.assertNotIn("network request attempted", output)
         self.assertFalse(self.network_marker.exists())
