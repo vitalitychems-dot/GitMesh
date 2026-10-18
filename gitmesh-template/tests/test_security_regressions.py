@@ -2869,6 +2869,36 @@ process.on("exit", saveCapture);
                 ),
                 source_path.name,
             ),
+            (
+                "line-out-of-bounds",
+                (
+                    "[stdin]:4:1\n"
+                    f"{invalid_line}\n"
+                    "^\n"
+                    "RAW_OUT_OF_BOUNDS_LINE_DIAGNOSTIC_SENTINEL"
+                ),
+                source_path.name,
+            ),
+            (
+                "column-out-of-bounds",
+                (
+                    f"[stdin]:2:{len(invalid_line) + 1}\n"
+                    f"{invalid_line}\n"
+                    f"{' ' * len(invalid_line)}^\n"
+                    "RAW_OUT_OF_BOUNDS_COLUMN_DIAGNOSTIC_SENTINEL"
+                ),
+                source_path.name,
+            ),
+            (
+                "caret-column-out-of-bounds",
+                (
+                    "[stdin]:2\n"
+                    f"{invalid_line}\n"
+                    f"{' ' * len(invalid_line)}^\n"
+                    "RAW_OUT_OF_BOUNDS_CARET_DIAGNOSTIC_SENTINEL"
+                ),
+                source_path.name,
+            ),
         )
         try:
             for case_name, diagnostics, expected_location in cases:
@@ -2892,10 +2922,19 @@ process.on("exit", saveCapture);
                     self.assertNotIn("RAW_NODE_DIAGNOSTIC_SENTINEL", output)
                     self.assertNotIn("RAW_UNKNOWN_NODE_FORMAT_SENTINEL", output)
                     self.assertNotIn("RAW_MALFORMED_NODE_LOCATION_SENTINEL", output)
+                    self.assertNotIn("RAW_OUT_OF_BOUNDS_LINE_DIAGNOSTIC_SENTINEL", output)
+                    self.assertNotIn("RAW_OUT_OF_BOUNDS_COLUMN_DIAGNOSTIC_SENTINEL", output)
+                    self.assertNotIn("RAW_OUT_OF_BOUNDS_CARET_DIAGNOSTIC_SENTINEL", output)
                     self.assertNotIn("[stdin]", output)
                     self.assertNotIn("SyntaxError", output)
                     self.assertNotIn("Node.js v", output)
-                    if case_name in {"unrecognized-format", "malformed-location"}:
+                    if case_name in {
+                        "unrecognized-format",
+                        "malformed-location",
+                        "line-out-of-bounds",
+                        "column-out-of-bounds",
+                        "caret-column-out-of-bounds",
+                    }:
                         self.assertNotRegex(
                             result.stderr,
                             r"\(line \d+, column \d+\)",
