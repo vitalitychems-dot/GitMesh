@@ -4681,9 +4681,35 @@ class PreCommitHookTests(unittest.TestCase):
                 )
                 self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_accepts_staged_source_at_exact_size_limit(self):
+        exact_size = 512 * 1024
+        self.readme.write_bytes(b"x" * exact_size)
+        added = self.run_git(["add", "gitmesh-template/README.md"])
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+
+        result = self.run_git(
+            ["commit", "-m", "accept staged source at exact size limit"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Credential check passed", output)
+        self.assertIn("1 staged allowlisted source file", output)
+        self.assertIn("No GitHub requests were made", output)
+        self.assertNotIn("network request attempted", output)
+        stored_size = self.run_git(
+            ["cat-file", "-s", "HEAD:gitmesh-template/README.md"],
+        )
+        self.assertEqual(stored_size.returncode, 0, stored_size.stderr)
+        self.assertEqual(stored_size.stdout.strip(), str(exact_size))
+        self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_blocks_oversized_staged_source_with_safe_repair_steps(self):
+        limit_plus_one = 512 * 1024 + 1
         oversized_sentinel = b"OVERSIZED_STAGED_SOURCE_SENTINEL"
-        oversized_content = oversized_sentinel + b"x" * (2 * 1024 * 1024)
+        oversized_content = oversized_sentinel + b"x" * (limit_plus_one - len(oversized_sentinel))
+        self.assertEqual(len(oversized_content), limit_plus_one)
         self.readme.write_bytes(oversized_content)
         self.run_git(["add", "gitmesh-template/README.md"])
 
@@ -4705,6 +4731,7 @@ class PreCommitHookTests(unittest.TestCase):
         )
         self.assertIn("No GitHub requests were made", output)
         self.assertNotIn(oversized_sentinel.decode(), output)
+        self.assertNotIn(str(self.readme), output)
         self.assertNotIn(FAKE_GITHUB_TOKEN, output)
         self.assertNotIn("network request attempted", output)
         self.assertEqual(self.run_git(["rev-parse", "HEAD"]).stdout.strip(), original_head)
