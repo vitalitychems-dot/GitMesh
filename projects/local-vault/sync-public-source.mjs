@@ -55,11 +55,24 @@ function validateJavaScriptSyntax(content, source, { syntaxOnly = false } = {}) 
         "Correct the JavaScript and rerun --check-syntax. No GitHub requests were made.",
       );
     }
+    const location = result.error ? null : syntaxErrorLocation(result.stderr);
+    if (location) return location;
     throw new Error(
       `Refusing to sync JavaScript that fails Node syntax validation: ${source}. ` +
       "Correct the JavaScript and retry the source sync. No GitHub requests were made.",
     );
   }
+}
+
+function syntaxErrorLocation(stderr) {
+  if (typeof stderr !== "string") return null;
+  const match = /^(?:\[stdin\]|stdin):(\d+)\r?\n[^\r\n]*\r?\n([ \t]*)\^/m.exec(stderr);
+  if (!match) return null;
+  const line = Number(match[1]);
+  const column = match[2].length + 1;
+  return Number.isSafeInteger(line) && line > 0 && Number.isSafeInteger(column)
+    ? { line, column }
+    : null;
 }
 
 function getToken() {
@@ -115,7 +128,8 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
   const sourceFiles = syntaxOnly
     ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
     : ALLOWED_FILES;
-  return sourceFiles.map(({ source, target }) => {
+  const syntaxDiagnostics = [];
+  const files = sourceFiles.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
     const isJavaScript = path.extname(source) === ".mjs";
     const fileInfo = fs.lstatSync(sourcePath, { bigint: true });
@@ -165,10 +179,24 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
           "No GitHub requests were made.",
         );
       }
-      validateJavaScriptSyntax(content, source, { syntaxOnly });
+      const location = validateJavaScriptSyntax(content, source, { syntaxOnly });
+      if (location) syntaxDiagnostics.push({ source, ...location });
     }
     return { target, content };
   });
+  if (syntaxDiagnostics.length > 0) {
+    const orderedDiagnostics = syntaxDiagnostics
+      .slice()
+      .sort((left, right) => left.source < right.source ? -1 : left.source > right.source ? 1 : 0);
+    const lines = orderedDiagnostics
+      .map(({ source, line, column }) => `- ${source}:${line}:${column}`)
+      .join("\n");
+    throw new Error(
+      `Refusing to sync JavaScript with syntax errors:\n${lines}\n` +
+      "Correct each file and retry the source sync. No GitHub requests were made.",
+    );
+  }
+  return files;
 }
 
 async function githubRequest(token, route, method = "GET", body = undefined) {
