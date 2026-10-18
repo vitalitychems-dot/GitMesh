@@ -105,6 +105,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_source_check_reports_both_failure_types_without_leaking",
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely",
+  "test_local_syntax_check_reports_all_invalid_files_without_leaking",
   "test_local_syntax_check_repairs_unavailable_linked_and_oversized_sources",
   "test_local_credential_check_reports_location_without_exposing_value",
   "test_local_credential_check_repairs_unavailable_linked_and_oversized_sources",
@@ -731,6 +732,35 @@ function readSourceFiles({
   const credentialFailure = validateCredentials && credentialFindings.length > 0
     ? credentialFindingErrorMessage(credentialFindings, operation)
     : null;
+  if (operation === "syntax-check") {
+    const syntaxFailures = [];
+    if (validateSyntax) {
+      for (const { source, content } of sourceFiles) {
+        if (path.extname(source) !== ".mjs") continue;
+        try {
+          validateJavaScriptSyntax(content, source, operation);
+        } catch (error) {
+          syntaxFailures.push(
+            error instanceof Error
+              ? error.message
+              : `JavaScript syntax validation failed for ${source}.`,
+          );
+        }
+      }
+    }
+    const failures = syntaxFailures.map((message) =>
+      message.replace(/\s*No GitHub requests were made\.$/, "")
+    );
+    if (failures.length > 0) {
+      throw new Error(
+        `Local JavaScript syntax check found ${failures.length} ${failures.length === 1 ? "issue" : "issues"} ` +
+        "in allowlisted JavaScript source files:\n" +
+        failures.map((message) => `- ${message}`).join("\n") +
+        "\nNo GitHub requests were made.",
+      );
+    }
+    return sourceFiles.map(({ target, content }) => ({ target, content }));
+  }
   if (operation === "combined-check") {
     const syntaxFailures = [];
     if (validateSyntax) {
