@@ -83,6 +83,23 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
         Buffer.from('";\n'),
       ]),
     );
+  } else if (mode === "linked") {
+    const readmePath = path.join(tempDir, "README.md");
+    fs.appendFileSync(readmePath, `\n${privateSource}\n`);
+    fs.unlinkSync(sourcePath);
+    fs.symlinkSync(readmePath, sourcePath);
+  } else if (mode === "oversized") {
+    fs.writeFileSync(
+      sourcePath,
+      Buffer.concat([
+        Buffer.from(`// ${privateSource}\n`),
+        Buffer.alloc(512 * 1024 + 1, 0x20),
+      ]),
+    );
+  } else if (mode === "other-invalid") {
+    fs.unlinkSync(sourcePath);
+    fs.mkdirSync(sourcePath);
+    fs.writeFileSync(path.join(sourcePath, "private-data"), privateSource);
   } else if (mode !== "success") {
     fs.writeFileSync(sourcePath, `export const ${privateSource} = ;\n`);
   } else {
@@ -168,12 +185,12 @@ function assertSafeSyntaxFailure(fixture, expectedMessage) {
   }
 }
 
-function assertSafeJavaScriptTextFailure(fixture, expectedMessage) {
+function assertSafeSyntaxPreflightFailure(fixture, expectedMessage) {
   const { output, result, syntaxMarker, fetchMarker, privateTexts } = fixture;
   assert.notEqual(result.status, 0, output);
   assert.equal(output.trim(), expectedMessage);
-  assert.ok(!fs.existsSync(syntaxMarker), "syntax validation ran on non-text JavaScript");
-  assert.ok(!fs.existsSync(fetchMarker), "source sync attempted a GitHub request");
+  assert.ok(!fs.existsSync(syntaxMarker), "syntax validation ran before source checks");
+  assert.ok(!fs.existsSync(fetchMarker), "preflight attempted a GitHub request");
   for (const privateText of privateTexts) {
     assert.ok(!output.includes(privateText), `private diagnostic leaked: ${privateText}`);
   }
@@ -456,12 +473,41 @@ for (const [mode, problem, expectedReason] of [
 ]) {
   test(`non-text JavaScript reports syntax-specific repair guidance for ${problem}`, (t) => {
     const fixture = runSyncWithSyntaxResult(t, mode, { checkOnly: true });
-    assertSafeJavaScriptTextFailure(
+    assertSafeSyntaxPreflightFailure(
       fixture,
       `JavaScript source gitmesh-ultimate-core.mjs ${expectedReason}. ` +
         "Save it as valid UTF-8 text and rerun --check-syntax. " +
         "No GitHub requests were made.",
     );
+  });
+}
+
+for (const [mode, problem, expectedMessage] of [
+  [
+    "linked",
+    "a symbolic link",
+    "JavaScript source gitmesh-ultimate-core.mjs is a symbolic link. " +
+      "Replace it with a regular file, then rerun --check-syntax. " +
+      "No GitHub requests were made.",
+  ],
+  [
+    "oversized",
+    "an oversized file",
+    "JavaScript source gitmesh-ultimate-core.mjs exceeds the 512 KiB limit. " +
+      "Reduce it to 512 KiB or less, then rerun --check-syntax. " +
+      "No GitHub requests were made.",
+  ],
+  [
+    "other-invalid",
+    "a non-regular file",
+    "JavaScript source gitmesh-ultimate-core.mjs is not a regular file. " +
+      "Restore it as a regular file, then rerun --check-syntax. " +
+      "No GitHub requests were made.",
+  ],
+]) {
+  test(`--check-syntax explains how to repair ${problem}`, (t) => {
+    const fixture = runSyncWithSyntaxResult(t, mode, { checkOnly: true });
+    assertSafeSyntaxPreflightFailure(fixture, expectedMessage);
   });
 }
 
