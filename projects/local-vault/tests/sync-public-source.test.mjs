@@ -85,6 +85,8 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
     );
   } else if (mode !== "success") {
     fs.writeFileSync(sourcePath, `export const ${privateSource} = ;\n`);
+  } else {
+    fs.appendFileSync(path.join(tempDir, "README.md"), `\n${privateSource}\n`);
   }
   fs.writeFileSync(
     preloadPath,
@@ -467,9 +469,17 @@ test("--check-syntax succeeds without a GitHub token or network request", (t) =>
   const fixture = runSyncWithSyntaxResult(t, "success", { checkOnly: true });
 
   assert.equal(fixture.result.status, 0, fixture.output);
-  assert.equal(fixture.output.trim(), "JavaScript syntax validation passed.");
+  assert.equal(
+    fixture.output.trim(),
+    "JavaScript syntax validation passed for 2 files: " +
+      "gitmesh-ultimate-core.mjs, sync-public-source.mjs.",
+  );
+  assert.ok(!fixture.output.includes("README.md"), "a non-JavaScript file was listed");
   assert.ok(fs.existsSync(fixture.syntaxMarker), "the syntax subprocess was not exercised");
   assert.ok(!fs.existsSync(fixture.fetchMarker), "syntax check attempted a GitHub request");
+  for (const privateText of fixture.privateTexts) {
+    assert.ok(!fixture.output.includes(privateText), `source content leaked: ${privateText}`);
+  }
 });
 
 test("syntax validation rejects a source file that changes during inspection", (t) => {
