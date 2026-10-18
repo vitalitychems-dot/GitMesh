@@ -5617,6 +5617,7 @@ class HookInstallerTests(unittest.TestCase):
 
     def test_hook_status_reports_repository_local_setup_without_writing_config(self):
         self.run_git(["config", "--local", "core.hooksPath", "gitmesh-template/hooks"])
+        self.run_git(["config", "--local", "gitmesh.prePushCredentialCheck", "false"])
         before = self.git_config_snapshot(self.repo_root)
         status = self.run_installer(args=("--status",))
         output = status.stdout + status.stderr
@@ -5628,6 +5629,31 @@ class HookInstallerTests(unittest.TestCase):
             "To disable this GitMesh setup, run: git config --local --unset core.hooksPath '^gitmesh-template/hooks$'",
             output,
         )
+        self.assertIn("GitMesh outgoing push credential scan: disabled", output)
+        self.assertIn(
+            "To enable it for this repository, run: git config --local gitmesh.prePushCredentialCheck true",
+            output,
+        )
+        self.assertEqual(self.git_config_snapshot(self.repo_root), before)
+
+    def test_hook_status_reports_enabled_push_scan_without_writing_config(self):
+        configured_hooks_path = self.run_git(
+            ["config", "--local", "core.hooksPath", "gitmesh-template/hooks"]
+        )
+        self.assertEqual(configured_hooks_path.returncode, 0, configured_hooks_path.stderr)
+        configured_push_scan = self.run_git(
+            ["config", "--local", "gitmesh.prePushCredentialCheck", "true"]
+        )
+        self.assertEqual(configured_push_scan.returncode, 0, configured_push_scan.stderr)
+        before = self.git_config_snapshot(self.repo_root)
+
+        status = self.run_installer(args=("--status",))
+        output = status.stdout + status.stderr
+
+        self.assertEqual(status.returncode, 0, output)
+        self.assertIn("GitMesh pre-commit check: active", output)
+        self.assertIn("GitMesh outgoing push credential scan: enabled", output)
+        self.assertNotIn("To enable it for this repository", output)
         self.assertEqual(self.git_config_snapshot(self.repo_root), before)
 
     def test_hook_status_scope_fallback_identifies_repository_and_worktree_settings(self):
@@ -5780,6 +5806,11 @@ class HookInstallerTests(unittest.TestCase):
         self.assertEqual(status.returncode, 0, output)
         self.assertIn("GitMesh pre-commit check: inactive", output)
         self.assertIn("Scope: inactive", output)
+        self.assertIn("GitMesh outgoing push credential scan: disabled", output)
+        self.assertIn(
+            "To enable it for this repository, run: git config --local gitmesh.prePushCredentialCheck true",
+            output,
+        )
         self.assertIn("No GitMesh-specific disable command is needed", output)
         self.assertEqual(self.git_config_snapshot(self.repo_root), before)
 
