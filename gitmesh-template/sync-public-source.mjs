@@ -507,7 +507,7 @@ function validateJavaScriptSyntax(content, source, operation = "sync") {
     const isSyntaxCheck = operation === "syntax-check";
     const isCombinedCheck = operation === "combined-check";
     const isStagedCheck = operation === "staged-check";
-    const location = syntaxErrorLocation(result.stderr);
+    const location = syntaxErrorLocation(result.stderr, content.toString("utf8"));
     const locationText = location
       ? ` (line ${location.line}, column ${location.column})`
       : "";
@@ -532,9 +532,10 @@ function validateJavaScriptSyntax(content, source, operation = "sync") {
   }
 }
 
-function syntaxErrorLocation(nodeDiagnostics) {
-  if (typeof nodeDiagnostics !== "string") return null;
+function syntaxErrorLocation(nodeDiagnostics, sourceText) {
+  if (typeof nodeDiagnostics !== "string" || typeof sourceText !== "string") return null;
   const lines = nodeDiagnostics.split(/\r\n|\n|\r/);
+  const sourceLines = sourceText.split(/\r\n|[\n\r\u2028\u2029]/);
   for (let index = 0; index < lines.length - 2; index += 1) {
     const header = /^\[stdin\]:(\d+)(?::(\d+))?$/.exec(lines[index]);
     if (!header) continue;
@@ -549,6 +550,8 @@ function syntaxErrorLocation(nodeDiagnostics) {
       Number.isSafeInteger(column) &&
       column > 0
     ) {
+      const sourceLine = sourceLines[line - 1];
+      if (sourceLine === undefined || column > sourceLine.length) return null;
       return { line, column };
     }
   }
