@@ -1,5 +1,7 @@
 # GitMesh
 
+[![Local vault source-sync regressions](https://github.com/vitalitychems-dot/GitMesh/actions/workflows/local-vault-regressions.yml/badge.svg?branch=main)](https://github.com/vitalitychems-dot/GitMesh/actions/workflows/local-vault-regressions.yml?query=branch%3Amain)
+
 The mesh is this repository. Clone it and read it with no web.
 
 The private Gitbook is not in here. A drop is a note, and it is not delivered until the owner comments APPROVED.
