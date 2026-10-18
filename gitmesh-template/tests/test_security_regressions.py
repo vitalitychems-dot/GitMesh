@@ -149,6 +149,28 @@ CREDENTIAL_HOOK_NEAR_MISS_CASES = {
 }
 
 
+def assert_credential_hook_vectors_cover_scanner_patterns(scanner_pattern_ids, test_cases):
+    scanner_ids = set(scanner_pattern_ids)
+    test_vector_ids = set(test_cases)
+    missing_vectors = sorted(scanner_ids - test_vector_ids)
+    stale_vectors = sorted(test_vector_ids - scanner_ids)
+    if missing_vectors or stale_vectors:
+        raise AssertionError(
+            "Add representative synthetic commit-hook values to CREDENTIAL_HOOK_TEST_CASES "
+            "for every scanner pattern. "
+            f"Missing vectors: {missing_vectors}; stale vector groups: {stale_vectors}."
+        )
+
+    empty_vectors = sorted(
+        pattern_id for pattern_id in scanner_ids if not test_cases[pattern_id]
+    )
+    if empty_vectors:
+        raise AssertionError(
+            "Every scanner credential pattern needs at least one synthetic hook test value. "
+            f"Empty vector groups: {empty_vectors}."
+        )
+
+
 def reported_changed_paths(output):
     lines = output.splitlines()
     try:
@@ -4128,18 +4150,9 @@ class PreCommitHookTests(unittest.TestCase):
             "Scanner credential pattern IDs must be unique.",
         )
         scanner_ids = set(scanner_pattern_ids)
-        test_vector_ids = set(CREDENTIAL_HOOK_TEST_CASES)
-        missing_vectors = sorted(scanner_ids - test_vector_ids)
-        stale_vectors = sorted(test_vector_ids - scanner_ids)
-        self.assertFalse(
-            missing_vectors or stale_vectors,
-            "Add representative synthetic commit-hook values to CREDENTIAL_HOOK_TEST_CASES "
-            f"for every scanner pattern. Missing vectors: {missing_vectors}; "
-            f"stale vector groups: {stale_vectors}.",
-        )
-        self.assertTrue(
-            all(CREDENTIAL_HOOK_TEST_CASES[pattern_id] for pattern_id in scanner_ids),
-            "Every scanner credential pattern needs at least one synthetic hook test value.",
+        assert_credential_hook_vectors_cover_scanner_patterns(
+            scanner_pattern_ids,
+            CREDENTIAL_HOOK_TEST_CASES,
         )
         self.assertEqual(
             scanner_pattern_ids,
@@ -4174,6 +4187,27 @@ class PreCommitHookTests(unittest.TestCase):
                 expected_case_kinds,
                 f"Near-miss cases for {pattern_id} must cover {sorted(expected_case_kinds)}.",
             )
+
+    def test_precommit_hook_vector_coverage_reports_missing_pattern_id(self):
+        missing_pattern_id = "github-prefixed-token"
+        simulated_test_cases = dict(CREDENTIAL_HOOK_TEST_CASES)
+        del simulated_test_cases[missing_pattern_id]
+
+        with self.assertRaises(AssertionError) as error:
+            assert_credential_hook_vectors_cover_scanner_patterns(
+                CREDENTIAL_HOOK_FAMILY_LABELS,
+                simulated_test_cases,
+            )
+
+        diagnostic = str(error.exception)
+        self.assertIn(
+            "Add representative synthetic commit-hook values to CREDENTIAL_HOOK_TEST_CASES",
+            diagnostic,
+        )
+        self.assertIn(f"Missing vectors: ['{missing_pattern_id}']", diagnostic)
+        for pattern_cases in CREDENTIAL_HOOK_TEST_CASES.values():
+            for _label, credential in pattern_cases:
+                self.assertNotIn(credential, diagnostic)
 
     def test_precommit_hook_rejects_non_text_staged_files_without_leaking_contents(self):
         non_text_cases = (
