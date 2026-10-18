@@ -60,6 +60,7 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
   const scriptPath = path.join(tempDir, "sync-public-source.mjs");
   const preloadPath = path.join(tempDir, "simulate-syntax-result.mjs");
   const syntaxMarker = path.join(tempDir, "syntax-check-invoked");
+  const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
   const fetchMarker = path.join(tempDir, "github-fetch-invoked");
   const privateSource = "PRIVATE_SYNTAX_SOURCE_SENTINEL";
   const privateNodeOutput = "PRIVATE_NODE_DIAGNOSTIC_SENTINEL";
@@ -133,6 +134,12 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
       "childProcess.spawnSync = (command, args, options) => {",
       '  if (command === process.execPath && Array.isArray(args) && args.includes("--check")) {',
       '    fs.writeFileSync(process.env.GITMESH_TEST_SYNTAX_MARKER, "invoked");',
+      "    fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify({",
+      "      command,",
+      "      args,",
+      "      env: options?.env ?? {},",
+      '      inputHasSourceSentinel: Buffer.from(options?.input ?? "").includes(Buffer.from(process.env.GITMESH_TEST_SOURCE_SENTINEL)),',
+      '    }) + "\\n");',
       '    const mode = process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE;',
       '    if (mode === "syntax" || mode === "success" || mode === "eacces-open") return originalSpawnSync(command, args, options);',
       '    const errorCode = mode === "timeout" ? "ETIMEDOUT" : "ENOBUFS";',
@@ -159,8 +166,10 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
   const env = {
     PATH: process.env.PATH ?? "",
     GITMESH_TEST_SYNTAX_MARKER: syntaxMarker,
+    GITMESH_TEST_SYNTAX_INVOCATION_LOG: syntaxInvocationLog,
     GITMESH_TEST_FETCH_MARKER: fetchMarker,
     GITMESH_TEST_SYNTAX_FAILURE_MODE: mode,
+    GITMESH_TEST_SOURCE_SENTINEL: privateSource,
     NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
   };
   if (!checkOnly) env.GITHUB_TOKEN = fakeToken;
@@ -177,8 +186,10 @@ function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
     output: result.stdout + result.stderr,
     result,
     syntaxMarker,
+    syntaxInvocationLog,
     fetchMarker,
     scriptPath,
+    privateSource,
     privateTexts: [
       privateSource,
       privateNodeOutput,
@@ -475,7 +486,7 @@ test("interrupted syntax-check is distinct from invalid JavaScript and stops sou
   );
 });
 
-test("genuine syntax errors still report invalid JavaScript without parser output", (t) => {
+test("syntax checks keep source text out of parser arguments and environment", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "syntax");
   assertSafeSyntaxFailure(
     fixture,
@@ -483,6 +494,28 @@ test("genuine syntax errors still report invalid JavaScript without parser outpu
       "gitmesh-ultimate-core.mjs. Correct the JavaScript and retry the source sync. " +
       "No GitHub requests were made.",
   );
+  const invocations = fs
+    .readFileSync(fixture.syntaxInvocationLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((entry) => JSON.parse(entry));
+
+  assert.ok(invocations.length > 0, "the parser invocation was not captured");
+  assert.ok(
+    invocations.some((invocation) => invocation.inputHasSourceSentinel),
+    "the syntax failure did not receive the sentinel source through stdin",
+  );
+  for (const invocation of invocations) {
+    assert.equal(invocation.command, process.execPath);
+    assert.ok(
+      !JSON.stringify(invocation.args).includes(fixture.privateSource),
+      "source content appeared in parser arguments",
+    );
+    assert.ok(
+      !JSON.stringify(invocation.env).includes(fixture.privateSource),
+      "source content appeared in the parser environment",
+    );
+  }
 });
 
 test("normal sync stops safely when an allowlisted source cannot be opened", (t) => {
