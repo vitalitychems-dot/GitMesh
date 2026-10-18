@@ -105,6 +105,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_source_check_reports_both_failure_types_without_leaking",
   "test_local_credential_check_passes_without_token_or_github_requests",
   "test_local_javascript_syntax_check_passes_and_rejects_invalid_source_safely",
+  "test_local_syntax_check_repairs_unavailable_linked_and_oversized_sources",
   "test_local_credential_check_reports_location_without_exposing_value",
   "test_local_credential_check_repairs_unavailable_linked_and_oversized_sources",
   "test_local_credential_check_reports_all_files_needing_repair",
