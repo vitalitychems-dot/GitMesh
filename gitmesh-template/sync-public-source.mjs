@@ -115,6 +115,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_allows_near_miss_credential_strings_without_network",
   "test_precommit_hook_blocks_oversized_staged_source_with_safe_repair_steps",
   "test_precommit_hook_vectors_cover_every_scanner_pattern",
+  "test_precommit_hook_vector_coverage_reports_missing_pattern_id",
   "test_precommit_hook_reports_credentials_from_every_staged_source_file",
   "test_precommit_hook_reports_every_credential_in_linked_worktree",
   "test_precommit_hook_blocks_when_node_version_output_is_empty_or_malformed",
