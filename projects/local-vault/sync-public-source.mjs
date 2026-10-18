@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +23,22 @@ const ALLOWED_FILES = [
     target: "projects/local-vault/sync-public-source.mjs",
   },
 ];
+
+function validateJavaScriptSyntax(content, source) {
+  const result = spawnSync(process.execPath, ["--input-type=module", "--check"], {
+    input: content,
+    encoding: "utf8",
+    timeout: 10_000,
+    maxBuffer: 64 * 1024,
+    env: { PATH: process.env.PATH ?? "" },
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Refusing to sync JavaScript that fails Node syntax validation: ${source}. ` +
+      "Correct the JavaScript and retry the source sync. No GitHub requests were made.",
+    );
+  }
+}
 
 function getToken() {
   const token = process.env.GITHUB_TOKEN;
@@ -48,6 +65,9 @@ function readSourceFiles() {
     const content = fs.readFileSync(sourcePath);
     if (content.includes(0)) {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
+    }
+    if (path.extname(source) === ".mjs") {
+      validateJavaScriptSyntax(content, source);
     }
     return { target, content };
   });
