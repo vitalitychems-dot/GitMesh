@@ -174,6 +174,12 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       "  requests.push(request);",
       "  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));",
       '  if (method === "GET" && url.endsWith("/git/ref/heads/main")) {',
+      '    if (process.env.GITMESH_TEST_MODE === "branch-invalid-json") {',
+      "      return {",
+      "        ok: true,",
+      "        json: async () => { throw new Error(process.env.GITMESH_TEST_RESPONSE_SENTINEL); },",
+      "      };",
+      "    }",
       "    return response({ object: { sha: branchSha } });",
       "  }",
       '  if (method === "GET" && url.endsWith(`/git/commits/${branchSha}`)) {',
@@ -299,6 +305,26 @@ test("normal sync stops when the base-commit response JSON is unreadable", (t) =
   assert.ok(
     fixture.requests.every(({ method }) => method === "GET"),
     "sync attempted a write after the unreadable base-commit response",
+  );
+});
+
+test("normal sync stops when the branch response JSON is unreadable", (t) => {
+  const fixture = runSyncWithBranchSha(t, "a".repeat(40), "branch-invalid-json");
+  const expectedRefUrl =
+    "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/ref/heads/main";
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "GitHub returned an invalid response during GET /git/ref/heads/main.",
+  );
+  assert.deepEqual(fixture.requests, [{ method: "GET", url: expectedRefUrl }]);
+  assert.ok(!fixture.output.includes(fixture.privateResponseBody), "response body leaked in output");
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  assert.ok(
+    fixture.requests.every(({ method }) => method === "GET"),
+    "sync attempted a source read or write after the unreadable branch response",
   );
 });
 
