@@ -1992,6 +1992,98 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_local_syntax_check_reports_all_invalid_files_without_leaking(self):
+        core_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        sync_path = self.source_root / "sync-public-source.mjs"
+        fixture_path = self.source_root / "syntax-check-fixture.mjs"
+        original_core = core_path.read_bytes()
+        original_sync = sync_path.read_bytes()
+        core_invalid_line = "const INVALID_CORE_SYNTAX_SENTINEL = ;"
+        core_invalid_source = f"const SAFE_CORE_SYNTAX_CONTEXT = 1;\n{core_invalid_line}\n"
+        fixture_invalid_line = "const INVALID_FIXTURE_SYNTAX_SENTINEL = ;"
+        fixture_invalid_source = (
+            "const SAFE_FIXTURE_CONTEXT = 1;\n"
+            "const SAFE_FIXTURE_SECOND_LINE = 2;\n"
+            f"{fixture_invalid_line}\n"
+        )
+        fixture_entry = (
+            '  {\n'
+            '    source: "syntax-check-fixture.mjs",\n'
+            '    target: "projects/local-vault/syntax-check-fixture.mjs",\n'
+            '  },\n'
+        )
+        allowlist_header = "const ALLOWED_FILES = [\n"
+        sync_text = original_sync.decode("utf-8")
+        self.assertIn(allowlist_header, sync_text)
+        sync_path.write_text(
+            sync_text.replace(allowlist_header, allowlist_header + fixture_entry, 1),
+            encoding="utf-8",
+        )
+
+        try:
+            core_path.write_text(core_invalid_source, encoding="utf-8")
+            fixture_path.write_text(fixture_invalid_source, encoding="utf-8")
+
+            result = self.run_sync(token_value=None, args=("--check-syntax",))
+            output = result.stdout + result.stderr
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Local JavaScript syntax check found 2 issues in allowlisted JavaScript source files",
+                result.stderr,
+            )
+            self.assertIn(
+                f"{core_path.name} (line 2, column {core_invalid_line.index(';') + 1})",
+                result.stderr,
+            )
+            self.assertIn(
+                f"{fixture_path.name} (line 3, column {fixture_invalid_line.index(';') + 1})",
+                result.stderr,
+            )
+            self.assertIn(
+                "Review and correct this file, save it, then rerun the local syntax check with --check-syntax.",
+                result.stderr,
+            )
+            self.assertIn("No GitHub requests were made", result.stderr)
+            for private_text in (
+                core_invalid_source,
+                core_invalid_line,
+                "SAFE_CORE_SYNTAX_CONTEXT",
+                fixture_invalid_source,
+                fixture_invalid_line,
+                "SAFE_FIXTURE_CONTEXT",
+                "SAFE_FIXTURE_SECOND_LINE",
+                "SyntaxError",
+                "Unexpected token",
+                "[stdin]",
+                "Node.js v",
+            ):
+                self.assertNotIn(private_text, output)
+            self.assert_safe_failure_output(result)
+
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
+            self.assertEqual(capture["preflightCalls"], [])
+            javascript_sources = (
+                "gitmesh-ultimate-core.mjs",
+                "sync-public-source.mjs",
+                "syntax-check-fixture.mjs",
+            )
+            expected_reads = Counter(
+                (method, str((self.source_root / source).resolve()))
+                for source in javascript_sources
+                for method in ("lstatSync", "openSync", "readFileSync")
+            )
+            observed_reads = Counter(
+                (event["method"], event["path"])
+                for event in capture["filesystemReads"]
+            )
+            self.assertEqual(observed_reads, expected_reads)
+        finally:
+            core_path.write_bytes(original_core)
+            sync_path.write_bytes(original_sync)
+            fixture_path.unlink(missing_ok=True)
+
     def test_local_syntax_check_repairs_unavailable_linked_and_oversized_sources(self):
         source_name = "gitmesh-ultimate-core.mjs"
         source_path = self.source_root / source_name
