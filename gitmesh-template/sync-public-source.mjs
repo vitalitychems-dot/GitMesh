@@ -94,6 +94,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_changed_source_updates_only_the_changed_allowlisted_file",
   "test_missing_secret_fails_before_any_github_request",
   "test_history_credential_check_reports_removed_values_without_leaking",
+  "test_history_credential_check_reports_merge_resolution_credentials_without_leaking",
   "test_history_credential_check_accepts_a_since_commit_range",
   "test_history_credential_check_fails_safely_for_large_history",
   "test_history_credential_check_refuses_shallow_repositories",
