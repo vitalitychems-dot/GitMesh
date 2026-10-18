@@ -82,6 +82,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_source_replaced_after_metadata_check_is_not_followed_or_read",
   "test_in_place_source_edit_during_read_is_rejected_before_github",
   "test_invalid_javascript_stops_before_github_without_printing_source",
+  "test_syntax_checker_does_not_receive_parent_credentials",
   "test_javascript_syntax_locations_are_accurate_with_tabs_and_crlf_without_leaking_source",
   "test_javascript_syntax_columns_follow_utf16_units_after_emoji_and_combining_marks",
   "test_javascript_syntax_locations_follow_unicode_line_separators_without_leaking_source",

@@ -416,6 +416,7 @@ import { syncBuiltinESMExports } from "node:module";
 const requests = [];
 const filesystemReads = [];
 const preflightCalls = [];
+const syntaxCheckCalls = [];
 const openedFiles = new Map();
 const mutationWriters = new Map();
 let replacementTriggered = false;
@@ -432,10 +433,21 @@ const encodedBranch = encodeURIComponent(selectedBranch);
 let targetRefReadCount = 0;
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
 childProcess.spawnSync = (command, ...args) => {
-  if (
+  const isSyntaxCheck =
     command === process.execPath &&
     args[0]?.[0] === "--input-type=module" &&
-    args[0]?.includes("--check") &&
+    args[0]?.includes("--check");
+  if (isSyntaxCheck) {
+    const childEnv = args[1]?.env ?? {};
+    syntaxCheckCalls.push({
+      envNames: Object.keys(childEnv).sort(),
+      hasGitHubToken: Object.hasOwn(childEnv, "GITHUB_TOKEN"),
+      hasUnrelatedCredential: Object.hasOwn(childEnv, "GITMESH_TEST_UNRELATED_CREDENTIAL"),
+      hasAwsSecret: Object.hasOwn(childEnv, "AWS_SECRET_ACCESS_KEY"),
+    });
+  }
+  if (
+    isSyntaxCheck &&
     Object.hasOwn(process.env, "GITMESH_TEST_NODE_SYNTAX_DIAGNOSTICS")
   ) {
     return {
@@ -598,7 +610,17 @@ for (const name of ["lstatSync", "openSync", "readFileSync"]) {
 }
 const saveCapture = () => fs.writeFileSync(
   capture,
-  JSON.stringify({ requests, filesystemReads, preflightCalls }),
+  JSON.stringify({
+    requests,
+    filesystemReads,
+    preflightCalls,
+    syntaxCheckCalls,
+    parentCredentials: {
+      hasGitHubToken: Object.hasOwn(process.env, "GITHUB_TOKEN"),
+      hasUnrelatedCredential: Object.hasOwn(process.env, "GITMESH_TEST_UNRELATED_CREDENTIAL"),
+      hasAwsSecret: Object.hasOwn(process.env, "AWS_SECRET_ACCESS_KEY"),
+    },
+  }),
 );
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
@@ -2688,6 +2710,59 @@ process.on("exit", saveCapture);
 
         capture = json.loads(self.capture.read_text())
         self.assertEqual(capture["requests"], [])
+
+    def test_syntax_checker_does_not_receive_parent_credentials(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        private_token = FAKE_GITHUB_TOKEN
+        unrelated_credential = "GITMESH_TEST_UNRELATED_CREDENTIAL_SENTINEL"
+        aws_secret = "AWS_SECRET_ACCESS_KEY_SENTINEL"
+        invalid_line = "const PRIVATE_SYNTAX_CHILD_SOURCE_SENTINEL = ;"
+        invalid_source = f"const SAFE_SYNTAX_CONTEXT = 1;\n{invalid_line}\n"
+        source_path.write_text(invalid_source, encoding="utf-8")
+
+        result = self.run_sync(
+            token_value=private_token,
+            env_overrides={
+                "GITMESH_TEST_UNRELATED_CREDENTIAL": unrelated_credential,
+                "AWS_SECRET_ACCESS_KEY": aws_secret,
+            },
+        )
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Node syntax validation", result.stderr)
+        self.assertIn(
+            f"{source_path.name} (line 2, column {invalid_line.index(';') + 1})",
+            result.stderr,
+        )
+        self.assertIn("No GitHub requests were made", result.stderr)
+        for private_value in (
+            private_token,
+            unrelated_credential,
+            aws_secret,
+            invalid_source,
+            invalid_line,
+            "PRIVATE_SYNTAX_CHILD_SOURCE_SENTINEL",
+            "SyntaxError",
+            "Unexpected token",
+            "[stdin]",
+            "Node.js v",
+        ):
+            self.assertNotIn(private_value, output)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertEqual(capture["requests"], [])
+        self.assertEqual(capture["preflightCalls"], [])
+        self.assertTrue(capture["parentCredentials"]["hasGitHubToken"])
+        self.assertTrue(capture["parentCredentials"]["hasUnrelatedCredential"])
+        self.assertTrue(capture["parentCredentials"]["hasAwsSecret"])
+        self.assertTrue(capture["syntaxCheckCalls"])
+        for syntax_check in capture["syntaxCheckCalls"]:
+            self.assertEqual(syntax_check["envNames"], ["PATH"])
+            self.assertFalse(syntax_check["hasGitHubToken"])
+            self.assertFalse(syntax_check["hasUnrelatedCredential"])
+            self.assertFalse(syntax_check["hasAwsSecret"])
 
     def test_javascript_syntax_locations_are_accurate_with_tabs_and_crlf_without_leaking_source(self):
         source_path = self.source_root / "gitmesh-ultimate-core.mjs"
