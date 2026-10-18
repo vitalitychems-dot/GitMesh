@@ -113,7 +113,18 @@ async function githubRequest(token, route, method = "GET", body = undefined) {
     );
   }
   if (!response.ok) {
-    throw new Error(`GitHub request failed with HTTP ${response.status} during ${method} ${route}.`);
+    const status =
+      Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
+        ? response.status
+        : null;
+    const statusText = status === null ? "unknown" : status;
+    const retryGuidance =
+      status !== null && status >= 500
+        ? " Check the connection and retry; sync stopped."
+        : "";
+    throw new Error(
+      `GitHub request failed with HTTP ${statusText} during ${method} ${route}.${retryGuidance}`,
+    );
   }
   try {
     return await response.json();
