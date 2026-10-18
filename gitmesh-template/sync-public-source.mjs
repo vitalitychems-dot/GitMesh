@@ -96,6 +96,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_history_credential_check_reports_removed_values_without_leaking",
   "test_history_credential_check_reports_merge_resolution_credentials_without_leaking",
   "test_history_credential_check_accepts_a_since_commit_range",
+  "test_history_credential_check_rejects_valid_non_ancestor_since_commit",
   "test_history_credential_check_fails_safely_for_large_history",
   "test_history_credential_check_refuses_shallow_repositories",
   "test_local_source_check_passes_without_token_or_github_requests",
