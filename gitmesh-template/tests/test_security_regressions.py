@@ -4504,8 +4504,11 @@ class PreCommitHookTests(unittest.TestCase):
 
     def test_pre_push_hook_allows_clean_outgoing_commits_without_github_access(self):
         remote = self.configure_push_remote()
-        self.readme.write_text(self.baseline_readme.decode() + "\nClean outgoing change.\n")
-        self.run_git(["add", "gitmesh-template/README.md"])
+        source_file = self.template_root / "gitmesh-ultimate-core.mjs"
+        source_file.write_bytes(
+            source_file.read_bytes() + b"\n// Clean outgoing JavaScript change.\n"
+        )
+        self.run_git(["add", "gitmesh-template/gitmesh-ultimate-core.mjs"])
         commit = self.run_git(["commit", "-m", "clean outgoing source change"])
         self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
         local_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
@@ -4517,7 +4520,8 @@ class PreCommitHookTests(unittest.TestCase):
         output = result.stdout + result.stderr
 
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("Pre-push credential check passed", output)
+        self.assertIn("Pre-push source check passed", output)
+        self.assertIn("JavaScript syntax passed for 1 outgoing JavaScript revisions", output)
         self.assertIn("No GitHub requests were made", output)
         self.assertNotIn("network request attempted", output)
         self.assertFalse(self.network_marker.exists())
@@ -4525,6 +4529,60 @@ class PreCommitHookTests(unittest.TestCase):
             ["--git-dir", str(remote), "rev-parse", "refs/heads/main"]
         ).stdout.strip()
         self.assertEqual(remote_head, local_head)
+
+    def test_pre_push_hook_blocks_invalid_javascript_after_precommit_is_bypassed(self):
+        remote = self.configure_push_remote()
+        source_file = self.template_root / "gitmesh-ultimate-core.mjs"
+        original_content = source_file.read_bytes()
+        private_sentinel = "PRIVATE_OUTGOING_SYNTAX_SOURCE_SENTINEL"
+        invalid_line = f"const {private_sentinel} = ;"
+        invalid_source = f"const SAFE_OUTGOING_CONTEXT = 1;\n{invalid_line}\n"
+        source_file.write_text(invalid_source, encoding="utf-8")
+
+        staged = self.run_git(["add", "gitmesh-template/gitmesh-ultimate-core.mjs"])
+        self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+        source_file.write_bytes(original_content)
+        commit = self.run_git(
+            ["commit", "--no-verify", "-m", "commit with invalid JavaScript"]
+        )
+        self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+        pushed_commit = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        result = self.run_git(
+            ["push", "origin", "HEAD:refs/heads/main"],
+            env=self.hook_environment_without_github_token(),
+        )
+        output = result.stdout + result.stderr
+        expected_location = (
+            f"gitmesh-ultimate-core.mjs (line 2, column {invalid_line.index(';') + 1})"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Refusing to push JavaScript that fails Node syntax validation",
+            output,
+        )
+        self.assertIn(expected_location, output)
+        self.assertIn("Push blocked", output)
+        self.assertIn("No GitHub requests were made", output)
+        for private_text in (
+            invalid_source,
+            invalid_line,
+            private_sentinel,
+            "SAFE_OUTGOING_CONTEXT",
+            "SyntaxError",
+            "Unexpected token",
+            "[stdin]",
+            "Node.js v",
+            "^",
+            pushed_commit,
+        ):
+            self.assertNotIn(private_text, output)
+        self.assertFalse(self.network_marker.exists())
+        remote_ref = self.run_git(
+            ["--git-dir", str(remote), "rev-parse", "--verify", "refs/heads/main"]
+        )
+        self.assertNotEqual(remote_ref.returncode, 0)
 
     def test_pre_push_hook_blocks_credentials_pushed_to_existing_branch(self):
         remote = self.configure_push_remote()
@@ -4602,7 +4660,7 @@ class PreCommitHookTests(unittest.TestCase):
         output = result.stdout + result.stderr
 
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("Pre-push credential check passed", output)
+        self.assertIn("Pre-push source check passed", output)
         self.assertIn("scanned 1 outgoing commits", output)
         self.assertIn("No GitHub requests were made", output)
         self.assertNotIn("network request attempted", output)
@@ -4628,7 +4686,7 @@ class PreCommitHookTests(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertNotIn("Credential-like values were found", output)
-        self.assertNotIn("Pre-push credential check", output)
+        self.assertNotIn("Pre-push source check", output)
         self.assertNotIn(credential, output)
         self.assertFalse(self.network_marker.exists())
 
@@ -6887,11 +6945,11 @@ class HookInstallerTests(unittest.TestCase):
 
         self.assertEqual(push.returncode, 0, output)
         self.assertIn("existing-pre-push-ran", output)
-        self.assertIn("Pre-push credential check passed: scanned", output)
+        self.assertIn("Pre-push source check passed: scanned", output)
         self.assertIn("allowlisted source revisions", output)
         self.assertLess(
             output.index("existing-pre-push-ran"),
-            output.index("Pre-push credential check passed"),
+            output.index("Pre-push source check passed"),
         )
         self.assertTrue(ref_input_marker.exists())
         self.assertIn("refs/heads/main", ref_input_marker.read_text())

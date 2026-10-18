@@ -140,6 +140,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_rejects_invalid_staged_git_timeout_settings",
   "test_precommit_hook_passes_clean_source_and_ignores_unrelated_files",
   "test_pre_push_hook_blocks_outgoing_credentials_without_exposing_them",
+  "test_pre_push_hook_blocks_invalid_javascript_after_precommit_is_bypassed",
   "test_pre_push_hook_reports_multiple_files_in_stable_order",
   "test_pre_push_hook_allows_clean_outgoing_commits_without_github_access",
   "test_pre_push_hook_blocks_credentials_pushed_to_existing_branch",
@@ -509,6 +510,7 @@ function validateJavaScriptSyntax(content, source, operation = "sync") {
     const isSyntaxCheck = operation === "syntax-check";
     const isCombinedCheck = operation === "combined-check";
     const isStagedCheck = operation === "staged-check";
+    const isPushCheck = operation === "push-check";
     const location = syntaxErrorLocation(result.stderr, content.toString("utf8"));
     const locationText = location
       ? ` (line ${location.line}, column ${location.column})`
@@ -519,15 +521,20 @@ function validateJavaScriptSyntax(content, source, operation = "sync") {
         ? "Review and correct this file, save it, then rerun the combined local source check with --check-local. "
         : isStagedCheck
           ? "Correct the JavaScript file, stage the fix, and retry the commit. "
-          : "Review and correct this file, save it, then rerun sync. ";
+          : isPushCheck
+            ? "Correct the JavaScript in the affected commit, then retry the push. "
+            : "Review and correct this file, save it, then rerun sync. ";
     throw new Error(
       `Refusing to ${
         isStagedCheck
           ? "commit staged JavaScript"
-          : isSyntaxCheck || isCombinedCheck
-            ? "check JavaScript"
-            : "sync JavaScript"
+          : isPushCheck
+            ? "push JavaScript"
+            : isSyntaxCheck || isCombinedCheck
+              ? "check JavaScript"
+              : "sync JavaScript"
       } that fails Node syntax validation: ${source}${locationText}. ` +
+      (isPushCheck ? "Push blocked. " : "") +
       rerunInstruction +
       "No GitHub requests were made.",
     );
@@ -1300,7 +1307,7 @@ function checkPushCredentials() {
   );
   if (outgoingUpdates.length === 0) {
     console.log(
-      "Pre-push credential check passed: there are no outgoing commits to scan. No GitHub requests were made.",
+      "Pre-push source check passed: there are no outgoing commits to scan. No GitHub requests were made.",
     );
     return;
   }
@@ -1436,7 +1443,7 @@ function checkPushCredentials() {
 
   if (entries.length === 0) {
     console.log(
-      "Pre-push credential check passed: no allowlisted source changes were found in outgoing commits. No GitHub requests were made.",
+      "Pre-push source check passed: no allowlisted source changes were found in outgoing commits. No GitHub requests were made.",
     );
     return;
   }
@@ -1444,6 +1451,7 @@ function checkPushCredentials() {
   let scannedBytes = 0;
   const findings = [];
   const seenFindings = new Set();
+  let syntaxCheckedEntries = 0;
   for (const { commit, gitPath, source } of entries) {
     ensureWithinTimeLimit();
     const sizeOutput = runPushGitCommand(
@@ -1491,6 +1499,10 @@ function checkPushCredentials() {
         `Outgoing credential scan stopped because ${source} is not UTF-8 text. Review the affected commit and retry the push. No GitHub requests were made.`,
       );
     }
+    if (path.extname(source) === ".mjs") {
+      validateJavaScriptSyntax(content, source, "push-check");
+      syntaxCheckedEntries += 1;
+    }
     for (const line of findEmbeddedCredentialLines(text)) {
       const key = `${source}\0${line}`;
       if (!seenFindings.has(key)) {
@@ -1525,8 +1537,9 @@ function checkPushCredentials() {
   }
 
   console.log(
-    `Pre-push credential check passed: scanned ${commitIds.size} outgoing commits and ${entries.length} ` +
-    "allowlisted source revisions. No credential-like values found. No GitHub requests were made.",
+    `Pre-push source check passed: scanned ${commitIds.size} outgoing commits and ${entries.length} ` +
+    `allowlisted source revisions. JavaScript syntax passed for ${syntaxCheckedEntries} outgoing JavaScript revisions. ` +
+    "No credential-like values found. No GitHub requests were made.",
   );
 }
 
