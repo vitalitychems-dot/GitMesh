@@ -120,6 +120,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_precommit_hook_blocks_when_node_is_too_old_without_leaking_output",
   "test_precommit_hook_rejects_non_text_staged_files_without_leaking_contents",
   "test_precommit_hook_reports_unicode_separator_lines_without_exposing_content",
+  "test_precommit_hook_reports_blank_boundary_separator_lines_without_exposing_content",
   "test_precommit_hook_blocks_when_node_is_missing",
   "test_precommit_hook_blocks_when_staged_index_cannot_be_read",
   "test_precommit_hook_reports_staged_git_timeout_safely_without_github_token",

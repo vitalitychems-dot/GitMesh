@@ -4187,6 +4187,102 @@ class PreCommitHookTests(unittest.TestCase):
                 )
                 self.assertFalse(self.network_marker.exists())
 
+    def test_precommit_hook_reports_blank_boundary_separator_lines_without_exposing_content(self):
+        cases = (
+            (
+                "leading separators",
+                "\r\n\u2028\r",
+                ("ghp_" + "A" * 36,),
+                (),
+                "\n",
+                ((4, "GitHub token"),),
+            ),
+            (
+                "trailing separators",
+                "SAFE_TRAILING_HEADER\r\n",
+                ("github_pat_" + "B" * 40,),
+                (),
+                "\r\n\u2028\u2029\r\r",
+                ((2, "GitHub fine-grained token"),),
+            ),
+            (
+                "repeated separators",
+                "SAFE_REPEATED_HEADER\u2028\u2028",
+                ("npm_" + "C" * 36, "xoxb-" + "D" * 24, "sk_live_" + "E" * 24),
+                ("\r\r", "\u2029\u2029"),
+                "",
+                (
+                    (3, "npm token"),
+                    (5, "Slack token"),
+                    (7, "Stripe secret key"),
+                ),
+            ),
+        )
+        hook_env = self.hook_environment_without_github_token()
+        self.assertNotIn("GITHUB_TOKEN", hook_env)
+
+        for label, prefix, credentials, separators, suffix, expected_locations in cases:
+            with self.subTest(case=label):
+                credential_lines = tuple(
+                    f"token_{index}={credential}"
+                    for index, credential in enumerate(credentials, start=1)
+                )
+                source_text = prefix + credential_lines[0]
+                for separator, credential_line in zip(separators, credential_lines[1:]):
+                    source_text += separator + credential_line
+                source_text += suffix
+
+                reset = self.run_git(["reset", "--hard", "HEAD"])
+                self.assertEqual(reset.returncode, 0, reset.stdout + reset.stderr)
+                self.readme.write_bytes(source_text.encode("utf-8"))
+                staged = self.run_git(["add", "gitmesh-template/README.md"])
+                self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+
+                # The hook must inspect the staged content after the worktree is restored.
+                self.readme.write_bytes(self.baseline_readme)
+                original_head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+                result = self.run_git(
+                    ["commit", "-m", f"must block blank-boundary case: {label}"],
+                    env=hook_env,
+                )
+                output = result.stdout + result.stderr
+                safe_output = output
+                private_texts = [
+                    *credentials,
+                    *credential_lines,
+                    "SAFE_TRAILING_HEADER",
+                    "SAFE_REPEATED_HEADER",
+                    FAKE_GITHUB_TOKEN,
+                ]
+                for private_text in private_texts:
+                    safe_output = safe_output.replace(
+                        private_text,
+                        "[redacted test content]",
+                    )
+
+                expected_location_label = "; ".join(
+                    f"line {line}: {family}"
+                    for line, family in expected_locations
+                )
+                self.assertNotEqual(result.returncode, 0, safe_output)
+                self.assertIn(
+                    f"README.md ({expected_location_label})",
+                    output,
+                    safe_output,
+                )
+                self.assertIn("No GitHub requests were made", output, safe_output)
+                for private_text in private_texts:
+                    self.assertFalse(private_text in output, safe_output)
+                self.assertEqual(
+                    self.run_git(["rev-parse", "HEAD"]).stdout.strip(),
+                    original_head,
+                )
+                self.assertEqual(
+                    self.run_git(["diff", "--cached", "--name-only"]).stdout.strip(),
+                    "gitmesh-template/README.md",
+                )
+                self.assertFalse(self.network_marker.exists())
+
     def test_precommit_hook_reports_credentials_from_every_staged_source_file(self):
         staged_sources = [
             (
