@@ -60,6 +60,15 @@ function getToken() {
   return token;
 }
 
+function sameFileSnapshot(before, after) {
+  return before.dev === after.dev
+    && before.ino === after.ino
+    && before.mode === after.mode
+    && before.size === after.size
+    && before.mtimeNs === after.mtimeNs
+    && before.ctimeNs === after.ctimeNs;
+}
+
 function requireSha(value, label) {
   if (typeof value !== "string" || !/^[a-f0-9]{40}$/.test(value)) {
     throw new Error(`GitHub returned an invalid ${label}; sync stopped.`);
@@ -70,11 +79,19 @@ function requireSha(value, label) {
 function readSourceFiles() {
   return ALLOWED_FILES.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
-    const fileInfo = fs.lstatSync(sourcePath);
-    if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.size > MAX_SOURCE_BYTES) {
+    const fileInfo = fs.lstatSync(sourcePath, { bigint: true });
+    if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.size > BigInt(MAX_SOURCE_BYTES)) {
       throw new Error(`Refusing to sync an invalid or oversized source file: ${source}`);
     }
     const content = fs.readFileSync(sourcePath);
+    const currentInfo = fs.lstatSync(sourcePath, { bigint: true });
+    if (!sameFileSnapshot(fileInfo, currentInfo) || BigInt(content.length) !== fileInfo.size) {
+      throw new Error(
+        `JavaScript source changed during syntax validation: ${source}. ` +
+        "Save the intended file and retry the source sync; syntax validation will run again. " +
+        "No GitHub requests were made.",
+      );
+    }
     if (content.includes(0)) {
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }

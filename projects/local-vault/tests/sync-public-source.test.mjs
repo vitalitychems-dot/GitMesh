@@ -79,6 +79,16 @@ function runSyncWithSyntaxResult(t, mode) {
       'import childProcess from "node:child_process";',
       'import { syncBuiltinESMExports } from "node:module";',
       "const originalSpawnSync = childProcess.spawnSync.bind(childProcess);",
+      "const originalReadFileSync = fs.readFileSync.bind(fs);",
+      "let sourceChangedDuringRead = false;",
+      "fs.readFileSync = (file, ...args) => {",
+      "  const content = originalReadFileSync(file, ...args);",
+      '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "changed-during-read" && !sourceChangedDuringRead && typeof file === "string" && file.endsWith("gitmesh-ultimate-core.mjs")) {',
+      "    sourceChangedDuringRead = true;",
+      `    fs.writeFileSync(file, "// ${privateNodeOutput}\\n");`,
+      "  }",
+      "  return content;",
+      "};",
       "childProcess.spawnSync = (command, args, options) => {",
       '  if (command === process.execPath && Array.isArray(args) && args.includes("--check")) {',
       '    fs.writeFileSync(process.env.GITMESH_TEST_SYNTAX_MARKER, "invoked");',
@@ -407,6 +417,24 @@ test("genuine syntax errors still report invalid JavaScript without parser outpu
       "gitmesh-ultimate-core.mjs. Correct the JavaScript and retry the source sync. " +
       "No GitHub requests were made.",
   );
+});
+
+test("syntax validation rejects a source file that changes during inspection", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "changed-during-read");
+  const { output, result, syntaxMarker, fetchMarker, privateTexts } = fixture;
+
+  assert.notEqual(result.status, 0, output);
+  assert.equal(
+    output.trim(),
+    "JavaScript source changed during syntax validation: gitmesh-ultimate-core.mjs. " +
+      "Save the intended file and retry the source sync; syntax validation will run again. " +
+      "No GitHub requests were made.",
+  );
+  assert.ok(!fs.existsSync(syntaxMarker), "syntax validation used a stale source snapshot");
+  assert.ok(!fs.existsSync(fetchMarker), "source sync attempted a GitHub request");
+  for (const privateText of privateTexts) {
+    assert.ok(!output.includes(privateText), `private diagnostic leaked: ${privateText}`);
+  }
 });
 
 test("GitHub request timeout stops sync without leaking source or continuing writes", (t) => {
