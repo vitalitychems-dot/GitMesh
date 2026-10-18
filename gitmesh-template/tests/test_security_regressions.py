@@ -1845,6 +1845,41 @@ process.on("exit", saveCapture);
         )
         self.assertEqual(observed_reads, expected_reads)
 
+    def test_local_source_check_passes_with_token_without_github_requests(self):
+        result = self.run_sync(
+            token_value=FAKE_GITHUB_TOKEN,
+            args=("--check-local",),
+        )
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("no credential-like values found in 3 allowlisted source files", result.stdout)
+        self.assertIn("JavaScript syntax passed for 2 allowlisted JavaScript source files", result.stdout)
+        self.assertIn("No GitHub requests were made", result.stdout)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, output)
+        self.assert_safe_failure_output(result)
+
+        capture = json.loads(self.capture.read_text())
+        self.assertTrue(capture["parentCredentials"]["hasGitHubToken"])
+        self.assertEqual(capture["requests"], [])
+        self.assertFalse(
+            any(request["method"] in {"POST", "PUT", "PATCH", "DELETE"}
+                for request in capture["requests"])
+        )
+        self.assertEqual(capture["preflightCalls"], [])
+        self.assertEqual(len(capture["syntaxCheckCalls"]), 2)
+
+        expected_reads = Counter(
+            (method, str((self.source_root / source).resolve()))
+            for source in ALLOWED_SOURCE_NAMES
+            for method in ("lstatSync", "openSync", "readFileSync")
+        )
+        observed_reads = Counter(
+            (event["method"], event["path"])
+            for event in capture["filesystemReads"]
+        )
+        self.assertEqual(observed_reads, expected_reads)
+
     def test_local_source_check_reports_credentials_without_leaking(self):
         readme = self.source_root / "README.md"
         original_content = readme.read_bytes()
