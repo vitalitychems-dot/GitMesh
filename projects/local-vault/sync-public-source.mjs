@@ -32,6 +32,18 @@ function validateJavaScriptSyntax(content, source) {
     maxBuffer: 64 * 1024,
     env: { PATH: process.env.PATH ?? "" },
   });
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(
+      `Node syntax validation timed out for ${source}. ` +
+      "Retry the source sync. No GitHub requests were made.",
+    );
+  }
+  if (result.signal) {
+    throw new Error(
+      `Node syntax validation was interrupted for ${source}. ` +
+      "Retry the source sync. No GitHub requests were made.",
+    );
+  }
   if (result.error || result.status !== 0) {
     throw new Error(
       `Refusing to sync JavaScript that fails Node syntax validation: ${source}. ` +
