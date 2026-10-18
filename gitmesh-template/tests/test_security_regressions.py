@@ -2783,6 +2783,45 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_javascript_syntax_locations_follow_unicode_line_separators_without_leaking_source(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_content = source_path.read_bytes()
+        safe_header = "const SAFE_UNICODE_SEPARATOR_CONTEXT = 1;"
+        invalid_line = "const UNICODE_SEPARATOR_SYNTAX_SOURCE_SENTINEL = ;"
+        cases = (
+            ("U+2028", "\u2028"),
+            ("U+2029", "\u2029"),
+        )
+        try:
+            for case_name, separator in cases:
+                with self.subTest(separator=case_name):
+                    invalid_source = f"{safe_header}{separator}{invalid_line}\n"
+                    source_path.write_text(invalid_source, encoding="utf-8")
+                    result = self.run_sync()
+                    output = result.stdout + result.stderr
+                    expected_column = invalid_line.index(";") + 1
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        f"{source_path.name} (line 2, column {expected_column})",
+                        result.stderr,
+                    )
+                    self.assertIn("No GitHub requests were made", result.stderr)
+                    self.assertNotIn(invalid_source, output)
+                    self.assertNotIn(invalid_line, output)
+                    self.assertNotIn(safe_header, output)
+                    self.assertNotIn("UNICODE_SEPARATOR_SYNTAX_SOURCE_SENTINEL", output)
+                    self.assertNotIn("SyntaxError", output)
+                    self.assertNotIn("[stdin]", output)
+                    self.assertNotIn("Node.js v", output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+                    self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_syntax_diagnostics_are_sanitized_across_node_formats(self):
         source_path = self.source_root / "gitmesh-ultimate-core.mjs"
         original_content = source_path.read_bytes()
