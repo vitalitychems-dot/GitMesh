@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -24,7 +25,10 @@ const ALLOWED_FILES = [
   },
 ];
 
-function validateJavaScriptSyntax(content, source) {
+function validateJavaScriptSyntax(content, source, { syntaxOnly = false } = {}) {
+  const retryInstruction = syntaxOnly
+    ? "Save the intended file and rerun --check-syntax."
+    : "Retry the source sync.";
   const result = spawnSync(process.execPath, ["--input-type=module", "--check"], {
     input: content,
     encoding: "utf8",
@@ -35,16 +39,22 @@ function validateJavaScriptSyntax(content, source) {
   if (result.error?.code === "ETIMEDOUT") {
     throw new Error(
       `Node syntax validation timed out for ${source}. ` +
-      "Retry the source sync. No GitHub requests were made.",
+      `${retryInstruction} No GitHub requests were made.`,
     );
   }
   if (result.signal) {
     throw new Error(
       `Node syntax validation was interrupted for ${source}. ` +
-      "Retry the source sync. No GitHub requests were made.",
+      `${retryInstruction} No GitHub requests were made.`,
     );
   }
   if (result.error || result.status !== 0) {
+    if (syntaxOnly) {
+      throw new Error(
+        `JavaScript syntax validation failed for ${source}. ` +
+        "Correct the JavaScript and rerun --check-syntax. No GitHub requests were made.",
+      );
+    }
     throw new Error(
       `Refusing to sync JavaScript that fails Node syntax validation: ${source}. ` +
       "Correct the JavaScript and retry the source sync. No GitHub requests were made.",
@@ -76,27 +86,50 @@ function requireSha(value, label) {
   return value;
 }
 
-function readSourceFiles() {
-  return ALLOWED_FILES.map(({ source, target }) => {
+function readSourceFiles({ syntaxOnly = false } = {}) {
+  const sourceFiles = syntaxOnly
+    ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
+    : ALLOWED_FILES;
+  return sourceFiles.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
+    const isJavaScript = path.extname(source) === ".mjs";
     const fileInfo = fs.lstatSync(sourcePath, { bigint: true });
     if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.size > BigInt(MAX_SOURCE_BYTES)) {
-      throw new Error(`Refusing to sync an invalid or oversized source file: ${source}`);
+      const action = syntaxOnly ? "check" : "sync";
+      throw new Error(`Refusing to ${action} an invalid or oversized source file: ${source}`);
     }
     const content = fs.readFileSync(sourcePath);
     const currentInfo = fs.lstatSync(sourcePath, { bigint: true });
     if (!sameFileSnapshot(fileInfo, currentInfo) || BigInt(content.length) !== fileInfo.size) {
+      const retryInstruction = syntaxOnly
+        ? "Save the intended file and rerun --check-syntax."
+        : "Save the intended file and retry the source sync; syntax validation will run again.";
       throw new Error(
         `JavaScript source changed during syntax validation: ${source}. ` +
-        "Save the intended file and retry the source sync; syntax validation will run again. " +
-        "No GitHub requests were made.",
+        `${retryInstruction} No GitHub requests were made.`,
       );
     }
     if (content.includes(0)) {
+      if (isJavaScript) {
+        throw new Error(
+          `JavaScript source ${source} contains NUL bytes. ` +
+          "Save it as valid UTF-8 text and rerun --check-syntax. " +
+          "No GitHub requests were made.",
+        );
+      }
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
-    if (path.extname(source) === ".mjs") {
-      validateJavaScriptSyntax(content, source);
+    if (isJavaScript) {
+      try {
+        new TextDecoder("utf-8", { fatal: true }).decode(content);
+      } catch {
+        throw new Error(
+          `JavaScript source ${source} is not valid UTF-8. ` +
+          "Save it as valid UTF-8 text and rerun --check-syntax. " +
+          "No GitHub requests were made.",
+        );
+      }
+      validateJavaScriptSyntax(content, source, { syntaxOnly });
     }
     return { target, content };
   });
@@ -197,7 +230,19 @@ async function syncSource() {
   console.log(`Commit: ${commitSha}`);
 }
 
-if (process.argv.length !== 2) {
+function checkJavaScriptSyntax() {
+  readSourceFiles({ syntaxOnly: true });
+  console.log("JavaScript syntax validation passed.");
+}
+
+if (process.argv.length === 3 && process.argv[2] === "--check-syntax") {
+  try {
+    checkJavaScriptSyntax();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "JavaScript syntax validation failed.");
+    process.exitCode = 1;
+  }
+} else if (process.argv.length !== 2) {
   console.error("This program does not accept command-line arguments.");
   process.exitCode = 2;
 } else {

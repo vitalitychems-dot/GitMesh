@@ -53,7 +53,7 @@ test("README timeout guidance matches the fixed source-sync limits", () => {
   );
 });
 
-function runSyncWithSyntaxResult(t, mode) {
+function runSyncWithSyntaxResult(t, mode, { checkOnly = false } = {}) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-syntax-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
 
@@ -68,10 +68,24 @@ function runSyncWithSyntaxResult(t, mode) {
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
   }
-  fs.writeFileSync(
-    path.join(tempDir, "gitmesh-ultimate-core.mjs"),
-    `export const ${privateSource} = ;\n`,
-  );
+  const sourcePath = path.join(tempDir, "gitmesh-ultimate-core.mjs");
+  if (mode === "invalid-utf8") {
+    fs.writeFileSync(
+      sourcePath,
+      Buffer.concat([Buffer.from(`// ${privateSource}\n`), Buffer.from([0xc3, 0x28])]),
+    );
+  } else if (mode === "nul") {
+    fs.writeFileSync(
+      sourcePath,
+      Buffer.concat([
+        Buffer.from(`// ${privateSource}\nconst value = "`),
+        Buffer.from([0]),
+        Buffer.from('";\n'),
+      ]),
+    );
+  } else if (mode !== "success") {
+    fs.writeFileSync(sourcePath, `export const ${privateSource} = ;\n`);
+  }
   fs.writeFileSync(
     preloadPath,
     [
@@ -93,7 +107,7 @@ function runSyncWithSyntaxResult(t, mode) {
       '  if (command === process.execPath && Array.isArray(args) && args.includes("--check")) {',
       '    fs.writeFileSync(process.env.GITMESH_TEST_SYNTAX_MARKER, "invoked");',
       '    const mode = process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE;',
-      '    if (mode === "syntax") return originalSpawnSync(command, args, options);',
+      '    if (mode === "syntax" || mode === "success") return originalSpawnSync(command, args, options);',
       '    const errorCode = mode === "timeout" ? "ETIMEDOUT" : "ENOBUFS";',
       "    return {",
       `      error: mode === "interrupted" ? undefined : Object.assign(new Error("${privateNodeOutput}"), { code: errorCode }),`,
@@ -115,18 +129,22 @@ function runSyncWithSyntaxResult(t, mode) {
     ].join("\n"),
   );
 
-  const result = spawnSync(process.execPath, [scriptPath], {
+  const env = {
+    PATH: process.env.PATH ?? "",
+    GITMESH_TEST_SYNTAX_MARKER: syntaxMarker,
+    GITMESH_TEST_FETCH_MARKER: fetchMarker,
+    GITMESH_TEST_SYNTAX_FAILURE_MODE: mode,
+    NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
+  };
+  if (!checkOnly) env.GITHUB_TOKEN = fakeToken;
+  const result = spawnSync(process.execPath, [
+    scriptPath,
+    ...(checkOnly ? ["--check-syntax"] : []),
+  ], {
     cwd: tempDir,
     encoding: "utf8",
     timeout: 30_000,
-    env: {
-      PATH: process.env.PATH ?? "",
-      GITHUB_TOKEN: fakeToken,
-      GITMESH_TEST_SYNTAX_MARKER: syntaxMarker,
-      GITMESH_TEST_FETCH_MARKER: fetchMarker,
-      GITMESH_TEST_SYNTAX_FAILURE_MODE: mode,
-      NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
-    },
+    env,
   });
   return {
     output: result.stdout + result.stderr,
@@ -142,6 +160,17 @@ function assertSafeSyntaxFailure(fixture, expectedMessage) {
   assert.notEqual(result.status, 0, output);
   assert.equal(output.trim(), expectedMessage);
   assert.ok(fs.existsSync(syntaxMarker), "the bounded syntax subprocess was not exercised");
+  assert.ok(!fs.existsSync(fetchMarker), "source sync attempted a GitHub request");
+  for (const privateText of privateTexts) {
+    assert.ok(!output.includes(privateText), `private diagnostic leaked: ${privateText}`);
+  }
+}
+
+function assertSafeJavaScriptTextFailure(fixture, expectedMessage) {
+  const { output, result, syntaxMarker, fetchMarker, privateTexts } = fixture;
+  assert.notEqual(result.status, 0, output);
+  assert.equal(output.trim(), expectedMessage);
+  assert.ok(!fs.existsSync(syntaxMarker), "syntax validation ran on non-text JavaScript");
   assert.ok(!fs.existsSync(fetchMarker), "source sync attempted a GitHub request");
   for (const privateText of privateTexts) {
     assert.ok(!output.includes(privateText), `private diagnostic leaked: ${privateText}`);
@@ -417,6 +446,30 @@ test("genuine syntax errors still report invalid JavaScript without parser outpu
       "gitmesh-ultimate-core.mjs. Correct the JavaScript and retry the source sync. " +
       "No GitHub requests were made.",
   );
+});
+
+for (const [mode, problem, expectedReason] of [
+  ["invalid-utf8", "invalid UTF-8", "is not valid UTF-8"],
+  ["nul", "NUL bytes", "contains NUL bytes"],
+]) {
+  test(`non-text JavaScript reports syntax-specific repair guidance for ${problem}`, (t) => {
+    const fixture = runSyncWithSyntaxResult(t, mode, { checkOnly: true });
+    assertSafeJavaScriptTextFailure(
+      fixture,
+      `JavaScript source gitmesh-ultimate-core.mjs ${expectedReason}. ` +
+        "Save it as valid UTF-8 text and rerun --check-syntax. " +
+        "No GitHub requests were made.",
+    );
+  });
+}
+
+test("--check-syntax succeeds without a GitHub token or network request", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "success", { checkOnly: true });
+
+  assert.equal(fixture.result.status, 0, fixture.output);
+  assert.equal(fixture.output.trim(), "JavaScript syntax validation passed.");
+  assert.ok(fs.existsSync(fixture.syntaxMarker), "the syntax subprocess was not exercised");
+  assert.ok(!fs.existsSync(fixture.fetchMarker), "syntax check attempted a GitHub request");
 });
 
 test("syntax validation rejects a source file that changes during inspection", (t) => {
