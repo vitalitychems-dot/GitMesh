@@ -110,6 +110,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_local_credential_check_reports_location_without_exposing_value",
   "test_local_credential_check_repairs_unavailable_linked_and_oversized_sources",
   "test_local_credential_check_reports_all_files_needing_repair",
+  "test_local_credential_check_sanitizes_permission_denied_open_failures",
   "test_local_credential_check_guides_non_text_repair_without_leaking",
   "test_precommit_hook_blocks_staged_credentials_without_exposing_them",
   "test_precommit_hook_blocks_staged_javascript_syntax_errors_from_index",

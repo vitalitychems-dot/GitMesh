@@ -550,7 +550,17 @@ for (const name of ["lstatSync", "openSync", "readFileSync"]) {
       return result;
     }
     if (name === "openSync") {
-      if (isPath) filesystemReads.push({ method: name, path: resolvedPath });
+      if (isPath) {
+        filesystemReads.push({ method: name, path: resolvedPath });
+        const deniedPath = process.env.GITMESH_TEST_PERMISSION_DENIED_PATH;
+        if (deniedPath && resolvedPath === path.resolve(deniedPath)) {
+          const error = new Error(
+            `EACCES: permission denied, open '${resolvedPath}' PRIVATE_PERMISSION_OS_DIAGNOSTIC_SENTINEL`,
+          );
+          error.code = "EACCES";
+          throw error;
+        }
+      }
       const descriptor = original(target, ...args);
       if (isPath) {
         openedFiles.set(descriptor, resolvedPath);
@@ -2327,6 +2337,59 @@ process.on("exit", saveCapture);
             readme_path.unlink(missing_ok=True)
             readme_path.write_bytes(original_readme)
             sync_path.write_bytes(original_sync)
+
+    def test_local_credential_check_sanitizes_permission_denied_open_failures(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_content = source_path.read_bytes()
+        private_content = b"PRIVATE_UNREADABLE_SOURCE_SENTINEL"
+
+        try:
+            source_path.write_bytes(private_content)
+            result = self.run_sync(
+                token_value=None,
+                args=("--check-credentials",),
+                env_overrides={
+                    "GITMESH_TEST_PERMISSION_DENIED_PATH": str(source_path),
+                },
+            )
+            output = result.stdout + result.stderr
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Local credential check could not inspect every allowlisted source file",
+                result.stderr,
+            )
+            self.assertIn(source_path.name, result.stderr)
+            self.assertIn(
+                "Restore it as a standalone regular file, save it, then rerun the local credential check with --check-credentials.",
+                result.stderr,
+            )
+            self.assertIn("No GitHub requests were made", result.stderr)
+            self.assertNotIn("EACCES", output)
+            self.assertNotIn("permission denied", output)
+            self.assertNotIn("PRIVATE_PERMISSION_OS_DIAGNOSTIC_SENTINEL", output)
+            self.assertNotIn("PRIVATE_UNREADABLE_SOURCE_SENTINEL", output)
+            self.assertNotIn(str(source_path), output)
+            self.assertNotIn("rerun sync", output)
+            self.assert_safe_failure_output(result)
+
+            capture = json.loads(self.capture.read_text())
+            self.assertEqual(capture["requests"], [])
+            self.assertEqual(capture["preflightCalls"], [])
+            source_reads = [
+                (event["method"], event["path"])
+                for event in capture["filesystemReads"]
+                if event["path"] == str(source_path)
+            ]
+            self.assertEqual(
+                source_reads,
+                [
+                    ("lstatSync", str(source_path)),
+                    ("openSync", str(source_path)),
+                ],
+            )
+        finally:
+            source_path.write_bytes(original_content)
 
     def test_local_credential_check_guides_non_text_repair_without_leaking(self):
         source_path = self.source_root / "README.md"
