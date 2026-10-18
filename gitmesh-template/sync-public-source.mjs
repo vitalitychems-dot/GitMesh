@@ -83,6 +83,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_in_place_source_edit_during_read_is_rejected_before_github",
   "test_invalid_javascript_stops_before_github_without_printing_source",
   "test_javascript_syntax_locations_are_accurate_with_tabs_and_crlf_without_leaking_source",
+  "test_javascript_syntax_columns_follow_utf16_units_after_emoji_and_combining_marks",
   "test_syntax_diagnostics_are_sanitized_across_node_formats",
   "test_embedded_credentials_stop_before_github_without_leaking_values",
   "test_credentials_in_multiple_sources_are_all_reported_without_leaking",
@@ -539,6 +540,7 @@ function syntaxErrorLocation(nodeDiagnostics) {
 
     const line = Number(header[1]);
     const caret = /^[\t ]*\^/.exec(lines[index + 2]);
+    // Include ^ so the fallback column is one-based, matching JavaScript's UTF-16 positions.
     const column = header[2] ? Number(header[2]) : caret?.[0].length;
     if (
       Number.isSafeInteger(line) &&

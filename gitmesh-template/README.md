@@ -43,7 +43,7 @@ The scrypt verifier is local access control, not device encryption or account au
 
 ## Sync source to GitHub
 
-For one offline check of the allowlisted source files, run `node ./sync-public-source.mjs --check-local`. It checks for credential-like values in all three source files and validates JavaScript syntax in both `.mjs` files. It needs no `GITHUB_TOKEN`, makes no network requests, and does not publish. Failures show only safe filenames and line or column numbers, never credential values, source lines, or raw Node diagnostics.
+For one offline check of the allowlisted source files, run `node ./sync-public-source.mjs --check-local`. It checks for credential-like values in all three source files and validates JavaScript syntax in both `.mjs` files. It needs no `GITHUB_TOKEN`, makes no network requests, and does not publish. Syntax locations use one-based line numbers and one-based UTF-16 code-unit columns, matching JavaScript string indexes. Failures show only safe filenames and line or column numbers, never credential values, source lines, or raw Node diagnostics.
 
 This is separate from vault data transfer and makes an outbound HTTPS request to GitHub. On Replit, store a fine-grained token as the `GITHUB_TOKEN` Secret, limited to the `vitalitychems-dot/GitMesh` repository with Contents write access. Replit Secrets are project-level and available to processes running in the project; they are not folder-scoped. The sync script reads the token from `process.env.GITHUB_TOKEN` only when run and never writes or prints it.
 

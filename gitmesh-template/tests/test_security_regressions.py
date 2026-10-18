@@ -2735,6 +2735,54 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_javascript_syntax_columns_follow_utf16_units_after_emoji_and_combining_marks(self):
+        source_path = self.source_root / "gitmesh-ultimate-core.mjs"
+        original_content = source_path.read_bytes()
+        cases = (
+            (
+                "emoji",
+                'const prefix = "😀"; const EMOJI_SYNTAX_SOURCE_SENTINEL = ;',
+                "EMOJI_SYNTAX_SOURCE_SENTINEL",
+            ),
+            (
+                "combining accent",
+                'const prefix = "e\u0301"; const COMBINING_SYNTAX_SOURCE_SENTINEL = ;',
+                "COMBINING_SYNTAX_SOURCE_SENTINEL",
+            ),
+        )
+        try:
+            for case_name, invalid_line, source_sentinel in cases:
+                with self.subTest(case=case_name):
+                    invalid_source = f"const SAFE_SYNTAX_CONTEXT = 1;\n{invalid_line}\n"
+                    source_path.write_text(invalid_source, encoding="utf-8")
+                    result = self.run_sync()
+                    output = result.stdout + result.stderr
+                    token_index = invalid_line.rindex(";")
+                    utf16_column = (
+                        len(invalid_line[:token_index].encode("utf-16-le")) // 2
+                    ) + 1
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        f"{source_path.name} (line 2, column {utf16_column})",
+                        result.stderr,
+                    )
+                    self.assertIn("No GitHub requests were made", result.stderr)
+                    self.assertNotIn(invalid_source, output)
+                    self.assertNotIn(invalid_line, output)
+                    self.assertNotIn(source_sentinel, output)
+                    self.assertNotIn("const prefix", output)
+                    self.assertNotIn("SyntaxError", output)
+                    self.assertNotIn("[stdin]", output)
+                    self.assertNotIn("Node.js v", output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+                    self.assertEqual(capture["preflightCalls"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_syntax_diagnostics_are_sanitized_across_node_formats(self):
         source_path = self.source_root / "gitmesh-ultimate-core.mjs"
         original_content = source_path.read_bytes()
