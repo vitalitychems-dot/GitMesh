@@ -1992,6 +1992,93 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_local_syntax_check_repairs_unavailable_linked_and_oversized_sources(self):
+        source_name = "gitmesh-ultimate-core.mjs"
+        source_path = self.source_root / source_name
+        private_path = self.source_root / "SovereignMeshVault/ledger_matrix/private-record.json"
+        original_content = source_path.read_bytes()
+        unavailable_guidance = (
+            "Review and save the intended file state, then rerun the local syntax check "
+            "with --check-syntax."
+        )
+        linked_guidance = (
+            "Save it as a regular file within the size limit, then rerun the local syntax check "
+            "with --check-syntax."
+        )
+        cases = (
+            (
+                "unavailable",
+                "Refusing to check an unavailable JavaScript source file",
+                unavailable_guidance,
+                (),
+                [],
+            ),
+            (
+                "symlink",
+                "Refusing to check an invalid, linked, or oversized JavaScript source file",
+                linked_guidance,
+                ("PRIVATE_RECORD_SENTINEL",),
+                [("lstatSync", str(source_path))],
+            ),
+            (
+                "hard link",
+                "Refusing to check an invalid, linked, or oversized JavaScript source file",
+                linked_guidance,
+                ("PRIVATE_RECORD_SENTINEL",),
+                [("lstatSync", str(source_path))],
+            ),
+            (
+                "oversized",
+                "Refusing to check an invalid, linked, or oversized JavaScript source file",
+                linked_guidance,
+                ("OVERSIZED_SYNTAX_CHECK_SOURCE_SENTINEL",),
+                [("lstatSync", str(source_path))],
+            ),
+        )
+
+        try:
+            for case_name, expected_error, expected_guidance, sentinels, expected_reads in cases:
+                with self.subTest(source_type=case_name):
+                    source_path.unlink(missing_ok=True)
+                    if case_name == "symlink":
+                        source_path.symlink_to(private_path)
+                    elif case_name == "hard link":
+                        os.link(private_path, source_path)
+                    elif case_name == "oversized":
+                        source_path.write_bytes(
+                            b"OVERSIZED_SYNTAX_CHECK_SOURCE_SENTINEL" + b"x" * (512 * 1024)
+                        )
+
+                    result = self.run_sync(
+                        token_value=None,
+                        args=("--check-syntax",),
+                    )
+                    output = result.stdout + result.stderr
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected_error, result.stderr)
+                    self.assertIn(source_name, result.stderr)
+                    self.assertIn(expected_guidance, result.stderr)
+                    self.assertIn("No GitHub requests were made", result.stderr)
+                    self.assertNotIn("--check-credentials", output)
+                    self.assertNotIn("rerun sync", output)
+                    self.assertNotIn("Refusing to sync", output)
+                    for sentinel in sentinels:
+                        self.assertNotIn(sentinel, output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+                    self.assertEqual(capture["preflightCalls"], [])
+                    observed_reads = [
+                        (event["method"], event["path"])
+                        for event in capture["filesystemReads"]
+                        if event["path"] == str(source_path)
+                    ]
+                    self.assertEqual(observed_reads, expected_reads)
+        finally:
+            source_path.unlink(missing_ok=True)
+            source_path.write_bytes(original_content)
+
     def test_local_credential_check_reports_location_without_exposing_value(self):
         source_path = self.source_root / "README.md"
         credential = "ghp_" + "R" * 36
