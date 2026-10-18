@@ -231,8 +231,11 @@ async function syncSource() {
 }
 
 function checkJavaScriptSyntax() {
-  readSourceFiles({ syntaxOnly: true });
-  console.log("JavaScript syntax validation passed.");
+  const files = readSourceFiles({ syntaxOnly: true });
+  const names = files.map(({ target }) => path.basename(target));
+  console.log(
+    `JavaScript syntax validation passed for ${names.length} files: ${names.join(", ")}.`,
+  );
 }
 
 if (process.argv.length === 3 && process.argv[2] === "--check-syntax") {
