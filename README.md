@@ -17,3 +17,8 @@ The first project is `projects/admit`. Run `node admit.mjs`. Payment is not hand
 ## The house
 
 The block house is on TESSERA, not in this mesh. This repository stays the public room. The private book is not here.
+
+## Tessera coordination
+
+See the [Tessera–GitMesh local coordination contract](https://github.com/vitalitychems-dot/combined/blob/main/docs/TESSERA-GITMESH-INTEGRATION.md) for bounded, human-approved local coordination.
+
