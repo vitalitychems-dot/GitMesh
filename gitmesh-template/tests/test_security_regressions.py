@@ -2748,6 +2748,41 @@ process.on("exit", saveCapture);
         finally:
             source_path.write_bytes(original_content)
 
+    def test_embedded_credentials_report_lines_with_bom_before_leading_separators_without_leaking(self):
+        source_path = self.source_root / "README.md"
+        original_content = source_path.read_bytes()
+        credential = "ghp_" + "F" * 36
+        credential_line = f"token={credential}"
+        source_text = "\ufeff\r\n\u2028\r" + credential_line + "\n"
+
+        try:
+            source_path.write_bytes(source_text.encode("utf-8"))
+
+            for mode, args, token_value in (
+                ("sync", (), FAKE_GITHUB_TOKEN),
+                ("local credential check", ("--check-credentials",), None),
+                ("combined local check", ("--check-local",), None),
+            ):
+                with self.subTest(mode=mode):
+                    result = self.run_sync(args=args, token_value=token_value)
+                    output = result.stdout + result.stderr
+                    safe_output = output.replace(
+                        credential,
+                        "[redacted test credential]",
+                    )
+
+                    self.assertNotEqual(result.returncode, 0, safe_output)
+                    self.assertIn("README.md (line 4)", result.stderr, safe_output)
+                    self.assertIn("No GitHub requests were made", result.stderr, safe_output)
+                    self.assertNotIn(credential, output)
+                    self.assertNotIn(credential_line, output)
+                    self.assert_safe_failure_output(result)
+
+                    capture = json.loads(self.capture.read_text())
+                    self.assertEqual(capture["requests"], [])
+        finally:
+            source_path.write_bytes(original_content)
+
     def test_changed_source_updates_only_the_changed_allowlisted_file(self):
         self.set_remote_snapshot()
         readme = self.source_root / "README.md"
