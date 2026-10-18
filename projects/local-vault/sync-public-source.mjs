@@ -100,8 +100,17 @@ async function githubRequest(token, route, method = "GET", body = undefined) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(20_000),
     });
-  } catch {
-    throw new Error(`GitHub request failed during ${method} ${route}.`);
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error(
+        `GitHub request timed out during ${method} ${route}. ` +
+        "Check the connection and retry; sync stopped.",
+      );
+    }
+    throw new Error(
+      `GitHub request failed during ${method} ${route}. ` +
+      "Check the connection and retry; sync stopped.",
+    );
   }
   if (!response.ok) {
     throw new Error(`GitHub request failed with HTTP ${response.status} during ${method} ${route}.`);
@@ -121,13 +130,14 @@ async function syncSource() {
   const parentCommit = await githubRequest(token, `/git/commits/${parentSha}`);
   const baseTreeSha = requireSha(parentCommit?.tree?.sha, "base tree");
 
-  const blobs = await Promise.all(files.map(async ({ content }) => {
+  const blobs = [];
+  for (const { content } of files) {
     const blob = await githubRequest(token, "/git/blobs", "POST", {
       content: content.toString("base64"),
       encoding: "base64",
     });
-    return requireSha(blob?.sha, "blob SHA");
-  }));
+    blobs.push(requireSha(blob?.sha, "blob SHA"));
+  }
 
   const tree = await githubRequest(token, "/git/trees", "POST", {
     base_tree: baseTreeSha,
