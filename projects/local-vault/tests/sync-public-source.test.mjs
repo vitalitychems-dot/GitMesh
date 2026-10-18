@@ -61,7 +61,7 @@ function runSyncWithSyntaxResult(
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-syntax-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
 
-  const scriptPath = path.join(tempDir, "sync-public-source.mjs");
+  const scriptPath = path.join(tempDir, "run-sync.mjs");
   const preloadPath = path.join(tempDir, "simulate-syntax-result.mjs");
   const syntaxMarker = path.join(tempDir, "syntax-check-invoked");
   const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
@@ -73,6 +73,7 @@ function runSyncWithSyntaxResult(
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
   }
+  fs.copyFileSync(path.join(SOURCE_DIR, "sync-public-source.mjs"), scriptPath);
   const sourcePath = path.join(tempDir, "gitmesh-ultimate-core.mjs");
   if (mode === "invalid-utf8") {
     fs.writeFileSync(
@@ -108,6 +109,15 @@ function runSyncWithSyntaxResult(
   } else if (mode === "eacces-open") {
     fs.appendFileSync(sourcePath, `\n// ${privateSource}\n`);
     fs.appendFileSync(scriptPath, `\n// ${privateSource}\n`);
+  } else if (mode === "multiple-syntax") {
+    fs.writeFileSync(
+      sourcePath,
+      `// ${privateSource}\nexport const FIRST_PRIVATE_SYNTAX_SENTINEL = ;\n`,
+    );
+    fs.writeFileSync(
+      path.join(tempDir, "sync-public-source.mjs"),
+      "\nexport const SECOND_PRIVATE_SYNTAX_SENTINEL = ;\n",
+    );
   } else if (mode !== "success") {
     fs.writeFileSync(sourcePath, `export const ${privateSource} = ;\n`);
   } else {
@@ -145,7 +155,7 @@ function runSyncWithSyntaxResult(
       '      inputHasSourceSentinel: Buffer.from(options?.input ?? "").includes(Buffer.from(process.env.GITMESH_TEST_SOURCE_SENTINEL)),',
       '    }) + "\\n");',
       '    const mode = process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE;',
-      '    if (mode === "syntax" || mode === "success" || mode === "eacces-open") return originalSpawnSync(command, args, options);',
+      '    if (mode === "syntax" || mode === "success" || mode === "eacces-open" || mode === "multiple-syntax") return originalSpawnSync(command, args, options);',
       '    const errorCode = mode === "timeout" ? "ETIMEDOUT" : "ENOBUFS";',
       "    return {",
       `      error: mode === "interrupted" ? undefined : Object.assign(new Error("${privateNodeOutput}"), { code: errorCode }),`,
@@ -200,6 +210,8 @@ function runSyncWithSyntaxResult(
       privateSource,
       privateNodeOutput,
       fakeToken,
+      "FIRST_PRIVATE_SYNTAX_SENTINEL",
+      "SECOND_PRIVATE_SYNTAX_SENTINEL",
       "ENOBUFS",
       "[stdin]",
       "SyntaxError",
@@ -494,11 +506,13 @@ test("interrupted syntax-check is distinct from invalid JavaScript and stops sou
 
 test("syntax checks keep source text out of parser arguments and environment", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "syntax");
+  const invalidLine = `export const ${fixture.privateSource} = ;`;
+  const invalidColumn = invalidLine.indexOf(";") + 1;
   assertSafeSyntaxFailure(
     fixture,
-    "Refusing to sync JavaScript that fails Node syntax validation: " +
-      "gitmesh-ultimate-core.mjs. Correct the JavaScript and retry the source sync. " +
-      "No GitHub requests were made.",
+    "Refusing to sync JavaScript with syntax errors:\n" +
+      `- gitmesh-ultimate-core.mjs:1:${invalidColumn}\n` +
+      "Correct each file and retry the source sync. No GitHub requests were made.",
   );
   const invocations = fs
     .readFileSync(fixture.syntaxInvocationLog, "utf8")
@@ -522,6 +536,22 @@ test("syntax checks keep source text out of parser arguments and environment", (
       "source content appeared in the parser environment",
     );
   }
+});
+
+test("normal sync reports all syntax errors in stable order without leaking source or parser output", (t) => {
+  const firstFixture = runSyncWithSyntaxResult(t, "multiple-syntax");
+  const secondFixture = runSyncWithSyntaxResult(t, "multiple-syntax");
+  const firstInvalidLine = "export const FIRST_PRIVATE_SYNTAX_SENTINEL = ;";
+  const secondInvalidLine = "export const SECOND_PRIVATE_SYNTAX_SENTINEL = ;";
+  const expected =
+    "Refusing to sync JavaScript with syntax errors:\n" +
+    `- gitmesh-ultimate-core.mjs:2:${firstInvalidLine.indexOf(";") + 1}\n` +
+    `- sync-public-source.mjs:2:${secondInvalidLine.indexOf(";") + 1}\n` +
+    "Correct each file and retry the source sync. No GitHub requests were made.";
+
+  assertSafeSyntaxFailure(firstFixture, expected);
+  assertSafeSyntaxFailure(secondFixture, expected);
+  assert.equal(firstFixture.output, secondFixture.output, "diagnostic ordering was unstable");
 });
 
 test("normal sync stops safely when an allowlisted source cannot be opened", (t) => {
