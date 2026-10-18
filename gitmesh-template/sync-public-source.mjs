@@ -161,6 +161,7 @@ const SAFE_PREFLIGHT_TEST_NAMES = new Set([
   "test_embedded_credentials_report_lines_for_mixed_line_breaks_without_leaking",
   "test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking",
   "test_embedded_credentials_report_lines_for_blank_boundary_separators_without_leaking",
+  "test_embedded_credentials_report_lines_with_bom_before_leading_separators_without_leaking",
   "test_failed_security_preflight_stops_before_github_without_leaking_output",
   "test_many_safe_preflight_failures_use_a_wrapped_copyable_rerun_command",
   "test_security_preflight_multiple_subcases_are_counted_safely",
