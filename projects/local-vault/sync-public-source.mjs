@@ -235,7 +235,11 @@ async function githubRequest(token, route, method = "GET", body = undefined) {
     const retryGuidance =
       status !== null && status >= 500
         ? " Check the connection and retry; sync stopped."
-        : "";
+        : method === "PATCH" &&
+            route === "/git/refs/heads/main" &&
+            (status === 409 || status === 422)
+          ? " The branch may have advanced; rerun the sync to read the latest head; sync stopped."
+          : "";
     throw new Error(
       `GitHub request failed with HTTP ${statusText} during ${method} ${route}.${retryGuidance}`,
     );
