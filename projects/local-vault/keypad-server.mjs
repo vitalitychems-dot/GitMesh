@@ -97,18 +97,23 @@ function sendJson(response, requestId, status, payload) {
 function readJson(request) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let oversized = false;
     const chunks = [];
     request.on("data", (chunk) => {
       size += chunk.length;
-      if (size > BODY_LIMIT) {
+      if (size > BODY_LIMIT && !oversized) {
+        oversized = true;
         reject(Object.assign(new Error("Request too large."), { statusCode: 413 }));
-        request.destroy();
         return;
       }
-      chunks.push(chunk);
+      if (!oversized) chunks.push(chunk);
     });
     request.on("end", () => {
+      if (oversized) return;
       if (size === 0) return reject(Object.assign(new Error("Request body required."), { statusCode: 400 }));
+      if (!/^application\/json(?:\s*;|$)/i.test(request.headers["content-type"] ?? "")) {
+        return reject(Object.assign(new Error("JSON content type required."), { statusCode: 415 }));
+      }
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error();
@@ -229,14 +234,11 @@ export function createKeypadServer({
     return { id, ...session };
   }
 
-  function establishSession(response, requestId, authSession) {
+  function establishSession(response, requestId) {
     const id = randomId(32);
     prune();
     while (sessions.size >= 8) sessions.delete(sessions.keys().next().value);
-    sessions.set(id, {
-      authSession,
-      expiresAt: Date.now() + SESSION_TTL_MS,
-    });
+    sessions.set(id, { expiresAt: Date.now() + SESSION_TTL_MS });
     setHeaders(response, requestId);
     response.setHeader("Set-Cookie", `gitmesh_session=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}`);
   }
@@ -248,12 +250,18 @@ export function createKeypadServer({
     if (!isLoopback(request)) {
       return sendJson(response, requestId, 403, { error: "This app accepts local connections only." });
     }
+    if (typeof request.url !== "string" || request.url.length > 2048) {
+      return sendJson(response, requestId, 414, { error: "Request path is too long." });
+    }
 
     const url = new URL(request.url ?? "/", `http://127.0.0.1:${request.socket.localPort}`);
     const route = `${request.method} ${url.pathname}`;
 
     if (route === "GET /" || route === "GET /rotating-keypad.html") {
+      const previousSessionId = requestCookie(request, "gitmesh_session");
+      sessions.delete(previousSessionId);
       response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.setHeader("Set-Cookie", "gitmesh_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
       return response.end(fs.readFileSync(path.join(ROOT, "rotating-keypad.html")));
     }
     if (route === "GET /rotating-keypad.css") {
@@ -264,20 +272,21 @@ export function createKeypadServer({
       response.setHeader("Content-Type", "text/javascript; charset=utf-8");
       return response.end(fs.readFileSync(path.join(ROOT, "rotating-keypad.js")));
     }
+    if (route === "GET /favicon.ico") {
+      response.writeHead(204);
+      return response.end();
+    }
     if (route === "GET /health") {
       return sendJson(response, requestId, 200, { ok: true, localOnly: true });
     }
     if (route === "GET /api/state") {
       return sendJson(response, requestId, 200, {
         setupRequired: !fs.existsSync(authFile),
-        authenticated: Boolean(currentSession(request)),
       });
     }
     if (route === "GET /api/keymap") {
-      const current = currentSession(request);
       return sendJson(response, requestId, 200, {
         ...newChallenge(),
-        authenticated: Boolean(current),
       });
     }
 
@@ -289,6 +298,9 @@ export function createKeypadServer({
       prune();
       if (failedAttempts.length >= FAILURE_LIMIT) {
         return sendJson(response, requestId, 429, { error: "Too many attempts. Wait five minutes before trying again." });
+      }
+      if (pendingLogins.size >= 8) {
+        return sendJson(response, requestId, 429, { error: "A sign-in is already waiting for confirmation. Cancel it or wait for it to expire." });
       }
       const body = await readJson(request);
       const challenge = consumeChallenge(body.challengeId);
@@ -365,13 +377,13 @@ export function createKeypadServer({
         return sendJson(response, requestId, 400, { error: "The two initial sigils must match and contain at least 12 characters." });
       }
       try {
-        const authSession = await setupOrAuthenticate({
+        await setupOrAuthenticate({
           authFile,
           promptLineFn: async () => first,
           log: () => {},
         });
         failedAttempts.length = 0;
-        establishSession(response, requestId, authSession);
+        establishSession(response, requestId);
         return sendJson(response, requestId, 200, { state: "authenticated", initialSetup: true });
       } catch {
         return sendJson(response, requestId, 400, { error: "Initial setup could not be saved. No sigil was activated." });
@@ -390,23 +402,36 @@ export function createKeypadServer({
       }
       attempt.resolveConfirmation(body.saved ? "SAVED" : "CANCEL");
       try {
-        const authSession = await attempt.promptFlow;
+        await attempt.promptFlow;
         pendingLogins.delete(attempt.id);
         if (!body.saved) {
           return sendJson(response, requestId, 200, { state: "cancelled" });
         }
         failedAttempts.length = 0;
-        establishSession(response, requestId, authSession);
+        establishSession(response, requestId);
         return sendJson(response, requestId, 200, {
           state: "authenticated",
           initialSetup: false,
-          newSigil: attempt.nextSigil,
         });
       } catch {
         pendingLogins.delete(attempt.id);
+        if (!body.saved) return sendJson(response, requestId, 200, { state: "cancelled" });
         failedAttempts.push(Date.now());
         return sendJson(response, requestId, 400, { error: "The sigil was not rotated and access was not granted." });
       }
+    }
+
+    const knownProtectedRoute = [
+      "POST /api/auth/logout",
+      "GET /api/records",
+      "POST /api/records",
+      "POST /api/export",
+      "GET /api/inbound",
+      "POST /api/import",
+    ].includes(route) ||
+      (request.method === "GET" && url.pathname.startsWith("/api/export/"));
+    if (!knownProtectedRoute) {
+      return sendJson(response, requestId, 404, { error: "Not found." });
     }
 
     const session = currentSession(request);

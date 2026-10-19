@@ -463,7 +463,7 @@ async function addRecord() {
 }
 
 export function exportBundle() {
-  verifyLedger();
+  listLocalRecords();
   validateBundleTree("main");
   const filename = `mesh_snapshot_${new Date().toISOString().replace(/[:.]/g, "-")}_${crypto.randomUUID().slice(0, 8)}.bundle`;
   const bundlePath = path.join(OUTBOUND, filename);
