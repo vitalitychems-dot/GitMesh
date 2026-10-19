@@ -524,6 +524,18 @@ function runSyncWithBranchSha(
       "        }),",
       "      };",
       "    }",
+      '    if ((process.env.GITMESH_TEST_MODE === "blob-http-401" || process.env.GITMESH_TEST_MODE === "blob-http-403") && blobIndex === 1) {',
+      "      return {",
+      "        ok: false,",
+      '        status: process.env.GITMESH_TEST_MODE === "blob-http-401" ? 401 : 403,',
+      "        statusText: process.env.GITMESH_TEST_RESPONSE_SENTINEL,",
+      "        json: async () => ({",
+      "          message: process.env.GITMESH_TEST_RESPONSE_SENTINEL,",
+      "          source: process.env.GITMESH_TEST_PRIVATE_SOURCE,",
+      "          credential: process.env.GITHUB_TOKEN,",
+      "        }),",
+      "      };",
+      "    }",
       '    if (process.env.GITMESH_TEST_MODE === "later-blob-timeout" && blobIndex === 1) {',
       "      const error = new Error(process.env.GITMESH_TEST_NETWORK_SENTINEL);",
       '      error.name = "TimeoutError";',
@@ -1080,6 +1092,38 @@ for (const [mode, label, retryGuidance] of [
       fixture.remoteHeadAfterSync,
       branchSha,
       "branch was updated after the rate-limit response",
+    );
+  });
+}
+
+for (const status of [401, 403]) {
+  test(`normal sync gives safe repository-access guidance for GitHub HTTP ${status}`, (t) => {
+    const branchSha = "a".repeat(40);
+    const fixture = runSyncWithBranchSha(t, branchSha, `blob-http-${status}`);
+    const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+    const expectedMessage =
+      `GitHub denied authentication or repository access with HTTP ${status} during POST /git/blobs. ` +
+      "Verify GITHUB_TOKEN is active and has Contents write access to vitalitychems-dot/GitMesh; " +
+      "update it through Replit Secrets if needed; sync stopped.";
+
+    assert.equal(fixture.result.status, 1, fixture.output);
+    assert.equal(fixture.output.trim(), expectedMessage);
+    assert.deepEqual(
+      fixture.requests.map(({ method, url }) => [method, url]),
+      [
+        ["GET", `${apiRoot}/git/ref/heads/main`],
+        ["GET", `${apiRoot}/git/commits/${branchSha}`],
+        ["POST", `${apiRoot}/git/blobs`],
+        ["POST", `${apiRoot}/git/blobs`],
+      ],
+    );
+    assert.ok(!fixture.output.includes(fixture.privateResponseBody), "response body leaked in output");
+    assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+    assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+    assert.equal(
+      fixture.remoteHeadAfterSync,
+      branchSha,
+      `branch was updated after GitHub HTTP ${status}`,
     );
   });
 }
