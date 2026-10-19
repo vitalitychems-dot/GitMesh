@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="referrer" content="no-referrer">
+    <title>GitMesh Local Vault</title>
+    <link rel="stylesheet" href="/rotating-keypad.css">
+    <script src="/rotating-keypad.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <p class="eyebrow">GitMesh · local only</p>
+        <h1>Local vault</h1>
+        <p class="lede">Your records stay in the GitMesh vault on the machine running Node. Sign in with the rotating on-screen keypad.</p>
+      </header>
+
+      <aside class="security-note" aria-label="Security limitation">
+        This service is loopback-only. Open it on the same machine that runs GitMesh; it is not available through Replit's hosted preview or from another device. The changing keypad is input obfuscation, not encryption or protection from a compromised device, screen capture, or monitoring software.
+      </aside>
+
+      <section id="auth-panel" class="panel" aria-labelledby="auth-title">
+        <p class="eyebrow" id="auth-mode">ADMIN ACCESS</p>
+        <h2 id="auth-title">Enter your sigil</h2>
+        <p id="auth-help" class="muted">Tap the English keys. Hold one to reveal its randomized code for this session.</p>
+
+        <div id="setup-stepper" class="setup-stepper" hidden></div>
+        <div class="entry-row">
+          <div id="entry-display" class="entry-display" role="status" aria-live="polite" aria-atomic="true">
+            No characters entered
+          </div>
+          <button id="backspace" class="quiet-button" type="button" aria-label="Remove the last character">Delete</button>
+          <button id="clear-entry" class="quiet-button" type="button">Clear</button>
+        </div>
+        <p id="key-hint" class="key-hint" aria-live="polite">Hold a key to view its session code.</p>
+
+        <div class="keyboard-toolbar" role="group" aria-label="Keyboard layout">
+          <button id="letters-tab" class="tab-button selected" type="button" aria-pressed="true">Letters</button>
+          <button id="symbols-tab" class="tab-button" type="button" aria-pressed="false">Numbers &amp; symbols</button>
+          <button id="case-toggle" class="tab-button" type="button" aria-pressed="false">Uppercase</button>
+        </div>
+        <div id="keyboard" class="keyboard" role="group" aria-label="Rotating on-screen keypad"></div>
+
+        <div id="setup-actions" class="actions" hidden>
+          <button id="setup-next" class="primary-button" type="button">Continue</button>
+          <button id="setup-create" class="primary-button" type="button" hidden>Create local sigil</button>
+        </div>
+        <div id="login-actions" class="actions">
+          <button id="sign-in" class="primary-button" type="button">Sign in</button>
+        </div>
+      </section>
+
+      <section id="rotation-panel" class="panel" aria-labelledby="rotation-title" hidden>
+        <p class="eyebrow">NEW SIGIL</p>
+        <h2 id="rotation-title">Save this replacement</h2>
+        <p class="muted">Your current sigil remains valid until you confirm that you saved the replacement.</p>
+        <code id="new-sigil" class="sigil-value"></code>
+        <div class="actions">
+          <button id="copy-sigil" class="quiet-button" type="button">Copy sigil</button>
+          <button id="confirm-saved" class="primary-button" type="button">I saved it — unlock</button>
+          <button id="cancel-rotation" class="quiet-button" type="button">Cancel</button>
+        </div>
+      </section>
+
+      <section id="vault-panel" class="panel" aria-labelledby="vault-title" hidden>
+        <div class="vault-heading">
+          <div>
+            <p class="eyebrow">AUTHORIZED LOCAL SESSION</p>
+            <h2 id="vault-title">Your records</h2>
+          </div>
+          <button id="sign-out" class="quiet-button" type="button">Lock vault</button>
+        </div>
+        <form id="record-form" class="record-form">
+          <label for="record-name">Node name</label>
+          <input id="record-name" name="targetNode" maxlength="120" required autocomplete="off">
+          <label for="record-purpose">Purpose</label>
+          <textarea id="record-purpose" name="objectiveScope" maxlength="1000" rows="3" required></textarea>
+          <button class="primary-button" type="submit">Save local record</button>
+        </form>
+        <h3>Saved on this device</h3>
+        <ul id="record-list" class="record-list"></ul>
+        <div class="actions bundle-actions">
+          <button id="export-bundle" class="quiet-button" type="button">Export bundle</button>
+          <button id="refresh-bundles" class="quiet-button" type="button">Check inbound folder</button>
+        </div>
+        <p class="muted">Bundles are not encrypted. Put bundles you trust in the local <code>drops_inbound</code> folder before importing.</p>
+        <ul id="bundle-list" class="bundle-list"></ul>
+        <a id="bundle-download" class="download-link" hidden>Download exported bundle</a>
+      </section>
+
+      <p id="notice" class="notice" role="status" aria-live="polite"></p>
+    </main>
+  </body>
+</html>

@@ -20,6 +20,20 @@ On first launch, choose an initial admin sigil of at least 12 characters. Later 
 
 The local credential file stores a salted scrypt verifier and hashes of consumed sigils, never the active sigil itself. Generated sigils use a persistent increasing generation number and are checked against the consumed-key history to prevent reuse. The menu can also set a new sigil; prior sigils cannot be reused. There is no in-app recovery if the active sigil is lost. Existing version-1 passphrase verifier files are accepted and migrate to rotating sigils on the next successful sign-in.
 
+## Local browser keypad
+
+From the GitMesh repository root, start the optional browser console:
+
+```sh
+node projects/local-vault/keypad-server.mjs
+```
+
+Then open `http://127.0.0.1:8782` in a browser on the same machine running Node. The server binds only to the loopback interface, so it is not available through Replit's hosted preview or from another device; do not proxy or expose this port publicly. Stop it with Ctrl+C when finished. The browser keypad displays English keys, creates a fresh randomized mapping for each page session, and lets you hold a key to view its temporary session code. It does not accept sigils from the physical keyboard. The generated sigil is displayed once after sign-in and must be saved before the vault unlocks; cancelling keeps the old sigil active.
+
+The keypad accepts only ASCII letters, digits, hyphen, and underscore. If an existing legacy sigil contains other characters, use the terminal CLI to sign in and rotate it to a generated sigil before using the browser keypad.
+
+The changing key labels are input obfuscation only. They are not a real language, encryption, a secure keyboard extension, or protection against a compromised device or software that can inspect the screen or browser. Sigil characters are entered through the visible buttons; a hardware keyboard can still navigate and activate those buttons for accessibility. The local browser console can add and list records and manually export/import Git bundles. Git bundles remain unencrypted. The existing terminal menu remains available.
+
 ## Local data
 
 Runtime data lives under `projects/local-vault/SovereignMeshVault/`:

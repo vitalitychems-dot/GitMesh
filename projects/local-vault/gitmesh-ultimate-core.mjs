@@ -39,7 +39,7 @@ function ensureDirectory(directory) {
   }
 }
 
-function ensureVault() {
+export function ensureVault() {
   ensureDirectory(VAULT);
   ensureDirectory(LEDGER);
   ensureDirectory(INBOUND);
@@ -246,10 +246,24 @@ function readAuth(authFile = AUTH_FILE) {
 export function saveAuth(auth, authFile = AUTH_FILE, {
   renameSync = fs.renameSync,
   writeFileSync = fs.writeFileSync,
+  linkSync = fs.linkSync,
+  exclusive = false,
 } = {}) {
   const temporaryPath = path.join(path.dirname(authFile), `.auth-${crypto.randomUUID()}.tmp`);
   try {
     writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
+    if (exclusive) {
+      try {
+        linkSync(temporaryPath, authFile);
+      } catch (error) {
+        if (error?.code === "EEXIST") {
+          throw new Error("An admin sigil was set up by another process; no credential was changed.");
+        }
+        throw error;
+      }
+      try { fs.unlinkSync(temporaryPath); } catch {}
+      return;
+    }
     renameSync(temporaryPath, authFile);
   } catch (error) {
     try { fs.unlinkSync(temporaryPath); } catch {}
@@ -290,7 +304,7 @@ export async function setupOrAuthenticate({
     if (first.length < 12) throw new Error("Admin sigil must contain at least 12 characters.");
     if (first !== confirmation) throw new Error("Admin sigils did not match.");
     const initialAuth = makeAuthRecord(first, 0, []);
-    saveAuthFn(initialAuth, authFile);
+    saveAuthFn(initialAuth, authFile, { exclusive: true });
     log("Admin sigil verifier saved locally. The sigil itself was not saved.");
     log("On each later successful sign-in, GitMesh will issue a replacement sigil.");
     return { auth: initialAuth, currentSigil: first };
@@ -402,14 +416,19 @@ function listRecordFiles() {
   return fs.readdirSync(LEDGER).filter((name) => name.toLowerCase().endsWith(".json"));
 }
 
-function verifyLedger() {
+export function listLocalRecords() {
   const files = listRecordFiles();
   if (files.length > MAX_RECORDS) throw new Error(`Ledger exceeds the ${MAX_RECORDS}-record limit.`);
-  const records = files.map(readRecordFile).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return files.map(readRecordFile).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+function verifyLedger() {
+  const records = listLocalRecords();
   console.log(`Verified ${records.length} local record(s).`);
   for (const record of records) {
     console.log(`${record.createdAt}  ${record.targetNode}  ${record.objectiveScope}`);
   }
+  return records;
 }
 
 function commitFiles(files, message) {
@@ -418,9 +437,7 @@ function commitFiles(files, message) {
   runGit(["commit", "-m", message]);
 }
 
-async function addRecord() {
-  const targetNode = await promptText("Node name: ");
-  const objectiveScope = await promptText("Purpose: ");
+export function addLocalRecord(targetNode, objectiveScope) {
   const record = createRecord(targetNode, objectiveScope);
   if (listRecordFiles().length >= MAX_RECORDS) throw new Error(`The ledger is limited to ${MAX_RECORDS} records.`);
   const filename = `${record.id}.json`;
@@ -435,17 +452,25 @@ async function addRecord() {
     try { fs.unlinkSync(filePath); } catch {}
     throw error;
   }
+  return record;
+}
+
+async function addRecord() {
+  const targetNode = await promptText("Node name: ");
+  const objectiveScope = await promptText("Purpose: ");
+  const record = addLocalRecord(targetNode, objectiveScope);
   console.log(`Saved and verified record ${record.id}.`);
 }
 
-function exportBundle() {
-  verifyLedger();
+export function exportBundle() {
+  listLocalRecords();
   validateBundleTree("main");
   const filename = `mesh_snapshot_${new Date().toISOString().replace(/[:.]/g, "-")}_${crypto.randomUUID().slice(0, 8)}.bundle`;
   const bundlePath = path.join(OUTBOUND, filename);
   runGit(["bundle", "create", bundlePath, "main"]);
   console.log(`Exported bundle: ${path.relative(ROOT, bundlePath)}`);
   console.log("Bundles are not encrypted. Transfer them only through a channel you trust.");
+  return filename;
 }
 
 function safeBundlePath(filename) {
@@ -482,7 +507,15 @@ function validateBundleTree(ref) {
   return records;
 }
 
-function importBundle(filename) {
+export function listInboundBundles() {
+  return fs.readdirSync(INBOUND)
+    .filter((name) => name.endsWith(".bundle"))
+    .filter((name) => {
+      try { safeBundlePath(name); return true; } catch { return false; }
+    });
+}
+
+export function importBundle(filename) {
   const bundlePath = safeBundlePath(filename);
   runGit(["bundle", "verify", bundlePath]);
   const heads = runGit(["bundle", "list-heads", bundlePath]).split("\n").filter(Boolean);
@@ -528,7 +561,12 @@ function importBundle(filename) {
       }
       throw error;
     }
-    console.log(`Imported ${toWrite.length} new record(s); ${imported.length - toWrite.length} duplicate(s) were skipped.`);
+    const result = {
+      imported: toWrite.length,
+      duplicates: imported.length - toWrite.length,
+    };
+    console.log(`Imported ${result.imported} new record(s); ${result.duplicates} duplicate(s) were skipped.`);
+    return result;
   } finally {
     try { runGit(["update-ref", "-d", importRef]); } catch {}
   }
