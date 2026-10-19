@@ -1,175 +1,165 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import express from "express";
+import { readFile } from "node:fs/promises";
+import pg from "pg";
+import { AuthStore } from "../auth-store.mjs";
+import { PrivateAuth, digest, validSigil } from "../private-auth.mjs";
 import { createApp } from "../live.mjs";
-import { createRateLimit, isGithubOwner } from "../admin-auth.mjs";
-import { CLERK_PROXY_PATH, clerkProxyMiddleware } from "../clerk-proxy.mjs";
 
-const github = (overrides = {}) => ({
-  provider: "oauth_github", externalId: "42", verification: { status: "verified" }, ...overrides,
-});
-const user = (account = github()) => ({ externalAccounts: [account] });
+const initial = "test-only-initial-key-never-use";
+const databaseTest = (name, fn) => test(name, { skip: !process.env.DATABASE_URL || process.env.NODE_ENV === "production" }, fn);
 
-async function serve(t, handler) {
-  const server = createServer(handler);
+async function fixture(t, { seeded = true } = {}) {
+  // Every test gets a disposable, randomly named DEVELOPMENT-only schema.
+  const schema = `gm_test_${randomBytes(8).toString("hex")}`;
+  assert.match(schema, /^gm_test_[a-f0-9]+$/);
+  const setup = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+  await setup.query(`CREATE SCHEMA ${schema}`);
+  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4, options: `-c search_path=${schema}` });
+  t.after(async () => { await pool.end(); await setup.query(`DROP SCHEMA ${schema} CASCADE`); await setup.end(); });
+  await pool.query(await readFile(new URL("../schema.sql", import.meta.url), "utf8"));
+  const auth = new PrivateAuth(new AuthStore(pool));
+  await auth.initialize(seeded ? initial : "");
+  return { auth, pool };
+}
+async function serve(t, app) {
+  const server = createServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
   return `http://127.0.0.1:${server.address().port}`;
 }
-
-async function appFor(t, { account = user(), lookupError = false } = {}) {
-  const app = await createApp({
-    authMiddleware: (_req, _res, next) => next(),
-    readAuth: (req) => ({ userId: req.headers["x-test-user"] }),
-    getUser: async () => { if (lookupError) throw new Error("private diagnostic must not escape"); return account; },
-    ownerId: "42", ownerLogin: "test-owner", serveFrontend: false,
-  });
-  return serve(t, app);
-}
-
-test("only a verified GitHub external ID grants administration", () => {
-  assert.equal(isGithubOwner(user(), "42"), true);
-  for (const account of [
-    github({ externalId: "43", username: "test-owner" }),
-    github({ provider: "oauth_google" }),
-    github({ verification: { status: "unverified" } }),
-    github({ verification: null }),
-    github({ externalId: undefined }),
-  ]) assert.equal(isGithubOwner(user(account), "42"), false);
-  assert.equal(isGithubOwner({ publicMetadata: { role: "admin" }, username: "test-owner", externalAccounts: [] }, "42"), false);
-  assert.equal(isGithubOwner(user(), ""), false);
-  assert.equal(isGithubOwner(user(), "42anything"), false);
+const post = (base, path, body, cookie) => fetch(base + path, {
+  method: "POST", headers: { Origin: base, "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
+  body: JSON.stringify(body),
 });
 
-test("anonymous callers cannot get admin details, even with client role hints", async (t) => {
-  const base = await appFor(t);
-  const response = await fetch(`${base}/api/admin/status?role=admin`, { headers: { "x-role": "admin" } });
-  assert.equal(response.status, 401);
-  const body = await response.text();
-  assert.doesNotMatch(body, /nodeVersion|uptimeSeconds|private diagnostic/);
-  assert.equal(response.headers.get("cache-control"), "no-store");
-  const session = await (await fetch(`${base}/api/session`)).json();
-  assert.deepEqual(session, { authenticated: false, admin: false, owner: "test-owner" });
+test("key validation rejects unsafe types, short values and control characters", () => {
+  assert.equal(validSigil(initial), true);
+  for (const value of [undefined, {}, "short", "x".repeat(257), initial + "\n"]) assert.equal(validSigil(value), false);
 });
 
-test("signed-in non-owner is denied, not promoted on first signup", async (t) => {
-  const base = await appFor(t, { account: user(github({ externalId: "43" })) });
-  const headers = { "x-test-user": "ordinary-user" };
-  assert.equal((await fetch(`${base}/api/admin/status`, { headers })).status, 403);
-  const session = await (await fetch(`${base}/api/session`, { headers })).json();
-  assert.equal(session.authenticated, true);
-  assert.equal(session.admin, false);
+databaseTest("unconfigured web access does not create a default administrator", async (t) => {
+  const { auth } = await fixture(t, { seeded: false });
+  assert.equal(await auth.configured(), false);
+  await assert.rejects(auth.begin(initial), { publicStatus: 503 });
 });
-
-test("verified owner can load real web service status without vault access", async (t) => {
-  const base = await appFor(t);
-  const response = await fetch(`${base}/api/admin/status`, { headers: { "x-test-user": "owner" } });
-  assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.equal(body.identity.role, "admin");
-  assert.equal(body.security.vaultHosted, false);
-  assert.equal(body.service.nodeVersion, process.version);
-  assert.equal(typeof body.service.uptimeSeconds, "number");
-  assert.equal((await fetch(`${base}/api/vault`)).status, 404);
-  assert.equal((await fetch(`${base}/SovereignMeshVault/active_sigil.hash`)).status, 404);
-  assert.equal((await fetch(`${base}/health`)).status, 200);
+databaseTest("keys are hashed and a replacement grants no access before save confirmation", async (t) => {
+  const { auth, pool } = await fixture(t);
+  const offer = await auth.begin(initial);
+  assert.notEqual(offer.nextSigil, initial);
+  assert.equal(await auth.session(offer.pendingToken), false);
+  const dump = JSON.stringify((await pool.query("SELECT * FROM gm_web_admin UNION ALL SELECT true, generation, salt, verifier FROM gm_web_pending")).rows);
+  assert.ok(!dump.includes(initial));
+  assert.ok(!dump.includes(offer.nextSigil));
+  const pending = (await pool.query("SELECT token_hash FROM gm_web_pending")).rows[0];
+  assert.equal(pending.token_hash, digest(offer.pendingToken));
+  assert.ok(!JSON.stringify(pending).includes(offer.pendingToken));
 });
-
-test("provider failure fails closed with a generic error", async (t) => {
-  const base = await appFor(t, { lookupError: true });
-  const response = await fetch(`${base}/api/admin/status`, { headers: { "x-test-user": "owner" } });
-  assert.equal(response.status, 503);
-  assert.doesNotMatch(await response.text(), /diagnostic|Error:|stack|owner/);
+databaseTest("rotation invalidates the old key, saves the new verifier and survives a service restart", async (t) => {
+  const { auth, pool } = await fixture(t);
+  const offer = await auth.begin(initial);
+  const session = await auth.confirm(offer.pendingToken);
+  assert.equal(await auth.session(session), true);
+  await assert.rejects(auth.begin(initial), { publicStatus: 401 });
+  const restarted = new PrivateAuth(new AuthStore(pool));
+  await restarted.initialize(initial); // Initial secret may never reset an existing state.
+  await assert.rejects(restarted.begin(initial), { publicStatus: 401 });
+  const next = await restarted.begin(offer.nextSigil);
+  assert.notEqual(next.nextSigil, offer.nextSigil);
+  await restarted.confirm(next.pendingToken);
+  assert.equal(await auth.session(session), false, "a new sign-in revokes old sessions");
 });
-
-test("removing a verified GitHub connection revokes access on the next request", async (t) => {
-  const account = user();
-  const base = await appFor(t, { account });
-  const headers = { "x-test-user": "owner" };
-  assert.equal((await fetch(`${base}/api/admin/status`, { headers })).status, 200);
-  account.externalAccounts.length = 0;
-  assert.equal((await fetch(`${base}/api/admin/status`, { headers })).status, 403);
+databaseTest("cancellation and expired offers leave the active key valid", async (t) => {
+  const { auth, pool } = await fixture(t);
+  const first = await auth.begin(initial);
+  await auth.cancel(first.pendingToken);
+  await assert.rejects(auth.confirm(first.pendingToken), { publicStatus: 409 });
+  const second = await auth.begin(initial);
+  await pool.query("UPDATE gm_web_pending SET expires_at = now() - interval '1 second'");
+  await assert.rejects(auth.confirm(second.pendingToken), { publicStatus: 409 });
+  await auth.begin(initial);
 });
-
-test("sensitive routes rate-limit spoofed forwarded IPs and recover after expiry", async (t) => {
-  let now = 1000;
-  const app = express();
-  app.use(createRateLimit({ limit: 2, windowMs: 1000, clock: () => now }));
-  app.get("/", (_req, res) => res.json({ ok: true }));
-  const base = await serve(t, app);
-  assert.equal((await fetch(base)).status, 200);
-  assert.equal((await fetch(base)).status, 200);
-  const blocked = await fetch(base, { headers: { "x-forwarded-for": "spoofed-ip" } });
-  assert.equal(blocked.status, 429);
-  assert.equal(blocked.headers.get("retry-after"), "1");
-  now += 1001;
-  assert.equal((await fetch(base)).status, 200);
+databaseTest("competing sign-ins across service instances cannot consume one generation twice", async (t) => {
+  const { auth, pool } = await fixture(t);
+  const other = new PrivateAuth(new AuthStore(pool));
+  const [a, b] = await Promise.all([auth.begin(initial), other.begin(initial)]);
+  const outcomes = await Promise.allSettled([auth.confirm(a.pendingToken), other.confirm(b.pendingToken)]);
+  assert.equal(outcomes.filter((x) => x.status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter((x) => x.status === "rejected").length, 1);
+  assert.equal((await pool.query("SELECT generation FROM gm_web_admin")).rows[0].generation, 2);
+  assert.equal((await pool.query("SELECT count(*) FROM gm_web_sessions")).rows[0].count, "1");
 });
-
-test("Clerk production proxy forwards the mounted path and buffers chunked responses", async (t) => {
-  const upstream = await serve(t, (req, res) => {
-    assert.equal(req.url, "/v1/environment?check=1");
-    assert.equal(req.headers["clerk-secret-key"], "fake-test-key");
-    assert.match(req.headers["clerk-proxy-url"], new RegExp(`${CLERK_PROXY_PATH}$`));
-    res.writeHead(200, { "content-type": "application/json" });
-    res.write('{"ok":');
-    res.end("true}");
-  });
-  const app = express();
-  app.use(CLERK_PROXY_PATH, clerkProxyMiddleware({ production: true, secretKey: "fake-test-key", target: upstream }));
-  const base = await serve(t, app);
-  const response = await fetch(`${base}${CLERK_PROXY_PATH}/v1/environment?check=1`);
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true });
-  assert.equal(response.headers.get("transfer-encoding"), null);
-  assert.equal(response.headers.get("content-length"), "11");
+databaseTest("database-wide failed-login throttling survives new service instances", async (t) => {
+  const { auth, pool } = await fixture(t);
+  for (let i = 0; i < 8; i++) await assert.rejects(auth.begin("test-only-wrong-key-is-long"), { publicStatus: 401 });
+  const other = new PrivateAuth(new AuthStore(pool));
+  await assert.rejects(other.begin(initial), { publicStatus: 429 });
 });
-
-test("production proxy returns a generic error when its upstream is unavailable", async (t) => {
-  const server = createServer();
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const target = `http://127.0.0.1:${server.address().port}`;
-  await new Promise((resolve) => server.close(resolve));
-  const app = express();
-  app.use(CLERK_PROXY_PATH, clerkProxyMiddleware({ production: true, secretKey: "fake-test-key", target }));
-  const base = await serve(t, app);
-  const response = await fetch(`${base}${CLERK_PROXY_PATH}/v1/environment`);
-  assert.equal(response.status, 502);
-  assert.equal(await response.text(), "");
-});
-
-test("oversized chunked proxy responses fail safely rather than hanging", async (t) => {
-  const upstream = await serve(t, (_req, res) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(Buffer.alloc(4 * 1024 * 1024 + 1, "x"));
-  });
-  const app = express();
-  app.use(CLERK_PROXY_PATH, clerkProxyMiddleware({ production: true, secretKey: "fake-test-key", target: upstream }));
-  const base = await serve(t, app);
-  const response = await fetch(`${base}${CLERK_PROXY_PATH}/v1/environment`, { signal: AbortSignal.timeout(5000) });
-  assert.equal(response.status, 502);
-  assert.equal(await response.text(), "");
-});
-
-test("production serves built sign-in callbacks and assets but not repository files", async (t) => {
-  const app = await createApp({
-    production: true, serveFrontend: true,
-    authMiddleware: (_req, _res, next) => next(),
-    readAuth: () => ({ userId: null }), ownerId: "42",
-  });
-  const base = await serve(t, app);
-  for (const path of ["/", "/sign-in", "/sign-in/sso-callback", "/sign-up/sso-callback", "/admin"]) {
-    const response = await fetch(`${base}${path}`);
-    assert.equal(response.status, 200);
-    const html = await response.text();
-    assert.match(html, /<div id="root"><\/div>/);
-    const asset = html.match(/src="([^"]+\.js)"/)?.[1];
-    assert.ok(asset?.startsWith("/assets/"));
-    assert.equal((await fetch(`${base}${asset}`)).status, 200);
-  }
-  for (const path of ["/.env", "/.git/config", "/SovereignMeshVault/active_sigil.hash", "/projects/local-vault/keypad-server.mjs"]) {
-    assert.equal((await fetch(`${base}${path}`)).status, 404);
-  }
+databaseTest("HTTP login enforces origin, save confirmation, cookie sessions and logout", async (t) => {
+  const { auth } = await fixture(t);
+  const base = await serve(t, await createApp({ auth, serveFrontend: false }));
   assert.equal((await fetch(`${base}/api/admin/status`)).status, 401);
+  assert.equal((await fetch(`${base}/api/admin/login`, { method: "POST", headers: { "Content-Type": "application/json", Origin: "https://other.invalid" }, body: JSON.stringify({ sigil: initial }) })).status, 403);
+  const bad = await post(base, "/api/admin/login", { sigil: initial, role: "admin" });
+  assert.equal(bad.status, 400);
+  const response = await post(base, "/api/admin/login", { sigil: initial });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const offer = await response.json();
+  assert.ok(validSigil(offer.nextSigil));
+  const pendingCookie = response.headers.getSetCookie().find((x) => x.startsWith("gm_pending="));
+  assert.match(pendingCookie, /HttpOnly/);
+  assert.match(pendingCookie, /SameSite=Strict/);
+  assert.equal((await fetch(`${base}/api/admin/status`, { headers: { Cookie: pendingCookie.split(";")[0] } })).status, 401);
+  assert.equal((await post(base, "/api/admin/confirm", { saved: false, offerId: offer.offerId }, pendingCookie.split(";")[0])).status, 400);
+  assert.equal((await post(base, "/api/admin/confirm", { saved: true, offerId: "0".repeat(64) }, pendingCookie.split(";")[0])).status, 409, "a stale tab must not consume a different tab's unsaved replacement");
+  const confirmed = await post(base, "/api/admin/confirm", { saved: true, offerId: offer.offerId }, pendingCookie.split(";")[0]);
+  assert.equal(confirmed.status, 200);
+  const sessionCookie = confirmed.headers.getSetCookie().find((x) => x.startsWith("gm_admin=")).split(";")[0];
+  const status = await fetch(`${base}/api/admin/status`, { headers: { Cookie: sessionCookie } });
+  assert.equal(status.status, 200);
+  const data = await status.json();
+  assert.equal(data.security.socialLogin, false);
+  assert.equal(data.mesh.transport, "not_connected");
+  assert.equal((await post(base, "/api/admin/logout", {}, sessionCookie)).status, 200);
+  assert.equal((await fetch(`${base}/api/admin/status`, { headers: { Cookie: sessionCookie } })).status, 401);
+});
+databaseTest("production cookies are Secure and private files are not served", async (t) => {
+  const { auth } = await fixture(t);
+  const base = await serve(t, await createApp({ production: true, auth }));
+  for (const path of ["/", "/sign-in", "/admin", "/sign-up"]) assert.equal((await fetch(base + path)).status, 200);
+  for (const path of ["/.env", "/.git/config", "/projects/live/schema.sql", "/SovereignMeshVault/active_sigil.hash", "/api/__clerk"]) {
+    assert.equal((await fetch(base + path)).status, 404);
+  }
+  assert.equal((await post(base, "/api/admin/login", { sigil: initial })).status, 403, "production must refuse plaintext administration");
+  const response = await fetch(base + "/api/admin/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: `https://${new URL(base).host}`, "x-forwarded-proto": "https" },
+    body: JSON.stringify({ sigil: initial }),
+  });
+  assert.match(response.headers.getSetCookie().join(";"), /Secure/);
+  assert.match(response.headers.get("content-security-policy"), /default-src 'self'/);
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+});
+databaseTest("a missing active row cannot silently reset consumed-key history", async (t) => {
+  const { auth, pool } = await fixture(t);
+  await pool.query("DELETE FROM gm_web_admin");
+  await assert.rejects(auth.initialize(initial), /Incomplete authentication state/);
+  assert.equal((await pool.query("SELECT count(*) FROM gm_web_admin")).rows[0].count, "0");
+});
+test("auth database failures return no private diagnostic detail", async (t) => {
+  const auth = { configured: async () => { throw new Error("PRIVATE_DATABASE_SECRET_SENTINEL"); }, session: async () => false };
+  const base = await serve(t, await createApp({ auth, serveFrontend: false }));
+  const response = await fetch(`${base}/api/session`);
+  assert.equal(response.status, 503);
+  assert.doesNotMatch(await response.text(), /PRIVATE|SECRET|stack|Error:/);
+});
+test("the private client has no third-party identity, external fonts or browser credential storage", async () => {
+  const files = ["App.jsx", "styles.css", "main.jsx", "index.html"];
+  for (const file of files) {
+    const text = await readFile(new URL(`../client/${file}`, import.meta.url), "utf8");
+    assert.doesNotMatch(text, /clerk|google|github|https?:\/\/|localStorage|sessionStorage|dangerouslySetInnerHTML/i, file);
+  }
 });

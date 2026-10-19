@@ -247,6 +247,15 @@ function assertSafeSyntaxFailure(fixture, expectedMessage) {
   }
 }
 
+test("normal sync without a GitHub token fails safely before any network request", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "success", { checkOnly: false, tokenPresent: false });
+  assert.equal(fixture.result.error, undefined);
+  assert.notEqual(fixture.result.status, 0);
+  assert.equal(fixture.output.trim(), "Set GITHUB_TOKEN through Replit Secrets before running source sync.");
+  assert.equal(fs.existsSync(fixture.fetchMarker), false, "missing credentials must never reach fetch");
+  for (const text of fixture.privateTexts) assert.ok(!fixture.output.includes(text), "setup error leaked private diagnostic material");
+});
+
 function assertSafeSyntaxPreflightFailure(fixture, expectedMessage) {
   const { output, result, syntaxMarker, fetchMarker, privateTexts } = fixture;
   assert.notEqual(result.status, 0, output);

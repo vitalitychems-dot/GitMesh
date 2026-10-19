@@ -13,12 +13,8 @@
     "test:web": "node --test projects/live/tests/*.test.mjs"
   },
   "dependencies": {
-    "@clerk/express": "2.1.80",
-    "@clerk/react": "6.17.8",
-    "@clerk/shared": "4.40.0",
-    "@clerk/themes": "2.4.57",
     "express": "5.3.0",
-    "httpxy": "0.5.5",
+    "pg": "8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "vite": "8.3.4",
