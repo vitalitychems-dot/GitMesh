@@ -339,6 +339,7 @@ function runSyncWithBranchSha(
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
   const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
+  const privateMalformedBlobSha = "PRIVATE_MALFORMED_BLOB_SHA_SENTINEL";
   const advancedHeadSha = "ffffffffffffffffffffffffffffffffffffffff";
   const privateSymlinkTargetContents = "PRIVATE_SYMLINK_TARGET_CONTENT_SENTINEL";
   let privateSymlinkTargetDirectory;
@@ -491,6 +492,9 @@ function runSyncWithBranchSha(
       '      error.name = "TimeoutError";',
       "      throw error;",
       "    }",
+      '    if (process.env.GITMESH_TEST_MODE === "malformed-blob-sha") {',
+      "      return response({ sha: process.env.GITMESH_TEST_MALFORMED_BLOB_SHA });",
+      "    }",
       "    return response({ sha: blobShas[blobIndex++] });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/trees")) {',
@@ -536,6 +540,7 @@ function runSyncWithBranchSha(
       GITMESH_TEST_RESPONSE_SENTINEL: privateResponseBody,
       GITMESH_TEST_PRIVATE_SOURCE: privateSource,
       GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
+      GITMESH_TEST_MALFORMED_BLOB_SHA: privateMalformedBlobSha,
       GITMESH_TEST_REQUEST_LOG: requestLog,
       GITMESH_TEST_SYNTAX_LOG: syntaxInvocationLog,
       GITMESH_TEST_MUTABLE_SOURCE_PATH: mutableSourcePath,
@@ -554,6 +559,7 @@ function runSyncWithBranchSha(
     privateSource,
     privateResponseBody,
     privateNetworkError,
+    privateMalformedBlobSha,
     advancedHeadSha,
     privateSymlinkTargetPath,
     privateSymlinkTargetContents,
@@ -589,6 +595,27 @@ for (const [label, branchSha] of [
     assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
   });
 }
+
+test("normal sync stops after GitHub returns a malformed blob SHA", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "malformed-blob-sha");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(fixture.output.trim(), "GitHub returned an invalid blob SHA; sync stopped.");
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["POST", `${apiRoot}/git/blobs`],
+    ],
+  );
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateMalformedBlobSha), "malformed blob SHA leaked in output");
+  assert.equal(fixture.remoteHeadAfterSync, branchSha, "branch was updated after the malformed blob response");
+});
 
 test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   const branchSha = "a".repeat(40);
@@ -1141,23 +1168,44 @@ test("GitHub request timeout stops sync without leaking source or continuing wri
     preloadPath,
     [
       'import fs from "node:fs";',
+      'const state = { requests: [], configuredTimeouts: [] };',
+      'const statePath = process.env.GITMESH_TEST_REQUEST_LOG;',
+      'const saveState = () => fs.writeFileSync(statePath, JSON.stringify(state));',
+      'const timers = new Map();',
+      'globalThis.AbortSignal.timeout = (milliseconds) => {',
+      '  state.configuredTimeouts.push(milliseconds);',
+      '  const controller = new AbortController();',
+      `  const timer = setTimeout(() => controller.abort(new DOMException("${privateFetchError}", "TimeoutError")), 40);`,
+      '  timers.set(controller.signal, timer);',
+      '  saveState();',
+      '  return controller.signal;',
+      '};',
       "globalThis.fetch = async (url, options = {}) => {",
-      "  const requests = JSON.parse(fs.readFileSync(process.env.GITMESH_TEST_REQUEST_LOG, \"utf8\") || \"[]\");",
-      '  requests.push({ method: options.method ?? "GET", url });',
-      '  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));',
+      "  const request = { method: options.method ?? \"GET\", url, timeoutSignalAttached: options.signal instanceof AbortSignal, signalInitiallyAborted: options.signal?.aborted ?? null, authorizationHeaderIsExpected: options.headers?.Authorization === `Bearer ${process.env.GITHUB_TOKEN}` };",
+      '  state.requests.push(request);',
+      '  saveState();',
       '  if (url.endsWith("/git/ref/heads/main")) {',
+      '    clearTimeout(timers.get(options.signal));',
       '    return { ok: true, json: async () => ({ object: { sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }) };',
       "  }",
       '  if (url.endsWith("/git/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")) {',
+      '    clearTimeout(timers.get(options.signal));',
       '    return { ok: true, json: async () => ({ tree: { sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }) };',
       "  }",
-      `  const error = new Error("${privateFetchError}");`,
-      '  error.name = "TimeoutError";',
-      "  throw error;",
+      '  return new Promise((resolve, reject) => {',
+      '    const onAbort = () => {',
+      '      request.signalAborted = options.signal.aborted;',
+      '      request.abortReasonName = options.signal.reason?.name;',
+      '      saveState();',
+      '      reject(options.signal.reason);',
+      '    };',
+      '    if (options.signal?.aborted) onAbort();',
+      '    else options.signal?.addEventListener("abort", onAbort, { once: true });',
+      '  });',
       "};",
     ].join("\n"),
   );
-  fs.writeFileSync(requestLog, "[]");
+  fs.writeFileSync(requestLog, JSON.stringify({ requests: [], configuredTimeouts: [] }));
 
   const result = spawnSync(process.execPath, [scriptPath], {
     cwd: tempDir,
@@ -1178,7 +1226,8 @@ test("GitHub request timeout stops sync without leaking source or continuing wri
     "GitHub request timed out during POST /git/blobs. " +
       "Check the connection and retry; sync stopped.",
   );
-  assert.deepEqual(JSON.parse(fs.readFileSync(requestLog, "utf8")), [
+  const observations = JSON.parse(fs.readFileSync(requestLog, "utf8"));
+  assert.deepEqual(observations.requests.map(({ method, url }) => ({ method, url })), [
     {
       method: "GET",
       url: "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/ref/heads/main",
@@ -1192,6 +1241,12 @@ test("GitHub request timeout stops sync without leaking source or continuing wri
       url: "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/blobs",
     },
   ]);
+  assert.deepEqual(observations.configuredTimeouts, [20_000, 20_000, 20_000], "the configured timeout was not attached to each request");
+  assert.ok(observations.requests.every(({ timeoutSignalAttached, authorizationHeaderIsExpected }) => timeoutSignalAttached && authorizationHeaderIsExpected), "request was missing its abort signal or expected credential");
+  assert.ok(observations.requests.every(({ signalInitiallyAborted }) => signalInitiallyAborted === false), "a request did not start with a live signal");
+  assert.equal(observations.requests.at(-1).signalAborted, true, "stalled fetch did not receive the timeout abort");
+  assert.equal(observations.requests.at(-1).abortReasonName, "TimeoutError");
+  assert.ok(observations.requests.every(({ signalAborted }) => signalAborted === undefined || signalAborted === true), "a completed request unexpectedly aborted");
   assert.ok(!output.includes(fakeToken), "GitHub token leaked in timeout output");
   assert.ok(!output.includes(privateSource), "source content leaked in timeout output");
   assert.ok(!output.includes(privateFetchError), "raw fetch error leaked in timeout output");
