@@ -212,6 +212,18 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
   return files;
 }
 
+function validatedRetryAfterSeconds(response) {
+  let value;
+  try {
+    value = response.headers?.get?.("retry-after");
+  } catch {
+    return null;
+  }
+  if (typeof value !== "string" || !/^[0-9]{1,5}$/.test(value)) return null;
+  const seconds = Number(value);
+  return Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 3600 ? seconds : null;
+}
+
 async function githubRequest(token, route, method = "GET", body = undefined) {
   let response;
   try {
@@ -245,16 +257,25 @@ async function githubRequest(token, route, method = "GET", body = undefined) {
         ? response.status
         : null;
     const statusText = status === null ? "unknown" : status;
+    const retryAfterSeconds = status === 429 ? validatedRetryAfterSeconds(response) : null;
     const retryGuidance =
-      status !== null && status >= 500
-        ? " Check the connection and retry; sync stopped."
-        : method === "PATCH" &&
-            route === "/git/refs/heads/main" &&
-            (status === 409 || status === 422)
-          ? " The branch may have advanced; rerun the sync to read the latest head; sync stopped."
-          : "";
+      status === 429
+        ? retryAfterSeconds === null
+          ? " Check GitHub's rate-limit status, wait for the limit to reset, then rerun the sync; sync stopped."
+          : ` Wait ${retryAfterSeconds} seconds, then rerun the sync; sync stopped.`
+        : status !== null && status >= 500
+          ? " Check the connection and retry; sync stopped."
+          : method === "PATCH" &&
+              route === "/git/refs/heads/main" &&
+              (status === 409 || status === 422)
+            ? " The branch may have advanced; rerun the sync to read the latest head; sync stopped."
+            : "";
+    const failureMessage =
+      status === 429
+        ? `GitHub rate limit reached during ${method} ${route}.`
+        : `GitHub request failed with HTTP ${statusText} during ${method} ${route}.`;
     throw new Error(
-      `GitHub request failed with HTTP ${statusText} during ${method} ${route}.${retryGuidance}`,
+      `${failureMessage}${retryGuidance}`,
     );
   }
   try {

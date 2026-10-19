@@ -351,9 +351,18 @@ function runSyncWithBranchSha(
   const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
   const privateMalformedBlobSha = "PRIVATE_MALFORMED_BLOB_SHA_SENTINEL";
   const privateUppercaseBlobSha = "A".repeat(40);
+  const privateRetryAfterHeader = "PRIVATE_RETRY_AFTER_HEADER_SENTINEL";
   const privateInvalidTreeSha = "PRIVATE_INVALID_TREE_SHA_SENTINEL";
   const privateInvalidCommitSha = "PRIVATE_INVALID_COMMIT_SHA_SENTINEL";
   const advancedHeadSha = "ffffffffffffffffffffffffffffffffffffffff";
+  const retryAfterHeader =
+    mode === "blob-http-429"
+      ? "120"
+      : mode === "blob-http-429-negative"
+        ? "-5"
+        : mode === "blob-http-429-over-limit"
+          ? "99999"
+          : privateRetryAfterHeader;
   const privateSymlinkTargetContents = "PRIVATE_SYMLINK_TARGET_CONTENT_SENTINEL";
   let privateSymlinkTargetDirectory;
   let privateSymlinkTargetPath;
@@ -500,6 +509,21 @@ function runSyncWithBranchSha(
       "    return response({ tree: { sha: baseTreeSha } });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/blobs")) {',
+      '    if (process.env.GITMESH_TEST_MODE.startsWith("blob-http-429") && blobIndex === 1) {',
+      "      return {",
+      "        ok: false,",
+      "        status: 429,",
+      "        statusText: process.env.GITMESH_TEST_RESPONSE_SENTINEL,",
+      "        headers: {",
+      '          get: (name) => name.toLowerCase() === "retry-after" ? process.env.GITMESH_TEST_RETRY_AFTER : null,',
+      "        },",
+      "        json: async () => ({",
+      "          message: process.env.GITMESH_TEST_RESPONSE_SENTINEL,",
+      "          source: process.env.GITMESH_TEST_PRIVATE_SOURCE,",
+      "          credential: process.env.GITHUB_TOKEN,",
+      "        }),",
+      "      };",
+      "    }",
       '    if (process.env.GITMESH_TEST_MODE === "later-blob-timeout" && blobIndex === 1) {',
       "      const error = new Error(process.env.GITMESH_TEST_NETWORK_SENTINEL);",
       '      error.name = "TimeoutError";',
@@ -575,6 +599,7 @@ function runSyncWithBranchSha(
       GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
       GITMESH_TEST_MALFORMED_BLOB_SHA: privateMalformedBlobSha,
       GITMESH_TEST_UPPERCASE_BLOB_SHA: privateUppercaseBlobSha,
+      GITMESH_TEST_RETRY_AFTER: retryAfterHeader,
       GITMESH_TEST_INVALID_TREE_SHA: privateInvalidTreeSha,
       GITMESH_TEST_INVALID_COMMIT_SHA: privateInvalidCommitSha,
       GITMESH_TEST_REQUEST_LOG: requestLog,
@@ -597,6 +622,8 @@ function runSyncWithBranchSha(
     privateNetworkError,
     privateMalformedBlobSha,
     privateUppercaseBlobSha,
+    privateRetryAfterHeader,
+    retryAfterHeader,
     privateInvalidTreeSha,
     privateInvalidCommitSha,
     advancedHeadSha,
@@ -1000,6 +1027,62 @@ test("normal sync stops when the created-commit response JSON is unreadable", (t
     "branch was updated after the unreadable created-commit response",
   );
 });
+
+for (const [mode, label, retryGuidance] of [
+  [
+    "blob-http-429",
+    "valid Retry-After value",
+    "Wait 120 seconds, then rerun the sync; sync stopped.",
+  ],
+  [
+    "blob-http-429-invalid",
+    "untrusted Retry-After value",
+    "Check GitHub's rate-limit status, wait for the limit to reset, then rerun the sync; sync stopped.",
+  ],
+  [
+    "blob-http-429-negative",
+    "negative Retry-After value",
+    "Check GitHub's rate-limit status, wait for the limit to reset, then rerun the sync; sync stopped.",
+  ],
+  [
+    "blob-http-429-over-limit",
+    "excessive Retry-After value",
+    "Check GitHub's rate-limit status, wait for the limit to reset, then rerun the sync; sync stopped.",
+  ],
+]) {
+  test(`normal sync gives safe retry guidance for a rate limit with ${label}`, (t) => {
+    const branchSha = "a".repeat(40);
+    const fixture = runSyncWithBranchSha(t, branchSha, mode);
+    const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+    assert.equal(fixture.result.status, 1, fixture.output);
+    assert.equal(
+      fixture.output.trim(),
+      `GitHub rate limit reached during POST /git/blobs. ${retryGuidance}`,
+    );
+    assert.deepEqual(
+      fixture.requests.map(({ method, url }) => [method, url]),
+      [
+        ["GET", `${apiRoot}/git/ref/heads/main`],
+        ["GET", `${apiRoot}/git/commits/${branchSha}`],
+        ["POST", `${apiRoot}/git/blobs`],
+        ["POST", `${apiRoot}/git/blobs`],
+      ],
+    );
+    assert.ok(!fixture.output.includes(fixture.privateResponseBody), "response body leaked in output");
+    assert.ok(!fixture.output.includes(fixture.privateRetryAfterHeader), "untrusted retry header leaked in output");
+    assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+    assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+    if (mode !== "blob-http-429") {
+      assert.ok(!fixture.output.includes(fixture.retryAfterHeader), "invalid retry delay was used in output");
+    }
+    assert.equal(
+      fixture.remoteHeadAfterSync,
+      branchSha,
+      "branch was updated after the rate-limit response",
+    );
+  });
+}
 
 test("normal sync stops when the branch response JSON is unreadable", (t) => {
   const fixture = runSyncWithBranchSha(t, "a".repeat(40), "branch-invalid-json");
