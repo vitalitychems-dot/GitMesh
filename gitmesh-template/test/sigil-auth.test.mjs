@@ -42,6 +42,15 @@ function failCredentialRename(auth, authFile) {
   });
 }
 
+function failCredentialWriteAfterPartialFile(auth, authFile) {
+  return saveAuth(auth, authFile, {
+    writeFileSync(temporaryPath, contents, options) {
+      fs.writeFileSync(temporaryPath, contents.slice(0, 12), options);
+      throw new Error("forced partial credential-write failure");
+    },
+  });
+}
+
 function assertNoPlaintextSigil(authFile, ...sigils) {
   const stored = fs.readFileSync(authFile, "utf8");
   for (const sigil of sigils) assert.equal(stored.includes(sigil), false);
@@ -306,6 +315,41 @@ test("failed automatic rotation keeps the previously saved sigil active", async 
     }),
     /Access denied/,
   );
+});
+
+test("partial credential write failure preserves the active sigil and removes the temporary file", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "partial-write-current-sigil-2026";
+  await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil, activeSigil]),
+    log: () => {},
+  });
+  const before = fs.readFileSync(authFile);
+  const priorAuth = loadAuth(authFile);
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([activeSigil]),
+      promptTextFn: getPrompt(["SAVED"]),
+      saveAuthFn: failCredentialWriteAfterPartialFile,
+      log: () => {},
+    }),
+    /forced partial credential-write failure/,
+  );
+
+  assert.deepEqual(fs.readFileSync(authFile), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), [path.basename(authFile)]);
+  assert.equal(loadAuth(authFile).verifier, verifier(activeSigil, priorAuth.salt));
+
+  const authenticatedSession = await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil]),
+    promptTextFn: getPrompt(["SAVED"]),
+    log: () => {},
+  });
+  assert.notEqual(authenticatedSession.currentSigil, activeSigil);
 });
 
 test("manual changes store the replacement privately and reject previously used sigils", async () => {

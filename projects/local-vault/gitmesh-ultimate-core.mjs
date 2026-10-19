@@ -243,10 +243,13 @@ function readAuth(authFile = AUTH_FILE) {
   return auth;
 }
 
-export function saveAuth(auth, authFile = AUTH_FILE, { renameSync = fs.renameSync } = {}) {
+export function saveAuth(auth, authFile = AUTH_FILE, {
+  renameSync = fs.renameSync,
+  writeFileSync = fs.writeFileSync,
+} = {}) {
   const temporaryPath = path.join(path.dirname(authFile), `.auth-${crypto.randomUUID()}.tmp`);
   try {
-    fs.writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
+    writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
     renameSync(temporaryPath, authFile);
   } catch (error) {
     try { fs.unlinkSync(temporaryPath); } catch {}
