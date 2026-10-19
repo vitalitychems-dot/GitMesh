@@ -351,6 +351,8 @@ function runSyncWithBranchSha(
   const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
   const privateMalformedBlobSha = "PRIVATE_MALFORMED_BLOB_SHA_SENTINEL";
   const privateUppercaseBlobSha = "A".repeat(40);
+  const privateInvalidTreeSha = "PRIVATE_INVALID_TREE_SHA_SENTINEL";
+  const privateInvalidCommitSha = "PRIVATE_INVALID_COMMIT_SHA_SENTINEL";
   const advancedHeadSha = "ffffffffffffffffffffffffffffffffffffffff";
   const privateSymlinkTargetContents = "PRIVATE_SYMLINK_TARGET_CONTENT_SENTINEL";
   let privateSymlinkTargetDirectory;
@@ -434,8 +436,8 @@ function runSyncWithBranchSha(
       "const requests = [];",
       'const branchSha = fs.readFileSync(process.env.GITMESH_TEST_REMOTE_HEAD, "utf8");',
       'const baseTreeSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";',
-      'const newTreeSha = "cccccccccccccccccccccccccccccccccccccccc";',
-      'const commitSha = process.env.GITMESH_TEST_MODE === "retry-after-ref-timeout" ? "2222222222222222222222222222222222222222" : "dddddddddddddddddddddddddddddddddddddddd";',
+      'const newTreeSha = process.env.GITMESH_TEST_MODE === "invalid-tree-sha" ? process.env.GITMESH_TEST_INVALID_TREE_SHA : "cccccccccccccccccccccccccccccccccccccccc";',
+      'const commitSha = process.env.GITMESH_TEST_MODE === "retry-after-ref-timeout" ? "2222222222222222222222222222222222222222" : process.env.GITMESH_TEST_MODE === "invalid-commit-sha" ? process.env.GITMESH_TEST_INVALID_COMMIT_SHA : "dddddddddddddddddddddddddddddddddddddddd";',
       'const blobShas = [',
       '  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",',
       '  "ffffffffffffffffffffffffffffffffffffffff",',
@@ -561,6 +563,8 @@ function runSyncWithBranchSha(
       GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
       GITMESH_TEST_MALFORMED_BLOB_SHA: privateMalformedBlobSha,
       GITMESH_TEST_UPPERCASE_BLOB_SHA: privateUppercaseBlobSha,
+      GITMESH_TEST_INVALID_TREE_SHA: privateInvalidTreeSha,
+      GITMESH_TEST_INVALID_COMMIT_SHA: privateInvalidCommitSha,
       GITMESH_TEST_REQUEST_LOG: requestLog,
       GITMESH_TEST_SYNTAX_LOG: syntaxInvocationLog,
       GITMESH_TEST_MUTABLE_SOURCE_PATH: mutableSourcePath,
@@ -581,6 +585,8 @@ function runSyncWithBranchSha(
     privateNetworkError,
     privateMalformedBlobSha,
     privateUppercaseBlobSha,
+    privateInvalidTreeSha,
+    privateInvalidCommitSha,
     advancedHeadSha,
     privateSymlinkTargetPath,
     privateSymlinkTargetContents,
@@ -652,6 +658,58 @@ for (const [shaKind, shaValue] of [
       );
     });
   }
+}
+
+for (const [mode, label, shaField, expectedRequests] of [
+  [
+    "invalid-tree-sha",
+    "tree",
+    "privateInvalidTreeSha",
+    [
+      ["GET", "/git/ref/heads/main"],
+      ["GET", "/git/commits/BRANCH_SHA"],
+      ["POST", "/git/blobs"],
+      ["POST", "/git/blobs"],
+      ["POST", "/git/blobs"],
+      ["POST", "/git/trees"],
+    ],
+  ],
+  [
+    "invalid-commit-sha",
+    "commit",
+    "privateInvalidCommitSha",
+    [
+      ["GET", "/git/ref/heads/main"],
+      ["GET", "/git/commits/BRANCH_SHA"],
+      ["POST", "/git/blobs"],
+      ["POST", "/git/blobs"],
+      ["POST", "/git/blobs"],
+      ["POST", "/git/trees"],
+      ["POST", "/git/commits"],
+    ],
+  ],
+]) {
+  test(`normal sync stops before later writes when GitHub returns an invalid ${label} SHA`, (t) => {
+    const branchSha = "a".repeat(40);
+    const fixture = runSyncWithBranchSha(t, branchSha, mode);
+    const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+    const expectedMessage = `GitHub returned an invalid ${label} SHA; sync stopped.`;
+
+    assert.equal(fixture.result.status, 1, fixture.output);
+    assert.equal(fixture.output.trim(), expectedMessage);
+    assert.deepEqual(
+      fixture.requests.map(({ method, url }) => [
+        method,
+        url.replace(apiRoot, "").replace(branchSha, "BRANCH_SHA"),
+      ]),
+      expectedRequests,
+    );
+    assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+    assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+    assert.ok(!fixture.output.includes(fixture[shaField]), `${label} SHA leaked in output`);
+    assert.ok(!fixture.output.includes(fixture.privateResponseBody), "response details leaked in output");
+    assert.equal(fixture.remoteHeadAfterSync, branchSha, "branch was updated after an invalid response SHA");
+  });
 }
 
 test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
