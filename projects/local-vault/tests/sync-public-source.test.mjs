@@ -156,13 +156,13 @@ function runSyncWithSyntaxResult(
       '    }) + "\\n");',
       '    const mode = process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE;',
       '    if (mode === "syntax" || mode === "success" || mode === "eacces-open" || mode === "multiple-syntax") return originalSpawnSync(command, args, options);',
-      '    const errorCode = mode === "timeout" ? "ETIMEDOUT" : "ENOBUFS";',
+      '    const errorCode = mode === "timeout" ? "ETIMEDOUT" : mode === "spawn-failure" ? "ENOENT" : "ENOBUFS";',
       "    return {",
-      `      error: mode === "interrupted" ? undefined : Object.assign(new Error("${privateNodeOutput}"), { code: errorCode }),`,
+      `      error: mode === "interrupted" ? undefined : Object.assign(new Error(mode === "spawn-failure" ? "spawn ENOENT ${privateNodeOutput} ${privateSource}" : "${privateNodeOutput}"), { code: errorCode }),`,
       "      status: null,",
       '      signal: mode === "interrupted" ? "SIGTERM" : null,',
-      `      stdout: Buffer.from("${privateNodeOutput}"),`,
-      `      stderr: Buffer.from("${privateNodeOutput}"),`,
+      `      stdout: Buffer.from(mode === "spawn-failure" ? "${privateNodeOutput} ${privateSource}" : "${privateNodeOutput}"),`,
+      `      stderr: Buffer.from(mode === "spawn-failure" ? "raw startup diagnostic ${privateNodeOutput} ${privateSource}" : "${privateNodeOutput}"),`,
       "      pid: 123,",
       "      output: [],",
       "    };",
@@ -213,6 +213,9 @@ function runSyncWithSyntaxResult(
       "FIRST_PRIVATE_SYNTAX_SENTINEL",
       "SECOND_PRIVATE_SYNTAX_SENTINEL",
       "ENOBUFS",
+      "ENOENT",
+      "spawn ENOENT",
+      "raw startup diagnostic",
       "[stdin]",
       "SyntaxError",
       "EACCES",
@@ -563,6 +566,16 @@ for (const [mode, label, expectedMessage] of [
 
 test("syntax-check output overflow is private and stops source sync before GitHub", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "enobufs");
+  assertSafeSyntaxFailure(
+    fixture,
+    "Refusing to sync JavaScript that fails Node syntax validation: " +
+      "gitmesh-ultimate-core.mjs. Correct the JavaScript and retry the source sync. " +
+      "No GitHub requests were made.",
+  );
+});
+
+test("Node startup failure stays private and stops source sync before GitHub", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "spawn-failure");
   assertSafeSyntaxFailure(
     fixture,
     "Refusing to sync JavaScript that fails Node syntax validation: " +
