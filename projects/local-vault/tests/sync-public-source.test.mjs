@@ -276,6 +276,7 @@ function runSyncWithBranchSha(
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
   const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
+  const advancedHeadSha = "ffffffffffffffffffffffffffffffffffffffff";
   const changedSourceDuringRequest =
     "// CHANGED_AFTER_SYNC_SNAPSHOT_SENTINEL\nexport const changedAfterSnapshot = true;\n";
   const mutableSourcePath = path.join(tempDir, "gitmesh-ultimate-core.mjs");
@@ -403,6 +404,15 @@ function runSyncWithBranchSha(
       "  }",
       '  if (method === "PATCH" && url.endsWith("/git/refs/heads/main")) {',
       "    const refUpdate = JSON.parse(options.body);",
+      '    if (process.env.GITMESH_TEST_MODE === "branch-advance-before-ref-update") {',
+      "      fs.writeFileSync(process.env.GITMESH_TEST_REMOTE_HEAD, process.env.GITMESH_TEST_ADVANCED_HEAD);",
+      "      return {",
+      "        ok: false,",
+      "        status: 422,",
+      "        statusText: process.env.GITMESH_TEST_RESPONSE_SENTINEL,",
+      "        json: async () => { throw new Error(process.env.GITMESH_TEST_RESPONSE_SENTINEL); },",
+      "      };",
+      "    }",
       "    fs.writeFileSync(process.env.GITMESH_TEST_REMOTE_HEAD, refUpdate.sha);",
       '    if (process.env.GITMESH_TEST_MODE === "ref-update-timeout-after-accept") {',
       "      const error = new Error(process.env.GITMESH_TEST_NETWORK_SENTINEL);",
@@ -424,6 +434,7 @@ function runSyncWithBranchSha(
       PATH: process.env.PATH ?? "",
       GITHUB_TOKEN: fakeToken,
       GITMESH_TEST_BRANCH_SHA: branchSha,
+      GITMESH_TEST_ADVANCED_HEAD: advancedHeadSha,
       GITMESH_TEST_MODE: mode,
       GITMESH_TEST_RESPONSE_SENTINEL: privateResponseBody,
       GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
@@ -443,6 +454,7 @@ function runSyncWithBranchSha(
     privateSource,
     privateResponseBody,
     privateNetworkError,
+    advancedHeadSha,
     syntaxInvocationLog,
     expectedSources,
     changedSourceDuringRequest,
@@ -1112,4 +1124,37 @@ test("retry after an ambiguous ref timeout reads the latest head and never force
   assert.ok(!retry.output.includes(retry.fakeToken));
   assert.ok(!retry.output.includes(retry.privateNetworkError));
   assert.ok(!retry.output.includes(retry.privateSource));
+});
+
+test("a branch advance before ref update is rejected without overwriting the new head", (t) => {
+  const originalSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, originalSha, "branch-advance-before-ref-update");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "GitHub request failed with HTTP 422 during PATCH /git/refs/heads/main. " +
+      "The branch may have advanced; rerun the sync to read the latest head; sync stopped.",
+  );
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${originalSha}`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/trees`],
+      ["POST", `${apiRoot}/git/commits`],
+      ["PATCH", `${apiRoot}/git/refs/heads/main`],
+    ],
+  );
+  assert.deepEqual(fixture.requests[6].commit.parents, [originalSha]);
+  assert.equal(fixture.requests[7].refUpdate.force, false);
+  assert.notEqual(fixture.requests[7].refUpdate.sha, fixture.advancedHeadSha);
+  assert.equal(fixture.remoteHeadAfterSync, fixture.advancedHeadSha);
+  assert.ok(!fixture.output.includes(fixture.privateResponseBody));
+  assert.ok(!fixture.output.includes(fixture.fakeToken));
+  assert.ok(!fixture.output.includes(fixture.privateSource));
 });
