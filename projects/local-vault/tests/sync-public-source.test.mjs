@@ -56,7 +56,7 @@ test("README timeout guidance matches the fixed source-sync limits", () => {
 function runSyncWithSyntaxResult(
   t,
   mode,
-  { checkOnly = false, tokenPresent = !checkOnly } = {},
+  { checkOnly = false, tokenPresent = !checkOnly, tokenValue } = {},
 ) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-syntax-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
@@ -68,7 +68,7 @@ function runSyncWithSyntaxResult(
   const fetchMarker = path.join(tempDir, "github-fetch-invoked");
   const privateSource = "PRIVATE_SYNTAX_SOURCE_SENTINEL";
   const privateNodeOutput = "PRIVATE_NODE_DIAGNOSTIC_SENTINEL";
-  const fakeToken = "test-only-not-a-real-token";
+  const fakeToken = tokenValue ?? "test-only-not-a-real-token";
 
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
@@ -254,6 +254,26 @@ test("normal sync without a GitHub token fails safely before any network request
   assert.equal(fixture.output.trim(), "Set GITHUB_TOKEN through Replit Secrets before running source sync.");
   assert.equal(fs.existsSync(fixture.fetchMarker), false, "missing credentials must never reach fetch");
   for (const text of fixture.privateTexts) assert.ok(!fixture.output.includes(text), "setup error leaked private diagnostic material");
+});
+
+test("oversized GitHub token is rejected before fetch and never printed", (t) => {
+  const sentinel = `PRIVATE_OVERSIZED_TOKEN_SENTINEL_${"X".repeat(4097)}`;
+  const fixture = runSyncWithSyntaxResult(t, "success", { tokenPresent: true, tokenValue: sentinel });
+  assert.notEqual(fixture.result.status, 0);
+  assert.equal(fixture.output.trim(), "Set GITHUB_TOKEN through Replit Secrets before running source sync.");
+  assert.equal(fs.existsSync(fixture.fetchMarker), false, "oversized token reached fetch");
+  assert.ok(!fixture.output.includes(sentinel), "oversized token was printed");
+  for (const text of fixture.privateTexts) assert.ok(!fixture.output.includes(text), "private diagnostic data leaked");
+});
+
+test("GitHub token containing CR/LF is rejected before fetch and never printed", (t) => {
+  const sentinel = "PRIVATE_CRLF_TOKEN_SENTINEL\r\nSECOND_PRIVATE_TOKEN_LINE";
+  const fixture = runSyncWithSyntaxResult(t, "success", { tokenPresent: true, tokenValue: sentinel });
+  assert.notEqual(fixture.result.status, 0);
+  assert.equal(fixture.output.trim(), "Set GITHUB_TOKEN through Replit Secrets before running source sync.");
+  assert.equal(fs.existsSync(fixture.fetchMarker), false, "CR/LF token reached fetch");
+  assert.ok(!fixture.output.includes(sentinel), "CR/LF token was printed");
+  for (const text of fixture.privateTexts) assert.ok(!fixture.output.includes(text), "private diagnostic data leaked");
 });
 
 function assertSafeSyntaxPreflightFailure(fixture, expectedMessage) {
