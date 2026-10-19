@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import pg from "pg";
 import { AuthStore } from "../auth-store.mjs";
 import { PrivateAuth, digest, validSigil } from "../private-auth.mjs";
-import { createApp } from "../live.mjs";
+import { createApp, createWebServer } from "../live.mjs";
 
 const initial = "test-only-initial-key-never-use";
 const databaseTest = (name, fn) => test(name, { skip: !process.env.DATABASE_URL || process.env.NODE_ENV === "production" }, fn);
@@ -33,6 +33,16 @@ async function serve(t, app) {
 const post = (base, path, body, cookie) => fetch(base + path, {
   method: "POST", headers: { Origin: base, "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
   body: JSON.stringify(body),
+});
+
+test("web server applies bounded request, header, keep-alive and socket limits", () => {
+  const server = createWebServer((_request, response) => response.end());
+  assert.equal(server.requestTimeout, 15000);
+  assert.equal(server.headersTimeout, 10000);
+  assert.equal(server.keepAliveTimeout, 5000);
+  assert.equal(server.maxHeadersCount, 100);
+  assert.equal(server.maxRequestsPerSocket, 100);
+  server.close();
 });
 
 test("key validation rejects unsafe types, short values and control characters", () => {

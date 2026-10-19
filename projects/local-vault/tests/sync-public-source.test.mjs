@@ -64,6 +64,7 @@ function runSyncWithSyntaxResult(
   const scriptPath = path.join(tempDir, "run-sync.mjs");
   const preloadPath = path.join(tempDir, "simulate-syntax-result.mjs");
   const syntaxMarker = path.join(tempDir, "syntax-check-invoked");
+  const sourceReadMarker = path.join(tempDir, "source-read-invoked");
   const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
   const fetchMarker = path.join(tempDir, "github-fetch-invoked");
   const privateSource = "PRIVATE_SYNTAX_SOURCE_SENTINEL";
@@ -153,6 +154,9 @@ function runSyncWithSyntaxResult(
       "const originalReadFileSync = fs.readFileSync.bind(fs);",
       "let sourceChangedDuringRead = false;",
       "fs.readFileSync = (file, ...args) => {",
+      '  if (typeof file === "string" && ["README.md", "gitmesh-ultimate-core.mjs", "sync-public-source.mjs"].some((name) => file === new URL(name, import.meta.url).pathname)) {',
+      '    fs.writeFileSync(process.env.GITMESH_TEST_SOURCE_READ_MARKER, "invoked");',
+      "  }",
       '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "eacces-open" && typeof file === "string" && file.endsWith("sync-public-source.mjs")) {',
       `    const error = new Error("EACCES: permission denied ${privateNodeOutput}");`,
       '    error.code = "EACCES";',
@@ -219,6 +223,7 @@ function runSyncWithSyntaxResult(
   const env = {
     PATH: process.env.PATH ?? "",
     GITMESH_TEST_SYNTAX_MARKER: syntaxMarker,
+    GITMESH_TEST_SOURCE_READ_MARKER: sourceReadMarker,
     GITMESH_TEST_SYNTAX_INVOCATION_LOG: syntaxInvocationLog,
     GITMESH_TEST_FETCH_MARKER: fetchMarker,
     GITMESH_TEST_SYNTAX_FAILURE_MODE: mode,
@@ -244,6 +249,7 @@ function runSyncWithSyntaxResult(
     output: result.stdout + result.stderr,
     result,
     syntaxMarker,
+    sourceReadMarker,
     syntaxInvocationLog,
     fetchMarker,
     scriptPath,
@@ -280,14 +286,18 @@ function assertSafeSyntaxFailure(fixture, expectedMessage) {
   }
 }
 
-test("normal sync without a GitHub token fails safely before any network request", (t) => {
-  const fixture = runSyncWithSyntaxResult(t, "success", { checkOnly: false, tokenPresent: false });
-  assert.equal(fixture.result.error, undefined);
-  assert.notEqual(fixture.result.status, 0);
-  assert.equal(fixture.output.trim(), "Set GITHUB_TOKEN through Replit Secrets before running source sync.");
-  assert.equal(fs.existsSync(fixture.fetchMarker), false, "missing credentials must never reach fetch");
-  for (const text of fixture.privateTexts) assert.ok(!fixture.output.includes(text), "setup error leaked private diagnostic material");
-});
+for (const mode of ["success", "syntax", "eacces-open"]) {
+  test(`normal sync without a GitHub token stops before reading or checking ${mode} sources`, (t) => {
+    const fixture = runSyncWithSyntaxResult(t, mode, { tokenPresent: false });
+    assert.equal(fixture.result.error, undefined);
+    assert.equal(fixture.result.status, 1, fixture.output);
+    assert.equal(fixture.output.trim(), "Set GITHUB_TOKEN through Replit Secrets before running source sync.");
+    assert.equal(fs.existsSync(fixture.sourceReadMarker), false, "missing credentials must stop before opening allowlisted source files");
+    assert.equal(fs.existsSync(fixture.syntaxMarker), false, "missing credentials must stop before syntax validation");
+    assert.equal(fs.existsSync(fixture.fetchMarker), false, "missing credentials must never reach fetch");
+    for (const text of fixture.privateTexts) assert.ok(!fixture.output.includes(text), "setup error leaked private diagnostic material");
+  });
+}
 
 test("oversized GitHub token is rejected before fetch and never printed", (t) => {
   const sentinel = `PRIVATE_OVERSIZED_TOKEN_SENTINEL_${"X".repeat(4097)}`;
@@ -340,6 +350,7 @@ function runSyncWithBranchSha(
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
   const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
   const privateMalformedBlobSha = "PRIVATE_MALFORMED_BLOB_SHA_SENTINEL";
+  const privateUppercaseBlobSha = "A".repeat(40);
   const advancedHeadSha = "ffffffffffffffffffffffffffffffffffffffff";
   const privateSymlinkTargetContents = "PRIVATE_SYMLINK_TARGET_CONTENT_SENTINEL";
   let privateSymlinkTargetDirectory;
@@ -492,8 +503,16 @@ function runSyncWithBranchSha(
       '      error.name = "TimeoutError";',
       "      throw error;",
       "    }",
-      '    if (process.env.GITMESH_TEST_MODE === "malformed-blob-sha") {',
-      "      return response({ sha: process.env.GITMESH_TEST_MALFORMED_BLOB_SHA });",
+      '    const malformedBlobMode = process.env.GITMESH_TEST_MODE.startsWith("malformed-blob-sha-");',
+      '    const uppercaseBlobMode = process.env.GITMESH_TEST_MODE.startsWith("uppercase-blob-sha-");',
+      "    if (malformedBlobMode || uppercaseBlobMode) {",
+      '      const badBlobIndex = Number(process.env.GITMESH_TEST_MODE.split("-").at(-1));',
+      "      if (blobIndex === badBlobIndex) {",
+      "        const sha = uppercaseBlobMode",
+      "          ? process.env.GITMESH_TEST_UPPERCASE_BLOB_SHA",
+      "          : process.env.GITMESH_TEST_MALFORMED_BLOB_SHA;",
+      "        return response({ sha });",
+      "      }",
       "    }",
       "    return response({ sha: blobShas[blobIndex++] });",
       "  }",
@@ -541,6 +560,7 @@ function runSyncWithBranchSha(
       GITMESH_TEST_PRIVATE_SOURCE: privateSource,
       GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
       GITMESH_TEST_MALFORMED_BLOB_SHA: privateMalformedBlobSha,
+      GITMESH_TEST_UPPERCASE_BLOB_SHA: privateUppercaseBlobSha,
       GITMESH_TEST_REQUEST_LOG: requestLog,
       GITMESH_TEST_SYNTAX_LOG: syntaxInvocationLog,
       GITMESH_TEST_MUTABLE_SOURCE_PATH: mutableSourcePath,
@@ -560,6 +580,7 @@ function runSyncWithBranchSha(
     privateResponseBody,
     privateNetworkError,
     privateMalformedBlobSha,
+    privateUppercaseBlobSha,
     advancedHeadSha,
     privateSymlinkTargetPath,
     privateSymlinkTargetContents,
@@ -596,26 +617,42 @@ for (const [label, branchSha] of [
   });
 }
 
-test("normal sync stops after GitHub returns a malformed blob SHA", (t) => {
-  const branchSha = "a".repeat(40);
-  const fixture = runSyncWithBranchSha(t, branchSha, "malformed-blob-sha");
-  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+for (const [shaKind, shaValue] of [
+  ["malformed", "privateMalformedBlobSha"],
+  ["uppercase", "privateUppercaseBlobSha"],
+]) {
+  for (const blobIndex of [0, 1, 2]) {
+    test(`normal sync stops before tree creation when blob ${blobIndex + 1} has a ${shaKind} SHA`, (t) => {
+      const branchSha = "a".repeat(40);
+      const mode = `${shaKind}-blob-sha-${blobIndex}`;
+      const fixture = runSyncWithBranchSha(t, branchSha, mode);
+      const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+      const expectedRequests = [
+        ["GET", `${apiRoot}/git/ref/heads/main`],
+        ["GET", `${apiRoot}/git/commits/${branchSha}`],
+        ...Array.from({ length: blobIndex + 1 }, () => ["POST", `${apiRoot}/git/blobs`]),
+      ];
 
-  assert.equal(fixture.result.status, 1, fixture.output);
-  assert.equal(fixture.output.trim(), "GitHub returned an invalid blob SHA; sync stopped.");
-  assert.deepEqual(
-    fixture.requests.map(({ method, url }) => [method, url]),
-    [
-      ["GET", `${apiRoot}/git/ref/heads/main`],
-      ["GET", `${apiRoot}/git/commits/${branchSha}`],
-      ["POST", `${apiRoot}/git/blobs`],
-    ],
-  );
-  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
-  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
-  assert.ok(!fixture.output.includes(fixture.privateMalformedBlobSha), "malformed blob SHA leaked in output");
-  assert.equal(fixture.remoteHeadAfterSync, branchSha, "branch was updated after the malformed blob response");
-});
+      assert.equal(fixture.result.status, 1, fixture.output);
+      assert.equal(fixture.output.trim(), "GitHub returned an invalid blob SHA; sync stopped.");
+      assert.deepEqual(
+        fixture.requests.map(({ method, url }) => [method, url]),
+        expectedRequests,
+      );
+      assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+      assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+      assert.ok(
+        !fixture.output.includes(fixture[shaValue]),
+        `${shaKind} blob SHA leaked in output`,
+      );
+      assert.equal(
+        fixture.remoteHeadAfterSync,
+        branchSha,
+        `branch was updated after the ${shaKind} blob response`,
+      );
+    });
+  }
+}
 
 test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   const branchSha = "a".repeat(40);
@@ -1085,6 +1122,8 @@ for (const [mode, problem, expectedMessage] of [
 test("--check-syntax succeeds without a GitHub token or network request", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "success", { checkOnly: true });
 
+  assert.equal(fixture.tokenPresent, false, "offline syntax checking must not require a token");
+  assert.equal(fixture.result.error, undefined);
   assert.equal(fixture.result.status, 0, fixture.output);
   assert.equal(
     fixture.output.trim(),
@@ -1092,6 +1131,7 @@ test("--check-syntax succeeds without a GitHub token or network request", (t) =>
       "gitmesh-ultimate-core.mjs, sync-public-source.mjs.",
   );
   assert.ok(!fixture.output.includes("README.md"), "a non-JavaScript file was listed");
+  assert.ok(fs.existsSync(fixture.sourceReadMarker), "offline syntax checking did not read its source files");
   assert.ok(fs.existsSync(fixture.syntaxMarker), "the syntax subprocess was not exercised");
   assert.ok(!fs.existsSync(fixture.fetchMarker), "syntax check attempted a GitHub request");
   for (const privateText of fixture.privateTexts) {
