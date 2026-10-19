@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { changeSigil, setupOrAuthenticate } from "../gitmesh-ultimate-core.mjs";
+import { changeSigil, setupOrAuthenticate } from "../../projects/local-vault/gitmesh-ultimate-core.mjs";
 
 const SCRYPT_OPTIONS = { N: 32_768, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
 const temporaryDirectories = [];
