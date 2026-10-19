@@ -258,6 +258,9 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
   const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
+  const changedSourceDuringRequest =
+    "// CHANGED_AFTER_SYNC_SNAPSHOT_SENTINEL\nexport const changedAfterSnapshot = true;\n";
+  const mutableSourcePath = path.join(tempDir, "gitmesh-ultimate-core.mjs");
 
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
@@ -322,6 +325,9 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       "  requests.push(request);",
       "  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));",
       '  if (method === "GET" && url.endsWith("/git/ref/heads/main")) {',
+      '    if (process.env.GITMESH_TEST_MODE === "change-source-after-read") {',
+      "      fs.writeFileSync(process.env.GITMESH_TEST_MUTABLE_SOURCE_PATH, process.env.GITMESH_TEST_CHANGED_SOURCE);",
+      "    }",
       '    if (process.env.GITMESH_TEST_MODE === "branch-http-503") {',
       "      return {",
       "        ok: false,",
@@ -380,6 +386,8 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
       GITMESH_TEST_REQUEST_LOG: requestLog,
       GITMESH_TEST_SYNTAX_LOG: syntaxInvocationLog,
+      GITMESH_TEST_MUTABLE_SOURCE_PATH: mutableSourcePath,
+      GITMESH_TEST_CHANGED_SOURCE: changedSourceDuringRequest,
       NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
     },
   });
@@ -393,6 +401,8 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
     privateNetworkError,
     syntaxInvocationLog,
     expectedSources,
+    changedSourceDuringRequest,
+    localCoreAfterSync: fs.readFileSync(mutableSourcePath, "utf8"),
   };
 }
 
@@ -496,6 +506,28 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
   assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
   assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+});
+
+test("sync uploads the initial source snapshot when a local file changes during GitHub requests", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "change-source-after-read");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+  const corePath = "projects/local-vault/gitmesh-ultimate-core.mjs";
+
+  assert.equal(fixture.result.status, 0, fixture.output);
+  const coreBlobRequest = fixture.requests.find(
+    ({ method, url }) => method === "POST" && url.endsWith("/git/blobs"),
+  );
+  assert.ok(coreBlobRequest, "the mock did not capture the core source blob");
+  const uploadedCore = Buffer.from(coreBlobRequest.blob.content, "base64").toString("utf8");
+  assert.equal(uploadedCore, fixture.expectedSources[corePath]);
+  assert.notEqual(uploadedCore, fixture.changedSourceDuringRequest);
+  assert.equal(fixture.localCoreAfterSync, fixture.changedSourceDuringRequest);
+  assert.equal(fixture.requests.length, 8, "sync did not complete entirely through the mocked API");
+  assert.ok(
+    fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)),
+    "sync attempted an unexpected network request",
+  );
 });
 
 test("normal sync stops when the base-commit response JSON is unreadable", (t) => {
