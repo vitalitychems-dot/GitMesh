@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { changeSigil, setupOrAuthenticate } from "../../projects/local-vault/gitmesh-ultimate-core.mjs";
+import { changeSigil, saveAuth, setupOrAuthenticate } from "../../projects/local-vault/gitmesh-ultimate-core.mjs";
 
 const SCRYPT_OPTIONS = { N: 32_768, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
 const temporaryDirectories = [];
@@ -32,6 +32,14 @@ function verifier(sigil, salt) {
 
 function loadAuth(authFile) {
   return JSON.parse(fs.readFileSync(authFile, "utf8"));
+}
+
+function failCredentialRename(auth, authFile) {
+  return saveAuth(auth, authFile, {
+    renameSync() {
+      throw new Error("forced credential-save failure");
+    },
+  });
 }
 
 function assertNoPlaintextSigil(authFile, ...sigils) {
@@ -212,6 +220,43 @@ test("cancelling rotation leaves the active sigil and credential file unchanged"
   assert.notEqual(session.currentSigil, activeSigil);
 });
 
+test("failed automatic rotation keeps the previously saved sigil active", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "rotation-persistence-current-2026";
+  await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil, activeSigil]),
+    log: () => {},
+  });
+  const before = fs.readFileSync(authFile);
+  const priorAuth = loadAuth(authFile);
+  const output = [];
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([activeSigil]),
+      promptTextFn: getPrompt(["SAVED"]),
+      saveAuthFn: failCredentialRename,
+      log: (message) => output.push(message),
+    }),
+    /forced credential-save failure/,
+  );
+
+  assert.equal(output.some((message) => message.includes("Sigil rotated.")), false);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), [path.basename(authFile)]);
+  assert.equal(loadAuth(authFile).verifier, verifier(activeSigil, priorAuth.salt));
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt(["not-the-active-sigil-2026"]),
+      log: () => {},
+    }),
+    /Access denied/,
+  );
+});
+
 test("manual changes store the replacement privately and reject previously used sigils", async () => {
   const authFile = makeAuthPath();
   const activeSigil = "manual-current-sigil-2026";
@@ -245,6 +290,45 @@ test("manual changes store the replacement privately and reject previously used 
   assert.deepEqual(fs.readFileSync(authFile), beforeRejectedChange);
   await assert.rejects(
     setupOrAuthenticate({ authFile, promptLineFn: getPrompt([activeSigil]), log: () => {} }),
+    /Access denied/,
+  );
+});
+
+test("failed manual change keeps the session and saved sigil unchanged", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "manual-persistence-current-2026";
+  const session = await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil, activeSigil]),
+    log: () => {},
+  });
+  const before = fs.readFileSync(authFile);
+  const priorAuth = session.auth;
+  const replacement = "manual-persistence-replacement-2026";
+  const output = [];
+
+  await assert.rejects(
+    changeSigil(session, {
+      authFile,
+      promptLineFn: getPrompt([replacement, replacement]),
+      saveAuthFn: failCredentialRename,
+      log: (message) => output.push(message),
+    }),
+    /forced credential-save failure/,
+  );
+
+  assert.equal(session.currentSigil, activeSigil);
+  assert.equal(session.auth, priorAuth);
+  assert.equal(output.some((message) => message.includes("Admin sigil updated.")), false);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), [path.basename(authFile)]);
+  assert.equal(loadAuth(authFile).verifier, verifier(activeSigil, priorAuth.salt));
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([replacement]),
+      log: () => {},
+    }),
     /Access denied/,
   );
 });

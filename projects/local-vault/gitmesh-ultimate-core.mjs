@@ -243,11 +243,11 @@ function readAuth(authFile = AUTH_FILE) {
   return auth;
 }
 
-function saveAuth(auth, authFile = AUTH_FILE) {
+export function saveAuth(auth, authFile = AUTH_FILE, { renameSync = fs.renameSync } = {}) {
   const temporaryPath = path.join(path.dirname(authFile), `.auth-${crypto.randomUUID()}.tmp`);
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
   try {
-    fs.renameSync(temporaryPath, authFile);
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
+    renameSync(temporaryPath, authFile);
   } catch (error) {
     try { fs.unlinkSync(temporaryPath); } catch {}
     throw error;
@@ -276,6 +276,7 @@ export async function setupOrAuthenticate({
   authFile = AUTH_FILE,
   promptLineFn = promptLine,
   promptTextFn = promptText,
+  saveAuthFn = saveAuth,
   log = console.log,
 } = {}) {
   const auth = readAuth(authFile);
@@ -286,7 +287,7 @@ export async function setupOrAuthenticate({
     if (first.length < 12) throw new Error("Admin sigil must contain at least 12 characters.");
     if (first !== confirmation) throw new Error("Admin sigils did not match.");
     const initialAuth = makeAuthRecord(first, 0, []);
-    saveAuth(initialAuth, authFile);
+    saveAuthFn(initialAuth, authFile);
     log("Admin sigil verifier saved locally. The sigil itself was not saved.");
     log("On each later successful sign-in, GitMesh will issue a replacement sigil.");
     return { auth: initialAuth, currentSigil: first };
@@ -321,7 +322,7 @@ export async function setupOrAuthenticate({
     throw new Error("Rotation cancelled. The previous sigil remains valid; access was not granted.");
   }
 
-  saveAuth(nextAuth, authFile);
+  saveAuthFn(nextAuth, authFile);
   log("Sigil rotated. The previous sigil is now invalid.");
   return { auth: nextAuth, currentSigil: nextSigil };
 }
@@ -552,6 +553,7 @@ async function importFromMenu() {
 export async function changeSigil(session, {
   authFile = AUTH_FILE,
   promptLineFn = promptLine,
+  saveAuthFn = saveAuth,
   log = console.log,
 } = {}) {
   const first = await promptLineFn("New admin sigil: ");
@@ -571,7 +573,7 @@ export async function changeSigil(session, {
 
   usedSigilHashes.push(currentFingerprint);
   const updatedAuth = makeAuthRecord(first, session.auth.generation, usedSigilHashes);
-  saveAuth(updatedAuth, authFile);
+  saveAuthFn(updatedAuth, authFile);
   session.auth = updatedAuth;
   session.currentSigil = first;
   log("Admin sigil updated. The previous sigil is now invalid.");
