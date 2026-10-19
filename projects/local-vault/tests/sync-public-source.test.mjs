@@ -68,7 +68,22 @@ function runSyncWithSyntaxResult(
   const fetchMarker = path.join(tempDir, "github-fetch-invoked");
   const privateSource = "PRIVATE_SYNTAX_SOURCE_SENTINEL";
   const privateNodeOutput = "PRIVATE_NODE_DIAGNOSTIC_SENTINEL";
+  const childOutputSentinel = "PRIVATE_HUNG_CHILD_OUTPUT_SENTINEL";
+  const hungChildPath = path.join(tempDir, "hung-syntax-child.mjs");
+  const hungChildStarted = path.join(tempDir, "hung-child-started");
   const fakeToken = tokenValue ?? "test-only-not-a-real-token";
+
+  if (mode === "hung-child") {
+    fs.writeFileSync(
+      hungChildPath,
+      [
+        'import fs from "node:fs";',
+        'fs.writeFileSync(process.env.GITMESH_TEST_HUNG_CHILD_STARTED, "started");',
+        `process.stderr.write("${childOutputSentinel}");`,
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+    );
+  }
 
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
@@ -160,6 +175,18 @@ function runSyncWithSyntaxResult(
       "      env: options?.env ?? {},",
       '      inputHasSourceSentinel: Buffer.from(options?.input ?? "").includes(Buffer.from(process.env.GITMESH_TEST_SOURCE_SENTINEL)),',
       "    };",
+      '    if (mode === "hung-child") {',
+      "      const child = originalSpawnSync(process.execPath, [process.env.GITMESH_TEST_HUNG_CHILD_PATH], {",
+      '        env: { PATH: process.env.PATH ?? "", GITMESH_TEST_HUNG_CHILD_STARTED: process.env.GITMESH_TEST_HUNG_CHILD_STARTED },',
+      "        encoding: \"utf8\", timeout: options?.timeout, maxBuffer: options?.maxBuffer,",
+      "      });",
+      '      const childOutput = `${child.stdout ?? ""}${child.stderr ?? ""}`;',
+      "      fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify({",
+      "        ...invocation, pid: child.pid, status: child.status, error: child.error?.code ?? null, signal: child.signal,",
+      `        childOutputContainsSentinel: childOutput.includes("${childOutputSentinel}"),`,
+      '      }) + "\\n");',
+      "      return child;",
+      "    }",
       '    if (mode === "syntax" || mode === "success" || mode === "eacces-open" || mode === "multiple-syntax" || mode === "later-syntax") {',
       "      const result = originalSpawnSync(command, args, options);",
       "      fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify({",
@@ -196,8 +223,13 @@ function runSyncWithSyntaxResult(
     GITMESH_TEST_FETCH_MARKER: fetchMarker,
     GITMESH_TEST_SYNTAX_FAILURE_MODE: mode,
     GITMESH_TEST_SOURCE_SENTINEL: privateSource,
+    GITMESH_TEST_HUNG_CHILD_OUTPUT: childOutputSentinel,
     NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
   };
+  if (mode === "hung-child") {
+    env.GITMESH_TEST_HUNG_CHILD_PATH = hungChildPath;
+    env.GITMESH_TEST_HUNG_CHILD_STARTED = hungChildStarted;
+  }
   if (tokenPresent) env.GITHUB_TOKEN = fakeToken;
   const result = spawnSync(process.execPath, [
     scriptPath,
@@ -221,6 +253,7 @@ function runSyncWithSyntaxResult(
     privateTexts: [
       privateSource,
       privateNodeOutput,
+      childOutputSentinel,
       fakeToken,
       "FIRST_PRIVATE_SYNTAX_SENTINEL",
       "SECOND_PRIVATE_SYNTAX_SENTINEL",
@@ -847,6 +880,34 @@ test("syntax-check timeout is distinct from invalid JavaScript and stops source 
     "Node syntax validation timed out for gitmesh-ultimate-core.mjs. " +
       "Retry the source sync. No GitHub requests were made.",
   );
+});
+
+test("a genuinely hung syntax child is terminated and kept private before GitHub", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "hung-child");
+  const invocations = fs
+    .readFileSync(fixture.syntaxInvocationLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "Node syntax validation timed out for gitmesh-ultimate-core.mjs. " +
+      "Retry the source sync. No GitHub requests were made.",
+  );
+  assert.ok(fs.existsSync(fixture.syntaxMarker), "syntax validation did not launch the child fixture");
+  assert.ok(fs.existsSync(fixture.fetchMarker) === false, "source sync attempted a GitHub request");
+  assert.ok(fs.existsSync(path.join(path.dirname(fixture.syntaxMarker), "hung-child-started")), "the child fixture never started");
+  assert.equal(invocations.length, 1, "expected one actual child-process timeout");
+  assert.equal(invocations[0].error, "ETIMEDOUT");
+  assert.equal(invocations[0].status, null);
+  assert.equal(invocations[0].childOutputContainsSentinel, true, "fixture did not produce its private output marker");
+  assert.ok(Number.isInteger(invocations[0].pid), "timed child process did not have a process ID");
+  assert.throws(() => process.kill(invocations[0].pid, 0), { code: "ESRCH" }, "timeout left the child process running");
+  for (const text of fixture.privateTexts) {
+    assert.ok(!fixture.output.includes(text), `hung child output or source content leaked: ${text}`);
+  }
 });
 
 test("interrupted syntax-check is distinct from invalid JavaScript and stops source sync", (t) => {
