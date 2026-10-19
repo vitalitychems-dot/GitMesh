@@ -10,11 +10,13 @@ permissions:
 
 jobs:
   source-sync-regressions:
-    runs-on: ubuntu-latest
+    name: Source sync / ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: ["20.x", "24.x"]
     steps:
       - name: Check out source

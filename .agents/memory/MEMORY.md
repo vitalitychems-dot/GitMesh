@@ -1,0 +1,2 @@
+- [Publication boundaries](publication-boundaries.md) — publish vetted public snapshots, not private local history; keep cloud hosting separate from the local admin vault.
+- [Branch drift](branch-drift-during-tasks.md) — verify the current checkout after task handoffs before editing.
