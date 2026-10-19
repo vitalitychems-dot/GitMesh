@@ -219,6 +219,35 @@ test("successful rotation invalidates the prior sigil and records it as consumed
   );
 });
 
+test("authentication rotates a version-2 credential into the maximum safe generation", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "penultimate-generation-active-sigil-2026";
+  const salt = "d".repeat(32);
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt,
+    verifier: verifier(activeSigil, salt),
+    generation: Number.MAX_SAFE_INTEGER - 1,
+    usedSigilHashes: [],
+  }));
+  const output = [];
+
+  const session = await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil]),
+    promptTextFn: getPrompt(["SAVED"]),
+    log: (message) => output.push(message),
+  });
+  const rotated = loadAuth(authFile);
+
+  assert.equal(session.auth.generation, Number.MAX_SAFE_INTEGER);
+  assert.equal(rotated.generation, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(rotated.usedSigilHashes, [fingerprint(activeSigil)]);
+  assert.equal(rotated.verifier, verifier(session.currentSigil, rotated.salt));
+  assert.ok(output.some((message) => message.includes(session.currentSigil)));
+  assertNoPlaintextSigil(authFile, activeSigil, session.currentSigil);
+});
+
 test("authentication rejects rotation at the maximum safe generation without prompting or rewriting credentials", async () => {
   const authFile = makeAuthPath();
   const activeSigil = "maximum-generation-active-sigil-2026";
