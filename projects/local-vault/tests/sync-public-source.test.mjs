@@ -350,6 +350,7 @@ function runSyncWithBranchSha(
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
   const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
   const privateMalformedBlobSha = "PRIVATE_MALFORMED_BLOB_SHA_SENTINEL";
+  const privateUppercaseBlobSha = "A".repeat(40);
   const advancedHeadSha = "ffffffffffffffffffffffffffffffffffffffff";
   const privateSymlinkTargetContents = "PRIVATE_SYMLINK_TARGET_CONTENT_SENTINEL";
   let privateSymlinkTargetDirectory;
@@ -502,8 +503,16 @@ function runSyncWithBranchSha(
       '      error.name = "TimeoutError";',
       "      throw error;",
       "    }",
-      '    if (process.env.GITMESH_TEST_MODE === "malformed-blob-sha") {',
-      "      return response({ sha: process.env.GITMESH_TEST_MALFORMED_BLOB_SHA });",
+      '    const malformedBlobMode = process.env.GITMESH_TEST_MODE.startsWith("malformed-blob-sha-");',
+      '    const uppercaseBlobMode = process.env.GITMESH_TEST_MODE.startsWith("uppercase-blob-sha-");',
+      "    if (malformedBlobMode || uppercaseBlobMode) {",
+      '      const badBlobIndex = Number(process.env.GITMESH_TEST_MODE.split("-").at(-1));',
+      "      if (blobIndex === badBlobIndex) {",
+      "        const sha = uppercaseBlobMode",
+      "          ? process.env.GITMESH_TEST_UPPERCASE_BLOB_SHA",
+      "          : process.env.GITMESH_TEST_MALFORMED_BLOB_SHA;",
+      "        return response({ sha });",
+      "      }",
       "    }",
       "    return response({ sha: blobShas[blobIndex++] });",
       "  }",
@@ -551,6 +560,7 @@ function runSyncWithBranchSha(
       GITMESH_TEST_PRIVATE_SOURCE: privateSource,
       GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
       GITMESH_TEST_MALFORMED_BLOB_SHA: privateMalformedBlobSha,
+      GITMESH_TEST_UPPERCASE_BLOB_SHA: privateUppercaseBlobSha,
       GITMESH_TEST_REQUEST_LOG: requestLog,
       GITMESH_TEST_SYNTAX_LOG: syntaxInvocationLog,
       GITMESH_TEST_MUTABLE_SOURCE_PATH: mutableSourcePath,
@@ -570,6 +580,7 @@ function runSyncWithBranchSha(
     privateResponseBody,
     privateNetworkError,
     privateMalformedBlobSha,
+    privateUppercaseBlobSha,
     advancedHeadSha,
     privateSymlinkTargetPath,
     privateSymlinkTargetContents,
@@ -606,26 +617,42 @@ for (const [label, branchSha] of [
   });
 }
 
-test("normal sync stops after GitHub returns a malformed blob SHA", (t) => {
-  const branchSha = "a".repeat(40);
-  const fixture = runSyncWithBranchSha(t, branchSha, "malformed-blob-sha");
-  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+for (const [shaKind, shaValue] of [
+  ["malformed", "privateMalformedBlobSha"],
+  ["uppercase", "privateUppercaseBlobSha"],
+]) {
+  for (const blobIndex of [0, 1, 2]) {
+    test(`normal sync stops before tree creation when blob ${blobIndex + 1} has a ${shaKind} SHA`, (t) => {
+      const branchSha = "a".repeat(40);
+      const mode = `${shaKind}-blob-sha-${blobIndex}`;
+      const fixture = runSyncWithBranchSha(t, branchSha, mode);
+      const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+      const expectedRequests = [
+        ["GET", `${apiRoot}/git/ref/heads/main`],
+        ["GET", `${apiRoot}/git/commits/${branchSha}`],
+        ...Array.from({ length: blobIndex + 1 }, () => ["POST", `${apiRoot}/git/blobs`]),
+      ];
 
-  assert.equal(fixture.result.status, 1, fixture.output);
-  assert.equal(fixture.output.trim(), "GitHub returned an invalid blob SHA; sync stopped.");
-  assert.deepEqual(
-    fixture.requests.map(({ method, url }) => [method, url]),
-    [
-      ["GET", `${apiRoot}/git/ref/heads/main`],
-      ["GET", `${apiRoot}/git/commits/${branchSha}`],
-      ["POST", `${apiRoot}/git/blobs`],
-    ],
-  );
-  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
-  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
-  assert.ok(!fixture.output.includes(fixture.privateMalformedBlobSha), "malformed blob SHA leaked in output");
-  assert.equal(fixture.remoteHeadAfterSync, branchSha, "branch was updated after the malformed blob response");
-});
+      assert.equal(fixture.result.status, 1, fixture.output);
+      assert.equal(fixture.output.trim(), "GitHub returned an invalid blob SHA; sync stopped.");
+      assert.deepEqual(
+        fixture.requests.map(({ method, url }) => [method, url]),
+        expectedRequests,
+      );
+      assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+      assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+      assert.ok(
+        !fixture.output.includes(fixture[shaValue]),
+        `${shaKind} blob SHA leaked in output`,
+      );
+      assert.equal(
+        fixture.remoteHeadAfterSync,
+        branchSha,
+        `branch was updated after the ${shaKind} blob response`,
+      );
+    });
+  }
+}
 
 test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   const branchSha = "a".repeat(40);
