@@ -317,7 +317,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       '  if (method === "POST" && url.endsWith("/git/trees")) {',
       "    const treeBody = JSON.parse(options.body);",
       "    request.treePaths = treeBody.tree.map((entry) => entry.path);",
-      "    request.treeEntries = treeBody.tree.map(({ path, sha }) => ({ path, sha }));",
+      "    request.treeEntries = treeBody.tree.map(({ path, mode, type, sha }) => ({ path, mode, type, sha }));",
       "  }",
       "  requests.push(request);",
       "  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));",
@@ -460,14 +460,20 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   assert.deepEqual(fixture.requests[5].treeEntries, [
     {
       path: "projects/local-vault/gitmesh-ultimate-core.mjs",
+      mode: "100644",
+      type: "blob",
       sha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     },
     {
       path: "projects/local-vault/README.md",
+      mode: "100644",
+      type: "blob",
       sha: "ffffffffffffffffffffffffffffffffffffffff",
     },
     {
       path: "projects/local-vault/sync-public-source.mjs",
+      mode: "100644",
+      type: "blob",
       sha: "1111111111111111111111111111111111111111",
     },
   ]);
