@@ -246,10 +246,24 @@ function readAuth(authFile = AUTH_FILE) {
 export function saveAuth(auth, authFile = AUTH_FILE, {
   renameSync = fs.renameSync,
   writeFileSync = fs.writeFileSync,
+  linkSync = fs.linkSync,
+  exclusive = false,
 } = {}) {
   const temporaryPath = path.join(path.dirname(authFile), `.auth-${crypto.randomUUID()}.tmp`);
   try {
     writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
+    if (exclusive) {
+      try {
+        linkSync(temporaryPath, authFile);
+      } catch (error) {
+        if (error?.code === "EEXIST") {
+          throw new Error("An admin sigil was set up by another process; no credential was changed.");
+        }
+        throw error;
+      }
+      try { fs.unlinkSync(temporaryPath); } catch {}
+      return;
+    }
     renameSync(temporaryPath, authFile);
   } catch (error) {
     try { fs.unlinkSync(temporaryPath); } catch {}
@@ -290,7 +304,7 @@ export async function setupOrAuthenticate({
     if (first.length < 12) throw new Error("Admin sigil must contain at least 12 characters.");
     if (first !== confirmation) throw new Error("Admin sigils did not match.");
     const initialAuth = makeAuthRecord(first, 0, []);
-    saveAuthFn(initialAuth, authFile);
+    saveAuthFn(initialAuth, authFile, { exclusive: true });
     log("Admin sigil verifier saved locally. The sigil itself was not saved.");
     log("On each later successful sign-in, GitMesh will issue a replacement sigil.");
     return { auth: initialAuth, currentSigil: first };

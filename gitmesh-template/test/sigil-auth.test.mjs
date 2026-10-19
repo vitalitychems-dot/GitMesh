@@ -34,9 +34,13 @@ function loadAuth(authFile) {
   return JSON.parse(fs.readFileSync(authFile, "utf8"));
 }
 
-function failCredentialRename(auth, authFile) {
+function failCredentialRename(auth, authFile, options = {}) {
   return saveAuth(auth, authFile, {
+    ...options,
     renameSync() {
+      throw new Error("forced credential-save failure");
+    },
+    linkSync() {
       throw new Error("forced credential-save failure");
     },
   });
@@ -97,6 +101,50 @@ test("failed first-time setup does not report success or leave credential files 
   assert.equal(output.some((message) => message.includes("Admin sigil verifier saved locally.")), false);
   assert.equal(fs.existsSync(authFile), false);
   assert.deepEqual(fs.readdirSync(path.dirname(authFile)), []);
+});
+
+test("simultaneous first-time setup allows only one sigil to become active", async () => {
+  const authFile = makeAuthPath();
+  const sigils = ["first-admin-sigil-2026", "second-admin-sigil-2026"];
+  const outputs = [[], []];
+  let promptsStarted = 0;
+  let releasePrompts;
+  const bothSetupsReadMissingCredential = new Promise((resolve) => {
+    releasePrompts = resolve;
+  });
+
+  const attempts = sigils.map((sigil, index) => {
+    let promptCount = 0;
+    return setupOrAuthenticate({
+      authFile,
+      promptLineFn: async () => {
+        promptCount += 1;
+        if (promptCount === 1) {
+          promptsStarted += 1;
+          if (promptsStarted === 2) releasePrompts();
+          await bothSetupsReadMissingCredential;
+        }
+        return sigil;
+      },
+      log: (message) => outputs[index].push(message),
+    });
+  });
+
+  const results = await Promise.allSettled(attempts);
+  const successfulIndex = results.findIndex((result) => result.status === "fulfilled");
+  const rejectedIndex = results.findIndex((result) => result.status === "rejected");
+
+  assert.notEqual(successfulIndex, -1, "one setup should create the credential");
+  assert.notEqual(rejectedIndex, -1, "the competing setup should be rejected");
+  assert.notEqual(successfulIndex, rejectedIndex);
+  assert.match(results[rejectedIndex].reason.message, /set up by another process/);
+  assert.equal(outputs[successfulIndex].some((message) => message.includes("Admin sigil verifier saved locally.")), true);
+  assert.equal(outputs[rejectedIndex].some((message) => message.includes("Admin sigil verifier saved locally.")), false);
+
+  const savedAuth = loadAuth(authFile);
+  const successfulSession = results[successfulIndex].value;
+  assert.equal(savedAuth.verifier, verifier(successfulSession.currentSigil, savedAuth.salt));
+  assertNoPlaintextSigil(authFile, ...sigils);
 });
 
 test("authentication rejects malformed consumed-sigil hashes before prompting or rewriting credentials", async () => {
