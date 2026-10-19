@@ -70,6 +70,26 @@ test("first-time setup stores only a verifier for the active sigil", async () =>
   assertNoPlaintextSigil(authFile, sigil);
 });
 
+test("failed first-time setup does not report success or leave credential files behind", async () => {
+  const authFile = makeAuthPath();
+  const output = [];
+  const sigil = "initial-admin-sigil-2026";
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([sigil, sigil]),
+      saveAuthFn: failCredentialRename,
+      log: (message) => output.push(message),
+    }),
+    /forced credential-save failure/,
+  );
+
+  assert.equal(output.some((message) => message.includes("Admin sigil verifier saved locally.")), false);
+  assert.equal(fs.existsSync(authFile), false);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), []);
+});
+
 test("authentication rejects malformed consumed-sigil hashes before prompting or rewriting credentials", async () => {
   const authFile = makeAuthPath();
   const currentSigil = "current-admin-sigil-2026";
