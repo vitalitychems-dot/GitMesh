@@ -158,6 +158,38 @@ test("authentication rejects duplicate consumed-sigil hashes before prompting or
   assert.deepEqual(fs.readFileSync(authFile), before);
 });
 
+test("authentication rejects unsafe and negative generation counters before prompting or rewriting credentials", async () => {
+  for (const generation of [Number.MAX_SAFE_INTEGER + 1, -1]) {
+    const authFile = makeAuthPath();
+    const salt = "e".repeat(32);
+    fs.writeFileSync(authFile, JSON.stringify({
+      version: 2,
+      salt,
+      verifier: verifier("current-admin-sigil-2026", salt),
+      generation,
+      usedSigilHashes: [],
+    }));
+    const before = fs.readFileSync(authFile);
+    let promptCount = 0;
+
+    await assert.rejects(
+      setupOrAuthenticate({
+        authFile,
+        promptLineFn: async () => {
+          promptCount += 1;
+          throw new Error("Authentication must reject the credential file before prompting.");
+        },
+        log: () => {},
+      }),
+      /local credential file is invalid/,
+      `generation ${generation} should be rejected`,
+    );
+
+    assert.equal(promptCount, 0, `generation ${generation} must not reach the sign-in prompt`);
+    assert.deepEqual(fs.readFileSync(authFile), before, `generation ${generation} must not rewrite credentials`);
+  }
+});
+
 test("a version-1 credential migrates on successful sign-in and consumes the old sigil", async () => {
   const authFile = makeAuthPath();
   const oldSigil = "legacy-passphrase-2024";
