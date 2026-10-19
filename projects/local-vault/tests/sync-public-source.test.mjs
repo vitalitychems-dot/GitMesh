@@ -1335,6 +1335,26 @@ test("normal sync stops safely when an allowlisted source cannot be opened", (t)
   }
 });
 
+test("--check-syntax gives safe guidance when an allowlisted JavaScript source cannot be opened", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "eacces-open", {
+    checkOnly: true,
+    tokenPresent: false,
+  });
+
+  assert.equal(fixture.tokenPresent, false, "offline syntax checking must not require a GitHub token");
+  assertSafeSyntaxFailure(
+    fixture,
+    "JavaScript source sync-public-source.mjs could not be opened. " +
+      "Check its permissions and confirm the file still exists, then rerun --check-syntax. " +
+      "No GitHub requests were made.",
+  );
+  assert.ok(fs.existsSync(fixture.sourceReadMarker), "the access-denied read was not exercised");
+  assert.ok(
+    !fixture.output.includes(fixture.scriptPath),
+    "absolute filesystem path leaked in offline syntax-check output",
+  );
+});
+
 for (const [mode, problem, expectedReason] of [
   ["invalid-utf8", "invalid UTF-8", "is not valid UTF-8"],
   ["nul", "NUL bytes", "contains NUL bytes"],
