@@ -250,6 +250,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
   const scriptPath = path.join(tempDir, "sync-public-source.mjs");
   const preloadPath = path.join(tempDir, "mock-github-branch-sha.mjs");
   const requestLog = path.join(tempDir, "github-requests.json");
+  const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
   const fakeToken = "test-only-not-a-real-token";
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
@@ -260,22 +261,60 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
   }
   fs.appendFileSync(path.join(tempDir, "README.md"), `\n${privateSource}\n`);
   fs.writeFileSync(requestLog, "[]");
+  const expectedSources = {
+    "projects/local-vault/gitmesh-ultimate-core.mjs": fs.readFileSync(
+      path.join(tempDir, "gitmesh-ultimate-core.mjs"),
+      "utf8",
+    ),
+    "projects/local-vault/README.md": fs.readFileSync(
+      path.join(tempDir, "README.md"),
+      "utf8",
+    ),
+    "projects/local-vault/sync-public-source.mjs": fs.readFileSync(
+      path.join(tempDir, "sync-public-source.mjs"),
+      "utf8",
+    ),
+  };
   fs.writeFileSync(
     preloadPath,
     [
       'import fs from "node:fs";',
+      'import childProcess from "node:child_process";',
+      'import { syncBuiltinESMExports } from "node:module";',
+      "const originalSpawnSync = childProcess.spawnSync.bind(childProcess);",
+      "childProcess.spawnSync = (command, args, options) => {",
+      '  if (command === process.execPath && Array.isArray(args) && args.includes("--check")) {',
+      "    const result = originalSpawnSync(command, args, options);",
+      "    fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_LOG, JSON.stringify({",
+      "      command, args, status: result.status, error: result.error?.code ?? null,",
+      '    }) + "\\n");',
+      "    return result;",
+      "  }",
+      "  return originalSpawnSync(command, args, options);",
+      "};",
+      "syncBuiltinESMExports();",
       'const response = (value) => ({ ok: true, json: async () => value });',
       "const requests = [];",
       "const branchSha = process.env.GITMESH_TEST_BRANCH_SHA;",
       'const baseTreeSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";',
       'const newTreeSha = "cccccccccccccccccccccccccccccccccccccccc";',
       'const commitSha = "dddddddddddddddddddddddddddddddddddddddd";',
-      'const blobSha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";',
+      'const blobShas = [',
+      '  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",',
+      '  "ffffffffffffffffffffffffffffffffffffffff",',
+      '  "1111111111111111111111111111111111111111",',
+      "];",
+      "let blobIndex = 0;",
       "globalThis.fetch = async (url, options = {}) => {",
       '  const method = options.method ?? "GET";',
       "  const request = { method, url };",
+      '  if (method === "POST" && url.endsWith("/git/blobs")) {',
+      "    request.blob = JSON.parse(options.body);",
+      "  }",
       '  if (method === "POST" && url.endsWith("/git/trees")) {',
-      '    request.treePaths = JSON.parse(options.body).tree.map((entry) => entry.path);',
+      "    const treeBody = JSON.parse(options.body);",
+      "    request.treePaths = treeBody.tree.map((entry) => entry.path);",
+      "    request.treeEntries = treeBody.tree.map(({ path, sha }) => ({ path, sha }));",
       "  }",
       "  requests.push(request);",
       "  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));",
@@ -309,7 +348,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       "    return response({ tree: { sha: baseTreeSha } });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/blobs")) {',
-      "    return response({ sha: blobSha });",
+      "    return response({ sha: blobShas[blobIndex++] });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/trees")) {',
       "    return response({ sha: newTreeSha });",
@@ -337,6 +376,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       GITMESH_TEST_RESPONSE_SENTINEL: privateResponseBody,
       GITMESH_TEST_NETWORK_SENTINEL: privateNetworkError,
       GITMESH_TEST_REQUEST_LOG: requestLog,
+      GITMESH_TEST_SYNTAX_LOG: syntaxInvocationLog,
       NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
     },
   });
@@ -348,6 +388,8 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
     privateSource,
     privateResponseBody,
     privateNetworkError,
+    syntaxInvocationLog,
+    expectedSources,
   };
 }
 
@@ -399,6 +441,49 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
     "projects/local-vault/README.md",
     "projects/local-vault/sync-public-source.mjs",
   ]);
+  const blobRequests = fixture.requests.filter(({ method, url }) =>
+    method === "POST" && url.endsWith("/git/blobs"),
+  );
+  assert.equal(blobRequests.length, Object.keys(fixture.expectedSources).length);
+  Object.entries(fixture.expectedSources).forEach(([targetPath, expectedContent], index) => {
+    const blob = blobRequests[Number(index)].blob;
+    assert.equal(blob.encoding, "base64", `${targetPath} was not sent as base64`);
+    assert.equal(
+      Buffer.from(blob.content, "base64").toString("utf8"),
+      expectedContent,
+      `${targetPath} blob did not match the validated local source`,
+    );
+  });
+  assert.deepEqual(fixture.requests[5].treeEntries, [
+    {
+      path: "projects/local-vault/gitmesh-ultimate-core.mjs",
+      sha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    },
+    {
+      path: "projects/local-vault/README.md",
+      sha: "ffffffffffffffffffffffffffffffffffffffff",
+    },
+    {
+      path: "projects/local-vault/sync-public-source.mjs",
+      sha: "1111111111111111111111111111111111111111",
+    },
+  ]);
+  const syntaxInvocations = fs
+    .readFileSync(fixture.syntaxInvocationLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(syntaxInvocations.length, 2, "not every JavaScript file was syntax-checked");
+  assert.ok(
+    syntaxInvocations.every(
+      ({ args, status, error }) =>
+        args.includes("--input-type=module") &&
+        args.includes("--check") &&
+        status === 0 &&
+        error === null,
+    ),
+    "one or more JavaScript syntax checks did not pass",
+  );
   assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
   assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
   assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
