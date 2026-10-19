@@ -127,12 +127,20 @@ export async function createApp({ production = process.env.NODE_ENV === "product
   return app;
 }
 
+export function createWebServer(app) {
+  const server = createServer(app);
+  server.requestTimeout = 15000;
+  server.headersTimeout = 10000;
+  server.keepAliveTimeout = 5000;
+  server.maxHeadersCount = 100;
+  server.maxRequestsPerSocket = 100;
+  return server;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const app = await createApp();
-    const server = createServer(app);
-    server.requestTimeout = 15000;
-    server.headersTimeout = 10000;
+    const server = createWebServer(app);
     server.on("error", () => {
       console.error(JSON.stringify({ event: "server_start_failed" }));
       process.exit(1);
