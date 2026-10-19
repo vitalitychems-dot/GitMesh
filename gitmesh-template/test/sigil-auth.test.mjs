@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { changeSigil, setupOrAuthenticate } from "../../projects/local-vault/gitmesh-ultimate-core.mjs";
+import { changeSigil, saveAuth, setupOrAuthenticate } from "../../projects/local-vault/gitmesh-ultimate-core.mjs";
 
 const SCRYPT_OPTIONS = { N: 32_768, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
 const temporaryDirectories = [];
@@ -34,6 +34,23 @@ function loadAuth(authFile) {
   return JSON.parse(fs.readFileSync(authFile, "utf8"));
 }
 
+function failCredentialRename(auth, authFile) {
+  return saveAuth(auth, authFile, {
+    renameSync() {
+      throw new Error("forced credential-save failure");
+    },
+  });
+}
+
+function failCredentialWriteAfterPartialFile(auth, authFile) {
+  return saveAuth(auth, authFile, {
+    writeFileSync(temporaryPath, contents, options) {
+      fs.writeFileSync(temporaryPath, contents.slice(0, 12), options);
+      throw new Error("forced partial credential-write failure");
+    },
+  });
+}
+
 function assertNoPlaintextSigil(authFile, ...sigils) {
   const stored = fs.readFileSync(authFile, "utf8");
   for (const sigil of sigils) assert.equal(stored.includes(sigil), false);
@@ -60,6 +77,117 @@ test("first-time setup stores only a verifier for the active sigil", async () =>
   assert.deepEqual(session.auth.usedSigilHashes, []);
   assert.equal(session.auth.verifier, verifier(sigil, session.auth.salt));
   assertNoPlaintextSigil(authFile, sigil);
+});
+
+test("failed first-time setup does not report success or leave credential files behind", async () => {
+  const authFile = makeAuthPath();
+  const output = [];
+  const sigil = "initial-admin-sigil-2026";
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([sigil, sigil]),
+      saveAuthFn: failCredentialRename,
+      log: (message) => output.push(message),
+    }),
+    /forced credential-save failure/,
+  );
+
+  assert.equal(output.some((message) => message.includes("Admin sigil verifier saved locally.")), false);
+  assert.equal(fs.existsSync(authFile), false);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), []);
+});
+
+test("authentication rejects malformed consumed-sigil hashes before prompting or rewriting credentials", async () => {
+  const authFile = makeAuthPath();
+  const currentSigil = "current-admin-sigil-2026";
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt: "a".repeat(32),
+    verifier: verifier(currentSigil, "a".repeat(32)),
+    generation: 1,
+    usedSigilHashes: ["not-a-valid-sha256-hash"],
+  }));
+  const before = fs.readFileSync(authFile);
+  let promptCount = 0;
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: async () => {
+        promptCount += 1;
+        throw new Error("Authentication must reject the credential file before prompting.");
+      },
+      log: () => {},
+    }),
+    /local credential file is invalid/,
+  );
+
+  assert.equal(promptCount, 0);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+});
+
+test("authentication rejects duplicate consumed-sigil hashes before prompting or rewriting credentials", async () => {
+  const authFile = makeAuthPath();
+  const currentSigil = "current-admin-sigil-2026";
+  const consumedHash = fingerprint("previously-consumed-sigil-2025");
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt: "b".repeat(32),
+    verifier: verifier(currentSigil, "b".repeat(32)),
+    generation: 2,
+    usedSigilHashes: [consumedHash, consumedHash],
+  }));
+  const before = fs.readFileSync(authFile);
+  let promptCount = 0;
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: async () => {
+        promptCount += 1;
+        throw new Error("Authentication must reject the credential file before prompting.");
+      },
+      log: () => {},
+    }),
+    /local credential file is invalid/,
+  );
+
+  assert.equal(promptCount, 0);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+});
+
+test("authentication rejects unsafe and negative generation counters before prompting or rewriting credentials", async () => {
+  for (const generation of [Number.MAX_SAFE_INTEGER + 1, -1]) {
+    const authFile = makeAuthPath();
+    const salt = "e".repeat(32);
+    fs.writeFileSync(authFile, JSON.stringify({
+      version: 2,
+      salt,
+      verifier: verifier("current-admin-sigil-2026", salt),
+      generation,
+      usedSigilHashes: [],
+    }));
+    const before = fs.readFileSync(authFile);
+    let promptCount = 0;
+
+    await assert.rejects(
+      setupOrAuthenticate({
+        authFile,
+        promptLineFn: async () => {
+          promptCount += 1;
+          throw new Error("Authentication must reject the credential file before prompting.");
+        },
+        log: () => {},
+      }),
+      /local credential file is invalid/,
+      `generation ${generation} should be rejected`,
+    );
+
+    assert.equal(promptCount, 0, `generation ${generation} must not reach the sign-in prompt`);
+    assert.deepEqual(fs.readFileSync(authFile), before, `generation ${generation} must not rewrite credentials`);
+  }
 });
 
 test("a version-1 credential migrates on successful sign-in and consumes the old sigil", async () => {
@@ -123,6 +251,66 @@ test("successful rotation invalidates the prior sigil and records it as consumed
   );
 });
 
+test("authentication rotates a version-2 credential into the maximum safe generation", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "penultimate-generation-active-sigil-2026";
+  const salt = "d".repeat(32);
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt,
+    verifier: verifier(activeSigil, salt),
+    generation: Number.MAX_SAFE_INTEGER - 1,
+    usedSigilHashes: [],
+  }));
+  const output = [];
+
+  const session = await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil]),
+    promptTextFn: getPrompt(["SAVED"]),
+    log: (message) => output.push(message),
+  });
+  const rotated = loadAuth(authFile);
+
+  assert.equal(session.auth.generation, Number.MAX_SAFE_INTEGER);
+  assert.equal(rotated.generation, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(rotated.usedSigilHashes, [fingerprint(activeSigil)]);
+  assert.equal(rotated.verifier, verifier(session.currentSigil, rotated.salt));
+  assert.ok(output.some((message) => message.includes(session.currentSigil)));
+  assertNoPlaintextSigil(authFile, activeSigil, session.currentSigil);
+});
+
+test("authentication rejects rotation at the maximum safe generation without prompting or rewriting credentials", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "maximum-generation-active-sigil-2026";
+  const salt = "c".repeat(32);
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt,
+    verifier: verifier(activeSigil, salt),
+    generation: Number.MAX_SAFE_INTEGER,
+    usedSigilHashes: [],
+  }));
+  const before = fs.readFileSync(authFile);
+  let replacementPromptCount = 0;
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([activeSigil]),
+      promptTextFn: async () => {
+        replacementPromptCount += 1;
+        throw new Error("Rotation confirmation must not be requested.");
+      },
+      log: () => {},
+    }),
+    /sigil generation limit has been reached/,
+  );
+
+  assert.equal(replacementPromptCount, 0);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+});
+
 test("cancelling rotation leaves the active sigil and credential file unchanged", async () => {
   const authFile = makeAuthPath();
   const activeSigil = "still-active-sigil-2026";
@@ -151,6 +339,78 @@ test("cancelling rotation leaves the active sigil and credential file unchanged"
     log: () => {},
   });
   assert.notEqual(session.currentSigil, activeSigil);
+});
+
+test("failed automatic rotation keeps the previously saved sigil active", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "rotation-persistence-current-2026";
+  await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil, activeSigil]),
+    log: () => {},
+  });
+  const before = fs.readFileSync(authFile);
+  const priorAuth = loadAuth(authFile);
+  const output = [];
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([activeSigil]),
+      promptTextFn: getPrompt(["SAVED"]),
+      saveAuthFn: failCredentialRename,
+      log: (message) => output.push(message),
+    }),
+    /forced credential-save failure/,
+  );
+
+  assert.equal(output.some((message) => message.includes("Sigil rotated.")), false);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), [path.basename(authFile)]);
+  assert.equal(loadAuth(authFile).verifier, verifier(activeSigil, priorAuth.salt));
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt(["not-the-active-sigil-2026"]),
+      log: () => {},
+    }),
+    /Access denied/,
+  );
+});
+
+test("partial credential write failure preserves the active sigil and removes the temporary file", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "partial-write-current-sigil-2026";
+  await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil, activeSigil]),
+    log: () => {},
+  });
+  const before = fs.readFileSync(authFile);
+  const priorAuth = loadAuth(authFile);
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([activeSigil]),
+      promptTextFn: getPrompt(["SAVED"]),
+      saveAuthFn: failCredentialWriteAfterPartialFile,
+      log: () => {},
+    }),
+    /forced partial credential-write failure/,
+  );
+
+  assert.deepEqual(fs.readFileSync(authFile), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), [path.basename(authFile)]);
+  assert.equal(loadAuth(authFile).verifier, verifier(activeSigil, priorAuth.salt));
+
+  const authenticatedSession = await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil]),
+    promptTextFn: getPrompt(["SAVED"]),
+    log: () => {},
+  });
+  assert.notEqual(authenticatedSession.currentSigil, activeSigil);
 });
 
 test("manual changes store the replacement privately and reject previously used sigils", async () => {
@@ -186,6 +446,45 @@ test("manual changes store the replacement privately and reject previously used 
   assert.deepEqual(fs.readFileSync(authFile), beforeRejectedChange);
   await assert.rejects(
     setupOrAuthenticate({ authFile, promptLineFn: getPrompt([activeSigil]), log: () => {} }),
+    /Access denied/,
+  );
+});
+
+test("failed manual change keeps the session and saved sigil unchanged", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "manual-persistence-current-2026";
+  const session = await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil, activeSigil]),
+    log: () => {},
+  });
+  const before = fs.readFileSync(authFile);
+  const priorAuth = session.auth;
+  const replacement = "manual-persistence-replacement-2026";
+  const output = [];
+
+  await assert.rejects(
+    changeSigil(session, {
+      authFile,
+      promptLineFn: getPrompt([replacement, replacement]),
+      saveAuthFn: failCredentialRename,
+      log: (message) => output.push(message),
+    }),
+    /forced credential-save failure/,
+  );
+
+  assert.equal(session.currentSigil, activeSigil);
+  assert.equal(session.auth, priorAuth);
+  assert.equal(output.some((message) => message.includes("Admin sigil updated.")), false);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), [path.basename(authFile)]);
+  assert.equal(loadAuth(authFile).verifier, verifier(activeSigil, priorAuth.salt));
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([replacement]),
+      log: () => {},
+    }),
     /Access denied/,
   );
 });
