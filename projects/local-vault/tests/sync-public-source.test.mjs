@@ -118,6 +118,11 @@ function runSyncWithSyntaxResult(
       path.join(tempDir, "sync-public-source.mjs"),
       "\nexport const SECOND_PRIVATE_SYNTAX_SENTINEL = ;\n",
     );
+  } else if (mode === "later-syntax") {
+    fs.writeFileSync(
+      path.join(tempDir, "sync-public-source.mjs"),
+      `export const ${privateSource}_LATER = ;\n`,
+    );
   } else if (mode !== "success") {
     fs.writeFileSync(sourcePath, `export const ${privateSource} = ;\n`);
   } else {
@@ -148,14 +153,21 @@ function runSyncWithSyntaxResult(
       "childProcess.spawnSync = (command, args, options) => {",
       '  if (command === process.execPath && Array.isArray(args) && args.includes("--check")) {',
       '    fs.writeFileSync(process.env.GITMESH_TEST_SYNTAX_MARKER, "invoked");',
-      "    fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify({",
+      '    const mode = process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE;',
+      "    const invocation = {",
       "      command,",
       "      args,",
       "      env: options?.env ?? {},",
       '      inputHasSourceSentinel: Buffer.from(options?.input ?? "").includes(Buffer.from(process.env.GITMESH_TEST_SOURCE_SENTINEL)),',
-      '    }) + "\\n");',
-      '    const mode = process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE;',
-      '    if (mode === "syntax" || mode === "success" || mode === "eacces-open" || mode === "multiple-syntax") return originalSpawnSync(command, args, options);',
+      "    };",
+      '    if (mode === "syntax" || mode === "success" || mode === "eacces-open" || mode === "multiple-syntax" || mode === "later-syntax") {',
+      "      const result = originalSpawnSync(command, args, options);",
+      "      fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify({",
+      "        ...invocation, status: result.status, error: result.error?.code ?? null,",
+      '      }) + "\\n");',
+      "      return result;",
+      "    }",
+      '    fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify(invocation) + "\\n");',
       '    const errorCode = mode === "timeout" ? "ETIMEDOUT" : mode === "spawn-failure" ? "ENOENT" : "ENOBUFS";',
       "    return {",
       `      error: mode === "interrupted" ? undefined : Object.assign(new Error(mode === "spawn-failure" ? "spawn ENOENT ${privateNodeOutput} ${privateSource}" : "${privateNodeOutput}"), { code: errorCode }),`,
@@ -688,6 +700,29 @@ test("normal sync reports all syntax errors in stable order without leaking sour
   assertSafeSyntaxFailure(firstFixture, expected);
   assertSafeSyntaxFailure(secondFixture, expected);
   assert.equal(firstFixture.output, secondFixture.output, "diagnostic ordering was unstable");
+});
+
+test("sync checks an earlier JavaScript file before safely rejecting a later file", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "later-syntax");
+  const invalidLine = `export const ${fixture.privateSource}_LATER = ;`;
+  const invocations = fs
+    .readFileSync(fixture.syntaxInvocationLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((entry) => JSON.parse(entry));
+
+  assertSafeSyntaxFailure(
+    fixture,
+    "Refusing to sync JavaScript with syntax errors:\n" +
+      `- sync-public-source.mjs:1:${invalidLine.indexOf(";") + 1}\n` +
+      "Correct each file and retry the source sync. No GitHub requests were made.",
+  );
+  assert.equal(invocations.length, 2, "not every allowlisted JavaScript file was checked");
+  assert.deepEqual(
+    invocations.map(({ status, inputHasSourceSentinel }) => [status, inputHasSourceSentinel]),
+    [[0, false], [1, true]],
+    "the earlier module did not pass before the later module failed",
+  );
 });
 
 test("normal sync stops safely when an allowlisted source cannot be opened", (t) => {
