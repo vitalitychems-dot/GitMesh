@@ -14,6 +14,8 @@ Or use the launcher in this folder: `run-mesh.bat` on Windows, or `sh run-mesh.s
 
 Requirements: Node.js 20 or newer, Git on `PATH`, and an interactive terminal.
 
+Run the automated sigil security tests from the repository root with `node --test gitmesh-template/test/sigil-auth.test.mjs`.
+
 On first launch, choose an initial admin sigil of at least 12 characters. Later launches ask for it without echoing it. After a successful sign-in, GitMesh displays a new, randomly generated sigil once. Save it, then type `SAVED` to activate it and open the console. The prior sigil is invalidated when the replacement is saved. If you cancel instead, the prior sigil remains valid and the console stays locked.
 
 The local credential file stores a salted scrypt verifier and hashes of consumed sigils, never the active sigil itself. Generated sigils use a persistent increasing generation number and are checked against the consumed-key history to prevent reuse. The menu can also set a new sigil; prior sigils cannot be reused. There is no in-app recovery if the active sigil is lost. Existing version-1 passphrase verifier files are accepted and migrate to rotating sigils on the next successful sign-in.

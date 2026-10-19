@@ -213,15 +213,15 @@ function makeAuthRecord(sigil, generation, usedSigilHashes) {
   return auth;
 }
 
-function readAuth() {
-  if (!fs.existsSync(AUTH_FILE)) return null;
-  const info = fs.lstatSync(AUTH_FILE);
+function readAuth(authFile = AUTH_FILE) {
+  if (!fs.existsSync(authFile)) return null;
+  const info = fs.lstatSync(authFile);
   if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_AUTH_BYTES) {
     throw new Error("The local credential file is invalid.");
   }
   let auth;
   try {
-    auth = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
+    auth = JSON.parse(fs.readFileSync(authFile, "utf8"));
   } catch {
     throw new Error("The local credential file is invalid.");
   }
@@ -243,11 +243,11 @@ function readAuth() {
   return auth;
 }
 
-function saveAuth(auth) {
-  const temporaryPath = path.join(VAULT, `.auth-${crypto.randomUUID()}.tmp`);
+function saveAuth(auth, authFile = AUTH_FILE) {
+  const temporaryPath = path.join(path.dirname(authFile), `.auth-${crypto.randomUUID()}.tmp`);
   fs.writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
   try {
-    fs.renameSync(temporaryPath, AUTH_FILE);
+    fs.renameSync(temporaryPath, authFile);
   } catch (error) {
     try { fs.unlinkSync(temporaryPath); } catch {}
     throw error;
@@ -272,22 +272,27 @@ function generateNextSigil(generation, currentSigil, usedHashes) {
   throw new Error("Could not generate a unique admin sigil.");
 }
 
-async function setupOrAuthenticate() {
-  const auth = readAuth();
+export async function setupOrAuthenticate({
+  authFile = AUTH_FILE,
+  promptLineFn = promptLine,
+  promptTextFn = promptText,
+  log = console.log,
+} = {}) {
+  const auth = readAuth(authFile);
   if (!auth) {
-    console.log("First run: choose an initial admin sigil of at least 12 characters.");
-    const first = await promptLine("New admin sigil: ");
-    const confirmation = await promptLine("Confirm admin sigil: ");
+    log("First run: choose an initial admin sigil of at least 12 characters.");
+    const first = await promptLineFn("New admin sigil: ");
+    const confirmation = await promptLineFn("Confirm admin sigil: ");
     if (first.length < 12) throw new Error("Admin sigil must contain at least 12 characters.");
     if (first !== confirmation) throw new Error("Admin sigils did not match.");
     const initialAuth = makeAuthRecord(first, 0, []);
-    saveAuth(initialAuth);
-    console.log("Admin sigil verifier saved locally. The sigil itself was not saved.");
-    console.log("On each later successful sign-in, GitMesh will issue a replacement sigil.");
+    saveAuth(initialAuth, authFile);
+    log("Admin sigil verifier saved locally. The sigil itself was not saved.");
+    log("On each later successful sign-in, GitMesh will issue a replacement sigil.");
     return { auth: initialAuth, currentSigil: first };
   }
 
-  const attempt = await promptLine("Current admin sigil (hidden): ");
+  const attempt = await promptLineFn("Current admin sigil (hidden): ");
   if (!verifySigil(attempt, auth)) throw new Error("Access denied.");
 
   const usedSigilHashes = auth.version === 2 ? auth.usedSigilHashes : [];
@@ -308,16 +313,16 @@ async function setupOrAuthenticate() {
   const nextSigil = generateNextSigil(nextGeneration, attempt, usedHashes);
   const nextAuth = makeAuthRecord(nextSigil, nextGeneration, [...usedHashes]);
 
-  console.log("\nYour previous sigil will be invalidated when you confirm saving this replacement.");
-  console.log("Copy and store this new admin sigil securely; it is shown only once:");
-  console.log(`\n${nextSigil}\n`);
-  const confirmation = await promptText("Type SAVED to activate it and open the console: ");
+  log("\nYour previous sigil will be invalidated when you confirm saving this replacement.");
+  log("Copy and store this new admin sigil securely; it is shown only once:");
+  log(`\n${nextSigil}\n`);
+  const confirmation = await promptTextFn("Type SAVED to activate it and open the console: ");
   if (confirmation !== "SAVED") {
     throw new Error("Rotation cancelled. The previous sigil remains valid; access was not granted.");
   }
 
-  saveAuth(nextAuth);
-  console.log("Sigil rotated. The previous sigil is now invalid.");
+  saveAuth(nextAuth, authFile);
+  log("Sigil rotated. The previous sigil is now invalid.");
   return { auth: nextAuth, currentSigil: nextSigil };
 }
 
@@ -544,9 +549,13 @@ async function importFromMenu() {
   importBundle(bundles[index]);
 }
 
-async function changeSigil(session) {
-  const first = await promptLine("New admin sigil: ");
-  const confirmation = await promptLine("Confirm new admin sigil: ");
+export async function changeSigil(session, {
+  authFile = AUTH_FILE,
+  promptLineFn = promptLine,
+  log = console.log,
+} = {}) {
+  const first = await promptLineFn("New admin sigil: ");
+  const confirmation = await promptLineFn("Confirm new admin sigil: ");
   if (first.length < 12) throw new Error("Admin sigil must contain at least 12 characters.");
   if (first !== confirmation) throw new Error("Admin sigils did not match.");
 
@@ -562,10 +571,10 @@ async function changeSigil(session) {
 
   usedSigilHashes.push(currentFingerprint);
   const updatedAuth = makeAuthRecord(first, session.auth.generation, usedSigilHashes);
-  saveAuth(updatedAuth);
+  saveAuth(updatedAuth, authFile);
   session.auth = updatedAuth;
   session.currentSigil = first;
-  console.log("Admin sigil updated. The previous sigil is now invalid.");
+  log("Admin sigil updated. The previous sigil is now invalid.");
 }
 
 async function runMenu(session) {
@@ -608,4 +617,6 @@ async function main() {
   }
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
