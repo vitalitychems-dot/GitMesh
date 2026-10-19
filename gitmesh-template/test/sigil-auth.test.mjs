@@ -62,6 +62,65 @@ test("first-time setup stores only a verifier for the active sigil", async () =>
   assertNoPlaintextSigil(authFile, sigil);
 });
 
+test("authentication rejects malformed consumed-sigil hashes before prompting or rewriting credentials", async () => {
+  const authFile = makeAuthPath();
+  const currentSigil = "current-admin-sigil-2026";
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt: "a".repeat(32),
+    verifier: verifier(currentSigil, "a".repeat(32)),
+    generation: 1,
+    usedSigilHashes: ["not-a-valid-sha256-hash"],
+  }));
+  const before = fs.readFileSync(authFile);
+  let promptCount = 0;
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: async () => {
+        promptCount += 1;
+        throw new Error("Authentication must reject the credential file before prompting.");
+      },
+      log: () => {},
+    }),
+    /local credential file is invalid/,
+  );
+
+  assert.equal(promptCount, 0);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+});
+
+test("authentication rejects duplicate consumed-sigil hashes before prompting or rewriting credentials", async () => {
+  const authFile = makeAuthPath();
+  const currentSigil = "current-admin-sigil-2026";
+  const consumedHash = fingerprint("previously-consumed-sigil-2025");
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt: "b".repeat(32),
+    verifier: verifier(currentSigil, "b".repeat(32)),
+    generation: 2,
+    usedSigilHashes: [consumedHash, consumedHash],
+  }));
+  const before = fs.readFileSync(authFile);
+  let promptCount = 0;
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: async () => {
+        promptCount += 1;
+        throw new Error("Authentication must reject the credential file before prompting.");
+      },
+      log: () => {},
+    }),
+    /local credential file is invalid/,
+  );
+
+  assert.equal(promptCount, 0);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+});
+
 test("a version-1 credential migrates on successful sign-in and consumes the old sigil", async () => {
   const authFile = makeAuthPath();
   const oldSigil = "legacy-passphrase-2024";
