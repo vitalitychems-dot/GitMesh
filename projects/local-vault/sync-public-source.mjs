@@ -130,6 +130,21 @@ function invalidSourceMessage(source, fileInfo, syntaxOnly) {
   );
 }
 
+function readSourceMetadata(sourcePath, source, isJavaScript, syntaxOnly) {
+  try {
+    return fs.lstatSync(sourcePath, { bigint: true });
+  } catch {
+    const fileLabel = isJavaScript ? "JavaScript source" : "Source file";
+    const repairInstruction = syntaxOnly
+      ? "Check its permissions and confirm the file still exists, then rerun --check-syntax."
+      : "Check its permissions and confirm the file still exists, then retry the source sync.";
+    throw new Error(
+      `${fileLabel} ${source} could not be inspected. ${repairInstruction} ` +
+      "No GitHub requests were made.",
+    );
+  }
+}
+
 function readSourceFiles({ syntaxOnly = false } = {}) {
   const sourceFiles = syntaxOnly
     ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
@@ -138,7 +153,7 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
   const files = sourceFiles.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
     const isJavaScript = path.extname(source) === ".mjs";
-    const fileInfo = fs.lstatSync(sourcePath, { bigint: true });
+    const fileInfo = readSourceMetadata(sourcePath, source, isJavaScript, syntaxOnly);
     if (fileInfo.isSymbolicLink() || fileInfo.size > BigInt(MAX_SOURCE_BYTES) || !fileInfo.isFile()) {
       throw new Error(invalidSourceMessage(source, fileInfo, syntaxOnly));
     }
@@ -155,7 +170,7 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
         "No GitHub requests were made.",
       );
     }
-    const currentInfo = fs.lstatSync(sourcePath, { bigint: true });
+    const currentInfo = readSourceMetadata(sourcePath, source, isJavaScript, syntaxOnly);
     if (!sameFileSnapshot(fileInfo, currentInfo) || BigInt(content.length) !== fileInfo.size) {
       const retryInstruction = syntaxOnly
         ? "Save the intended file and rerun --check-syntax."

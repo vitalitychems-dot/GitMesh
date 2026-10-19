@@ -65,6 +65,7 @@ function runSyncWithSyntaxResult(
   const preloadPath = path.join(tempDir, "simulate-syntax-result.mjs");
   const syntaxMarker = path.join(tempDir, "syntax-check-invoked");
   const sourceReadMarker = path.join(tempDir, "source-read-invoked");
+  const metadataMarker = path.join(tempDir, "metadata-lookup-invoked");
   const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
   const fetchMarker = path.join(tempDir, "github-fetch-invoked");
   const privateSource = "PRIVATE_SYNTAX_SOURCE_SENTINEL";
@@ -122,7 +123,7 @@ function runSyncWithSyntaxResult(
     fs.unlinkSync(sourcePath);
     fs.mkdirSync(sourcePath);
     fs.writeFileSync(path.join(sourcePath, "private-data"), privateSource);
-  } else if (mode === "eacces-open") {
+  } else if (mode === "eacces-open" || mode === "eacces-metadata") {
     fs.appendFileSync(sourcePath, `\n// ${privateSource}\n`);
     fs.appendFileSync(scriptPath, `\n// ${privateSource}\n`);
   } else if (mode === "multiple-syntax") {
@@ -152,7 +153,17 @@ function runSyncWithSyntaxResult(
       'import { syncBuiltinESMExports } from "node:module";',
       "const originalSpawnSync = childProcess.spawnSync.bind(childProcess);",
       "const originalReadFileSync = fs.readFileSync.bind(fs);",
+      "const originalLstatSync = fs.lstatSync.bind(fs);",
       "let sourceChangedDuringRead = false;",
+      "fs.lstatSync = (file, ...args) => {",
+      '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "eacces-metadata" && typeof file === "string" && file.endsWith("sync-public-source.mjs")) {',
+      '    fs.writeFileSync(process.env.GITMESH_TEST_METADATA_MARKER, "invoked");',
+      `    const error = new Error("EACCES: permission denied ${privateNodeOutput} ${privateSource}");`,
+      '    error.code = "EACCES";',
+      "    throw error;",
+      "  }",
+      "  return originalLstatSync(file, ...args);",
+      "};",
       "fs.readFileSync = (file, ...args) => {",
       '  if (typeof file === "string" && ["README.md", "gitmesh-ultimate-core.mjs", "sync-public-source.mjs"].some((name) => file === new URL(name, import.meta.url).pathname)) {',
       '    fs.writeFileSync(process.env.GITMESH_TEST_SOURCE_READ_MARKER, "invoked");',
@@ -191,7 +202,7 @@ function runSyncWithSyntaxResult(
       '      }) + "\\n");',
       "      return child;",
       "    }",
-      '    if (mode === "syntax" || mode === "success" || mode === "eacces-open" || mode === "multiple-syntax" || mode === "later-syntax") {',
+      '    if (mode === "syntax" || mode === "success" || mode === "eacces-open" || mode === "eacces-metadata" || mode === "multiple-syntax" || mode === "later-syntax") {',
       "      const result = originalSpawnSync(command, args, options);",
       "      fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify({",
       "        ...invocation, status: result.status, error: result.error?.code ?? null,",
@@ -224,6 +235,7 @@ function runSyncWithSyntaxResult(
     PATH: process.env.PATH ?? "",
     GITMESH_TEST_SYNTAX_MARKER: syntaxMarker,
     GITMESH_TEST_SOURCE_READ_MARKER: sourceReadMarker,
+    GITMESH_TEST_METADATA_MARKER: metadataMarker,
     GITMESH_TEST_SYNTAX_INVOCATION_LOG: syntaxInvocationLog,
     GITMESH_TEST_FETCH_MARKER: fetchMarker,
     GITMESH_TEST_SYNTAX_FAILURE_MODE: mode,
@@ -250,6 +262,7 @@ function runSyncWithSyntaxResult(
     result,
     syntaxMarker,
     sourceReadMarker,
+    metadataMarker,
     syntaxInvocationLog,
     fetchMarker,
     scriptPath,
@@ -1327,6 +1340,26 @@ test("normal sync stops safely when an allowlisted source cannot be opened", (t)
       "Check its permissions and confirm the file still exists, then retry the source sync. " +
       "No GitHub requests were made.",
   );
+  assert.ok(fs.existsSync(syntaxMarker), "earlier source validation was not reached");
+  assert.ok(!fs.existsSync(fetchMarker), "source sync attempted a GitHub request");
+  assert.ok(!output.includes(scriptPath), "absolute filesystem path leaked");
+  for (const privateText of privateTexts) {
+    assert.ok(!output.includes(privateText), `private diagnostic leaked: ${privateText}`);
+  }
+});
+
+test("normal sync stops safely when allowlisted source metadata cannot be read", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "eacces-metadata", { tokenPresent: true });
+  const { output, result, syntaxMarker, fetchMarker, metadataMarker, scriptPath, privateTexts } = fixture;
+
+  assert.notEqual(result.status, 0, output);
+  assert.equal(
+    output.trim(),
+    "JavaScript source sync-public-source.mjs could not be inspected. " +
+      "Check its permissions and confirm the file still exists, then retry the source sync. " +
+      "No GitHub requests were made.",
+  );
+  assert.ok(fs.existsSync(metadataMarker), "the metadata access-denied fixture was not exercised");
   assert.ok(fs.existsSync(syntaxMarker), "earlier source validation was not reached");
   assert.ok(!fs.existsSync(fetchMarker), "source sync attempted a GitHub request");
   assert.ok(!output.includes(scriptPath), "absolute filesystem path leaked");
