@@ -375,6 +375,11 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       "    return response({ tree: { sha: baseTreeSha } });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/blobs")) {',
+      '    if (process.env.GITMESH_TEST_MODE === "later-blob-timeout" && blobIndex === 1) {',
+      "      const error = new Error(process.env.GITMESH_TEST_NETWORK_SENTINEL);",
+      '      error.name = "TimeoutError";',
+      "      throw error;",
+      "    }",
       "    return response({ sha: blobShas[blobIndex++] });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/trees")) {',
@@ -979,4 +984,53 @@ test("GitHub request timeout stops sync without leaking source or continuing wri
   assert.ok(!output.includes(fakeToken), "GitHub token leaked in timeout output");
   assert.ok(!output.includes(privateSource), "source content leaked in timeout output");
   assert.ok(!output.includes(privateFetchError), "raw fetch error leaked in timeout output");
+});
+
+test("a later blob timeout prevents tree, commit, and branch writes", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "later-blob-timeout");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+  const blobRequests = fixture.requests.filter(
+    ({ method, url }) => method === "POST" && url.endsWith("/git/blobs"),
+  );
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "GitHub request timed out during POST /git/blobs. " +
+      "Check the connection and retry; sync stopped.",
+  );
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+    ],
+  );
+  assert.equal(blobRequests.length, 2, "the later blob request was not attempted");
+  assert.equal(
+    Buffer.from(blobRequests[0].blob.content, "base64").toString("utf8"),
+    fixture.expectedSources["projects/local-vault/gitmesh-ultimate-core.mjs"],
+    "the first blob did not complete with the expected source",
+  );
+  assert.equal(
+    Buffer.from(blobRequests[1].blob.content, "base64").toString("utf8"),
+    fixture.expectedSources["projects/local-vault/README.md"],
+    "the timeout was not on the second blob request",
+  );
+  assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
+  assert.ok(
+    !fixture.output.includes(fixture.fakeToken),
+    "GitHub token leaked in timeout output",
+  );
+  assert.ok(
+    !fixture.output.includes(fixture.privateNetworkError),
+    "raw timeout diagnostic leaked in output",
+  );
+  assert.ok(
+    !fixture.output.includes(fixture.privateSource),
+    "source content leaked in timeout output",
+  );
 });
