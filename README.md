@@ -20,31 +20,42 @@ The first project is `projects/admit`. Run `node admit.mjs`. Payment is not hand
 
 The block house is on TESSERA, not in this mesh. This repository stays the public room. The private book is not here.
 
-## Public web page
+## Private web workspace
 
-Run `npm run dev` to preview the public room and web-admin sign-in. The frontend
+Run `npm run dev` to preview private admin-key sign-in. The frontend
 source is in `projects/live/client/`. Build with `npm run build`, then run
 `npm start` for the production web server. Web authentication needs a running
 server: do not publish this version as a static-only site.
 
-The welcome preview remains browser-only and clears on reload. The separate
-web-admin area uses managed Clerk authentication and requires a verified GitHub
-connection whose numeric GitHub ID matches `GITMESH_ADMIN_GITHUB_ID`. Display
-names, arbitrary account creation, email addresses and client-side role values
-cannot grant admin access. The initial owner is the GitMesh repository owner.
+GitMesh is a private internet agent-to-agent mesh project, not an external
+identity-provider portal. There are no social logins, external fonts, public
+registration, analytics scripts or app request/access logs in this web UI.
+The current admin page reports service status; agent-to-agent transport is not
+connected by this UI change. No claim of untraceability or message encryption
+is made: hosting and network providers can observe connection metadata.
 
-In Replit's **Auth → Configure → SSO providers**, enable **GitHub** in both
-Development and Production. Visit `/sign-in` and continue with the owner GitHub
-account (`vitalitychems-dot`). Enable the provider before trying to sign in;
-email-only or Google-only accounts will not receive admin access. Secrets
-`CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, and
-`VITE_CLERK_PUBLISHABLE_KEY` are managed through Auth/Secrets, never source.
-`GITMESH_ADMIN_GITHUB_LOGIN` is the public display name; the numeric ID is the
-server-side authority.
+Set a new, separate `GITMESH_WEB_ADMIN_KEY` (20–256 bytes, no control characters)
+through project Secrets, then restart the web workflow. Never send it in chat
+or reuse the offline vault key. The initial key is seeded only when no admin
+record exists; changing that Secret does not reset an existing administrator.
+Each successful sign-in offers a cryptographically random replacement. Save
+the replacement before confirming: confirmation atomically consumes the old
+key and revokes prior sessions. Cancelled/expired offers do not consume it.
 
-The web-admin page reports the running service and security boundary; it does
-not open or serve the local vault/keypad. Local sigil rotation is unchanged.
-Never enter a vault sigil or GitHub token in the welcome preview or web login.
-Keep credential verifiers, tokens, and private Gitbook files out of public source,
-deployment packages and build output. A Replit publish/republish is required to
-put this server-backed version online.
+Only salted scrypt verifiers and key-history digests are stored in PostgreSQL;
+pending/session tokens are stored as hashes. Keys are never stored in browser
+storage or server logs. Sessions use HttpOnly, SameSite=Strict cookies, Secure
+in production, with two-hour expiration. Pending replacement offers expire in
+five minutes. Login attempts are capped across service instances. The private
+web key is separate from the offline vault/keypad and cannot open it.
+
+The schema source is `projects/live/schema.sql`. Development/task-merge setup
+applies it only in development; Replit Publish applies the production schema
+diff. No startup/build production migrations are run. Do not delete the auth
+state or overwrite production auth data from development: this can invalidate
+keys or reset consumed-key history. Keep a secure copy of each new key; there
+is no public signup, default password or unauthenticated recovery endpoint.
+
+This does not change the visibility of any existing GitHub repository. Keep
+vault files, verifiers, private Gitbook and tokens out of public source and
+publishing output. Republish the server-backed app to replace an older live UI.

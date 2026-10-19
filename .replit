@@ -1,4 +1,4 @@
-modules = ["nodejs-24"]
+modules = ["nodejs-24", "postgresql-16"]
 
 [postMerge]
 path = "scripts/post-merge.sh"
@@ -48,5 +48,3 @@ channel = "stable-25_05"
 [userenv]
 
 [userenv.shared]
-GITMESH_ADMIN_GITHUB_ID = "332565808"
-GITMESH_ADMIN_GITHUB_LOGIN = "vitalitychems-dot"

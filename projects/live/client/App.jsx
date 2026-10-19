@@ -1,368 +1,430 @@
-import React, { useEffect, useState } from "react";
-import {
-  ClerkProvider,
-  SignIn,
-  SignUp,
-  useAuth,
-  useClerk,
-} from "@clerk/react";
-import { publishableKeyFromHost } from "@clerk/react/internal";
-import { shadcn } from "@clerk/themes";
-import { Link, Redirect, Route, Router as WouterRouter, Switch, useLocation } from "wouter";
+import React, { useEffect, useRef, useState } from "react";
+import { Link, Redirect, Route, Router, Switch, useLocation } from "wouter";
 
-const clerkPubKey = publishableKeyFromHost(
-  window.location.hostname,
-  import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
-);
-const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
-const SOURCE_URL = "https://github.com/vitalitychems-dot/GitMesh";
-const OWNER = "vitalitychems-dot";
+const API_TIMEOUT = 10000;
 
-function stripBase(path) {
-  return basePath && path.startsWith(basePath)
-    ? path.slice(basePath.length) || "/"
-    : path;
+function api(path, options = {}) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT);
+  return fetch(path, {
+    ...options,
+    credentials: "include",
+    signal: controller.signal,
+  }).finally(() => window.clearTimeout(timeout));
 }
 
-const clerkAppearance = {
-  theme: shadcn,
-  options: {
-    logoPlacement: "inside",
-    logoLinkUrl: basePath || "/",
-    logoImageUrl: `${window.location.origin}${basePath}/logo.svg`,
-  },
-  variables: {
-    colorPrimary: "#1b6864",
-    colorForeground: "#183438",
-    colorMutedForeground: "#627472",
-    colorDanger: "#b74437",
-    colorBackground: "#fbfbf5",
-    colorInput: "#fffefa",
-    colorInputForeground: "#183438",
-    colorNeutral: "#bdc9bf",
-    fontFamily: "'DM Sans', sans-serif",
-    borderRadius: "4px",
-  },
-  elements: {
-    rootBox: { width: "100%", minWidth: 0, maxWidth: "100%", display: "flex", justifyContent: "center" },
-    cardBox: {
-      width: "min(440px, 100%)",
-      minWidth: 0,
-      maxWidth: "100%",
-      backgroundColor: "#fbfbf5",
-      borderRadius: "6px",
-      boxShadow: "0 18px 50px rgba(24,52,56,.08)",
-      overflow: "hidden",
-    },
-    card: { backgroundColor: "transparent", boxShadow: "none", border: "0" },
-    footer: { backgroundColor: "transparent", boxShadow: "none", border: "0" },
-    headerTitle: { color: "#183438", fontFamily: "'Space Grotesk', sans-serif" },
-    headerSubtitle: { color: "#627472" },
-    socialButtonsBlockButtonText: { color: "#183438" },
-    formFieldLabel: { color: "#274448" },
-    footerActionLink: { color: "#1b6864" },
-    footerActionText: { color: "#627472" },
-    dividerText: { color: "#627472" },
-    identityPreviewEditButton: { color: "#1b6864" },
-    formFieldSuccessText: { color: "#1b6864" },
-    alertText: { color: "#813e35" },
-    logoBox: { marginBottom: "8px" },
-    logoImage: { maxHeight: "42px", width: "auto" },
-    socialButtonsBlockButton: {
-      border: "1px solid #cbd6cd",
-      backgroundColor: "#fbfbf5",
-      borderRadius: "4px",
-    },
-    formButtonPrimary: {
-      backgroundColor: "#1b6864",
-      color: "#ffffff",
-      borderRadius: "4px",
-      boxShadow: "none",
-    },
-    formFieldInput: {
-      backgroundColor: "#fffefa",
-      color: "#183438",
-      border: "1px solid #bac9be",
-      borderRadius: "3px",
-    },
-    footerAction: { backgroundColor: "transparent" },
-    dividerLine: { backgroundColor: "#d7ddd2" },
-    alert: { backgroundColor: "#f2e1d8", borderColor: "#e2c6b9" },
-    otpCodeFieldInput: { backgroundColor: "#fffefa", color: "#183438" },
-    formFieldRow: { marginBottom: "16px" },
-    main: { width: "100%" },
-  },
-};
-
-function Brand({ admin = false }) {
+function Brand({ inverse = false }) {
   return (
-    <Link href="/" className={`brand${admin ? " admin-brand" : ""}`} aria-label="GitMesh home">
+    <Link href="/" className={`brand${inverse ? " brand-inverse" : ""}`} aria-label="GitMesh private workspace">
       <img src={`${basePath}/logo.svg`} alt="" />
       <span>GitMesh</span>
+      <span className="brand-private">PRIVATE MESH</span>
     </Link>
   );
 }
 
-function PublicHeader() {
-  return (
-    <header className="topbar">
-      <div className="wrap topbar-inner">
-        <Brand />
-        <nav className="nav" aria-label="Main navigation">
-          <a href="#boundaries">Privacy boundary</a>
-          <a href="#setup">Run it yourself</a>
-          <Link href="/sign-in" className="nav-cta">Owner sign in</Link>
-        </nav>
-      </div>
-    </header>
-  );
+function Mark({ children, tone = "quiet" }) {
+  return <span className={`signal signal-${tone}`} aria-hidden="true">{children}</span>;
 }
 
-function HomeRoute() {
-  const { isLoaded, isSignedIn } = useAuth();
-  if (isLoaded && isSignedIn) return <Redirect to="/admin" />;
-  return <HomePage />;
-}
+function AccessPage() {
+  const [phase, setPhase] = useState("loading");
+  const [configured, setConfigured] = useState(true);
+  const [sigil, setSigil] = useState("");
+  const [replacement, setReplacement] = useState("");
+  const [offerId, setOfferId] = useState("");
+  const [error, setError] = useState("");
+  const [savedAction, setSavedAction] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+  const [, setLocation] = useLocation();
 
-function HomePage() {
-  return (
-    <div className="app-shell">
-      <PublicHeader />
-      <main>
-        <section className="hero">
-          <div className="wrap hero-grid">
-            <div className="fade-up">
-              <div className="eyebrow">Source-owned · portable by design</div>
-              <h1>Your code.<br /><em>Your ground.</em></h1>
-              <p className="hero-copy">
-                GitMesh is a personal workspace whose source lives in a repository you can inspect,
-                clone, and run yourself. The private vault is deliberately not part of this website.
-              </p>
-              <div className="hero-actions">
-                <a className="button" href={SOURCE_URL} target="_blank" rel="noreferrer">
-                  Read the source <span aria-hidden="true">↗</span>
-                </a>
-                <a className="button secondary" href="#setup">Offline setup notes</a>
-              </div>
-              <p className="hero-note">A web control room is for the repository owner only. It does not open or operate a local vault.</p>
-            </div>
-            <aside className="source-card fade-up" aria-label="Repository details">
-              <div className="source-card-top">
-                <span className="mono">THE PROJECT / SOURCE</span>
-                <span className="mono">PUBLIC REPOSITORY</span>
-              </div>
-              <h2>Keep the source close.</h2>
-              <p>GitMesh is available as a GitHub repository. Clone it to keep a working copy under your own control.</p>
-              <a className="source-link" href={SOURCE_URL} target="_blank" rel="noreferrer">
-                github.com/<br />vitalitychems-dot/GitMesh
-              </a>
-              <div className="card-foot"><span className="status-dot" /> SOURCE AVAILABLE TO INSPECT</div>
-            </aside>
-          </div>
-        </section>
+  useEffect(() => {
+    let active = true;
+    api("/api/session")
+      .then(async (response) => {
+        if (response.status === 503) {
+          if (active) { setPhase("error"); setError("The private admin service is temporarily unavailable. Please retry; do not reset your key."); }
+          return;
+        }
+        if (!response.ok) throw new Error("Could not check the private session.");
+        const session = await response.json();
+        if (!active) return;
+        setConfigured(session.configured !== false);
+        if (session.authenticated && session.admin) setLocation("/admin", { replace: true });
+        else setPhase("ready");
+      })
+      .catch((reason) => {
+        if (active) {
+          setPhase("error");
+          setError(reason.name === "AbortError" ? "Session check timed out. Try again." : "The session service could not be reached.");
+        }
+      });
+    return () => { active = false; };
+  }, [setLocation]);
 
-        <div className="principle-strip">
-          <div className="wrap principle-inner">
-            <p>Private means local. The web is not the vault.</p>
-            <span className="mono">NO HOSTED VAULT · NO WEB KEY ENTRY</span>
-          </div>
-        </div>
-
-        <section className="section" id="boundaries">
-          <div className="wrap">
-            <div className="section-heading">
-              <div>
-                <div className="eyebrow">A clear boundary</div>
-                <h2>Two places.<br />Two purposes.</h2>
-              </div>
-              <p>GitMesh keeps its public-facing repository tools separate from private material. This site can explain the project and authenticate its owner; it cannot access a local vault.</p>
-            </div>
-            <div className="boundary-grid">
-              <article className="boundary-cell web">
-                <span className="eyebrow">This website</span>
-                <h3>Repository control room</h3>
-                <p>The authenticated admin view reports service and repository details supplied by the service. It has no vault, sigil, or keypad proxy.</p>
-              </article>
-              <article className="boundary-cell local">
-                <span className="eyebrow">Your own device</span>
-                <h3>Private vault stays offline</h3>
-                <p>Keep private vault material and any local unlock method on your own device. Never type a sigil, password, token, or key into this page.</p>
-              </article>
-            </div>
-          </div>
-        </section>
-
-        <section className="section setup-section" id="setup">
-          <div className="wrap setup-layout">
-            <div className="setup-intro">
-              <div className="eyebrow">Source-first setup</div>
-              <h2>Start with what you can inspect.</h2>
-              <p>Use the repository as the source of truth. Review its current README and setup instructions before running anything.</p>
-              <a className="button secondary" href={`${SOURCE_URL}#readme`} target="_blank" rel="noreferrer">
-                Open repository README <span aria-hidden="true">↗</span>
-              </a>
-            </div>
-            <div className="steps" aria-label="Repository setup overview">
-              <article className="step">
-                <span className="step-number">01 / SOURCE</span>
-                <div><h3>Inspect the project</h3><p>Read the <a href={`${SOURCE_URL}#readme`} target="_blank" rel="noreferrer">GitHub README</a>, review the files and understand the current setup instructions before using the software.</p></div>
-              </article>
-              <article className="step">
-                <span className="step-number">02 / COPY</span>
-                <div><h3>Keep a local clone</h3><p>Clone <code>https://github.com/vitalitychems-dot/GitMesh.git</code> to a machine and location you control. Your clone remains yours to inspect and manage.</p></div>
-              </article>
-              <article className="step">
-                <span className="step-number">03 / OFFLINE</span>
-                <div><h3>Keep private material local</h3><p>Do not put private vault contents or unlock credentials in this website, repository issues, or other public-facing tools.</p></div>
-              </article>
-            </div>
-          </div>
-        </section>
-
-        <WelcomeDemo />
-        <section className="closing">
-          <div className="wrap closing-inner">
-            <div>
-              <div className="eyebrow">For the source owner</div>
-              <h2>Service details, not vault access.</h2>
-              <p>The web admin is a small authenticated control room for service and repository status. GitHub sign-in is limited to the project owner.</p>
-            </div>
-            <Link href="/sign-in" className="button">Owner sign in</Link>
-          </div>
-        </section>
-      </main>
-      <footer className="footer">
-        <div className="wrap footer-inner">
-          <span>GitMesh · source-owned workspace</span>
-          <span><a href={SOURCE_URL} target="_blank" rel="noreferrer">GitHub source</a> · <a href="#boundaries">Privacy boundary</a></span>
-        </div>
-      </footer>
-    </div>
-  );
-}
-
-function WelcomeDemo() {
-  const [guests, setGuests] = useState([]);
-  const [status, setStatus] = useState("");
-
-  function submitGuest(event) {
+  async function submitSigil(event) {
     event.preventDefault();
-    const form = event.currentTarget;
-    const data = new FormData(form);
-    const name = String(data.get("name") || "").trim();
-    const purpose = String(data.get("purpose") || "").trim();
-    if (!name || !purpose) {
-      setStatus("Add a name and purpose to continue.");
-      return;
+    if (!sigil.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await api("/api/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sigil }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 401) throw new Error("That admin key was not accepted.");
+        if (response.status === 409) throw new Error("Another key rotation is already in progress. Wait a moment and try again.");
+        if (response.status === 429) throw new Error("Too many attempts. Pause briefly before trying again.");
+        if (response.status === 503) throw new Error("Admin access is not configured or is temporarily unavailable.");
+        throw new Error(payload.error || "The key could not be checked.");
+      }
+      if (payload.state !== "save-new-sigil" || typeof payload.nextSigil !== "string" || !payload.nextSigil || !/^[a-f0-9]{64}$/.test(payload.offerId || "")) {
+        throw new Error("The server returned an incomplete key-rotation response. Your access has not changed.");
+      }
+      setSigil("");
+      if (inputRef.current) inputRef.current.value = "";
+      setReplacement(payload.nextSigil);
+      setOfferId(payload.offerId);
+      setSavedAction(false);
+      setConfirmed(false);
+      setPhase("rotation");
+    } catch (reason) {
+      setError(reason.name === "AbortError" ? "Request timed out. Check your connection and try again." : reason.message || "The request failed.");
+    } finally {
+      setBusy(false);
     }
-    setGuests((current) => [...current, { name, purpose, id: `${Date.now()}-${current.length}` }]);
-    setStatus(`${name} was added to this temporary browser-only demo.`);
-    form.reset();
   }
 
-  function clearDemo() {
-    setGuests([]);
-    setStatus("Temporary entries cleared from this page.");
+  async function saveReplacement() {
+    try {
+      const blob = new Blob([replacement, "\n"], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "gitmesh-admin-sigil.txt";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setSavedAction(true);
+      setError("");
+    } catch {
+      setError("The browser could not start the download. Use Copy key instead.");
+    }
   }
+
+  async function copyReplacement() {
+    try {
+      await navigator.clipboard.writeText(replacement);
+      setSavedAction(true);
+      setError("");
+    } catch {
+      setError("Clipboard access was unavailable. Use Download key instead.");
+    }
+  }
+
+  async function confirmRotation(event) {
+    event.preventDefault();
+    if (!confirmed || !savedAction || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await api("/api/admin/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ saved: true, offerId }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401) throw new Error("The pending rotation expired. Start again with the current admin key.");
+      if (response.status === 409) throw new Error("This rotation is no longer current. Start again with the active admin key.");
+      if (response.status === 429) throw new Error("Too many attempts. Wait briefly, then try again.");
+      if (response.status === 503) throw new Error("The admin service is temporarily unavailable.");
+      if (!response.ok || payload.authenticated !== true || payload.admin !== true) {
+        throw new Error(payload.error || "The rotation could not be confirmed.");
+      }
+      setReplacement("");
+      setSigil("");
+      setLocation("/admin", { replace: true });
+      setOfferId("");
+    } catch (reason) {
+      setError(reason.name === "AbortError" ? "Confirmation timed out. The pending key may have expired; check before retrying." : reason.message || "Confirmation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelRotation() {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await api("/api/admin/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offerId }),
+      });
+      if (!response.ok && response.status !== 401 && response.status !== 410) throw new Error("The pending rotation could not be cleared. Try again.");
+      setOfferId("");
+      setReplacement("");
+      setConfirmed(false);
+      setSavedAction(false);
+      setPhase("ready");
+    } catch (reason) {
+      setError(reason.name === "AbortError" ? "Cancellation timed out. The pending key may have expired." : reason.message || "Could not cancel the rotation.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (phase === "loading") return <AccessFrame><LoadingLine /><LoadingLine /><LoadingLine /></AccessFrame>;
 
   return (
-    <section className="section demo-section" id="welcome-demo">
-      <div className="wrap">
-        <div className="section-heading">
-          <div><div className="eyebrow">Optional · browser-only</div><h2>A small welcome demo.</h2></div>
-          <p>This is a local interaction to preview a welcome list. It creates no account, sends nothing to a server, and does not grant access.</p>
-        </div>
-        <div className="demo-panel">
-          <div className="demo-intro">
-            <span className="eyebrow">Temporary by design</span>
-            <h2>Try it in this tab.</h2>
-            <p>Entries exist only in page memory. Reloading clears them. Please use harmless sample text only—never enter passwords, sigils, tokens, keys, or private information.</p>
+    <AccessFrame>
+      <div className="access-content">
+        <div className="eyebrow"><Mark tone="teal">01</Mark> PRIVATE ADMIN ACCESS</div>
+        <h1>Only your<br /><em>workspace.</em></h1>
+        <p className="lead">A private service console for the GitMesh admin. No public accounts, no external identity providers.</p>
+        {!configured ? (
+          <div className="notice notice-warn" role="status">
+            <strong>Admin access is not configured.</strong>
+            <p>Set <code>GITMESH_WEB_ADMIN_KEY</code> in this project’s Secrets, then reload. Do not share the value in chat.</p>
           </div>
-          <div className="demo-form-wrap">
-            <form onSubmit={submitGuest} aria-describedby="demo-safety">
-              <div className="field">
-                <label htmlFor="demo-name">Name</label>
-                <input id="demo-name" name="name" autoComplete="off" maxLength="40" required placeholder="A name for this preview" />
+        ) : phase === "rotation" ? (
+          <section className="rotation-panel" aria-labelledby="rotate-title">
+            <div className="rotation-heading">
+              <Mark tone="coral">!</Mark>
+              <div><div className="eyebrow">KEY ROTATION REQUIRED</div><h2 id="rotate-title">Save your replacement key</h2></div>
+            </div>
+            <p className="rotation-copy">This one-time key replaces the previous admin key only after you confirm it is safely saved. It will not be shown again.</p>
+            <label className="field-label" htmlFor="replacement-key">Replacement admin key</label>
+            <textarea id="replacement-key" className="replacement-key" value={replacement} readOnly rows={3} onFocus={(event) => event.currentTarget.select()} aria-describedby="key-help" />
+            <p id="key-help" className="field-help">Keep this separately from your private vault key. The vault/keypad remains on your device.</p>
+            <div className="key-actions">
+              <button className="button" type="button" onClick={saveReplacement}>Download key</button>
+              <button className="button button-light" type="button" onClick={copyReplacement}>Copy key</button>
+            </div>
+            <form onSubmit={confirmRotation}>
+              <label className="confirm-check">
+                <input type="checkbox" checked={confirmed} disabled={!savedAction || busy} onChange={(event) => setConfirmed(event.target.checked)} />
+                <span>I have saved the replacement key somewhere secure.</span>
+              </label>
+              <div className="key-actions confirm-actions">
+                <button className="button" type="submit" disabled={!savedAction || !confirmed || busy}>{busy ? "Confirming…" : "Confirm and continue"}</button>
+                <button className="text-button" type="button" onClick={cancelRotation} disabled={busy}>Cancel rotation</button>
               </div>
-              <div className="field">
-                <label htmlFor="demo-purpose">Purpose</label>
-                <input id="demo-purpose" name="purpose" autoComplete="off" maxLength="160" required placeholder="What brings them here?" />
-                <p className="field-hint" id="demo-safety">Browser memory only. No account, network request, or persistence.</p>
-              </div>
-              <div className="demo-submit-row">
-                <button className="button small" type="submit">Add to preview</button>
-                {guests.length > 0 && <button className="demo-reset" type="button" onClick={clearDemo}>Clear temporary entries</button>}
-              </div>
-              <p className="demo-status" role="status" aria-live="polite">{status}</p>
             </form>
-            <div className="guest-list" aria-label="Temporary welcome entries">
-              {guests.length === 0
-                ? <p className="guest-empty">No temporary entries yet.</p>
-                : guests.map((guest) => (
-                  <div className="guest-row" key={guest.id}>
-                    <strong>{guest.name}</strong><span>{guest.purpose}</span>
-                  </div>
-                ))}
+          </section>
+        ) : (
+          <form className="access-form" onSubmit={submitSigil}>
+            <label className="field-label" htmlFor="admin-sigil">Admin key</label>
+            <div className="input-wrap">
+              <input ref={inputRef} id="admin-sigil" type="password" autoComplete="current-password" spellCheck="false" required value={sigil} onChange={(event) => setSigil(event.target.value)} placeholder="Enter your one-time admin key" />
+              <span className="input-mark" aria-hidden="true">KEY</span>
+            </div>
+            <button className="button access-submit" type="submit" disabled={busy || !sigil.trim()}>
+              {busy ? "Checking key…" : "Continue to admin"} <span aria-hidden="true">↗</span>
+            </button>
+            <p className="field-help">The key is sent only to this GitMesh service. No key is placed in a URL or saved by this page.</p>
+          </form>
+        )}
+        {error && <div className="notice notice-error" role="alert">{error}</div>}
+        {phase === "error" && <button className="text-button retry-button" type="button" onClick={() => window.location.reload()}>Retry session check</button>}
+        <div className="access-rule"><span /> PRIVATE ACCESS ONLY <span /> NO PUBLIC SIGNUP</div>
+      </div>
+    </AccessFrame>
+  );
+}
+
+function AccessFrame({ children }) {
+  return (
+    <main className="access-page">
+      <div className="access-top wrap"><Brand /><span className="top-note"><Mark>PRIVATE ACCESS</Mark> ADMIN WEB KEY IS SEPARATE</span></div>
+      <div className="access-layout wrap">
+        <section className="access-story">
+          <div className="story-index"><span>GITMESH / SERVICE DESK</span><span>PRIVATE · 01</span></div>
+          <div className="story-body">
+            <div className="eyebrow">AGENT-TO-AGENT MESH WORKSPACE</div>
+            <h2>A quieter kind<br />of connected.</h2>
+            <div className="mesh-diagram" aria-label="Private workspace boundary illustration">
+              <div className="diagram-ring ring-one" /><div className="diagram-ring ring-two" />
+              <div className="diagram-core"><img src={`${basePath}/logo.svg`} alt="" /></div>
+              <span className="node node-a">LOCAL</span><span className="node node-b">ADMIN</span><span className="node node-c">MESH</span>
+              <span className="diagram-caption">SERVICE ACCESS / RESTRICTED</span>
             </div>
           </div>
-        </div>
+          <p className="story-foot">Private workspace. Agent transport is not connected.</p>
+        </section>
+        <section className="access-panel" aria-label="Administrator sign in">
+          <div className="panel-top"><span>CONTROL / ACCESS</span><span>01—01</span></div>
+          {children}
+          <div className="privacy-note">
+            <span className="privacy-mark">i</span>
+            <p>No external identity providers are used here. Hosting and network providers may still observe connection metadata; GitMesh does not promise anonymity.</p>
+          </div>
+        </section>
       </div>
-    </section>
+      <footer className="access-footer wrap"><span>GITMESH <span className="footer-dot">/</span> PRIVATE WORKSPACE</span><span>THE WEB ADMIN DOES NOT ACCESS YOUR LOCAL VAULT</span></footer>
+    </main>
   );
 }
 
-function AuthPage({ mode }) {
-  const isSignIn = mode === "in";
+function LoadingLine() {
+  return <div className="loading-line" aria-hidden="true" />;
+}
+
+function SignUpPage() {
   return (
-    <div className="auth-page">
-      <aside className="auth-context">
-        <Brand />
-        <div className="auth-message">
-          <div className="eyebrow">GitMesh owner access</div>
-          <h1>{isSignIn ? "The control room is owner-only." : "Create access with GitHub."}</h1>
-          <p>Continue with GitHub as <strong>{OWNER}</strong>. Other authenticated accounts are not administrators and will be denied access.</p>
-          <p>Sign-in here protects repository service details only. It does not unlock, read, or proxy a local offline vault.</p>
-          <span className="owner-tag">GITHUB ACCOUNT · {OWNER}</span>
-          <p>If “Continue with GitHub” is missing, enable GitHub in Replit’s Auth → Configure → SSO providers for this environment. Email or Google alone cannot grant admin access.</p>
-        </div>
-        <div className="auth-foot">GitMesh · Your private vault stays on your device.</div>
-      </aside>
-      <main className="auth-box">
-        <div className="clerk-frame">
-          <div className="auth-top-mobile"><Brand /></div>
-          {isSignIn
-            ? <SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} />
-            : <SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} />}
-        </div>
-      </main>
-    </div>
+    <AccessFrame>
+      <div className="access-content signup-content">
+        <div className="eyebrow"><Mark tone="coral">CLOSED</Mark> PRIVATE WORKSPACE</div>
+        <h1>No public<br /><em>registration.</em></h1>
+        <p className="lead">GitMesh access is provisioned privately. This workspace does not accept public account creation.</p>
+        <Link className="button" href="/sign-in">Return to private access</Link>
+      </div>
+    </AccessFrame>
   );
 }
 
-function AdminHeader() {
-  const { signOut } = useClerk();
+function AdminHeader({ onLogout, busy }) {
   return (
     <header className="admin-head">
       <div className="wrap admin-head-inner">
-        <Brand admin />
-        <div className="admin-head-actions">
-          <span className="mono">OWNER CONTROL ROOM</span>
-          <button className="quiet-button" type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })}>Sign out</button>
-        </div>
+        <Brand inverse />
+        <div className="admin-head-actions"><span className="mono">ADMIN SERVICE VIEW</span><button type="button" className="quiet-button" onClick={onLogout} disabled={busy}>{busy ? "Signing out…" : "Sign out"}</button></div>
       </div>
     </header>
   );
 }
 
-function LoadingState() {
+function AdminPage() {
+  const [state, setState] = useState({ phase: "loading", data: null, message: "" });
+  const [attempt, setAttempt] = useState(0);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [, setLocation] = useLocation();
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT);
+    setState({ phase: "loading", data: null, message: "" });
+    async function load() {
+      try {
+        const sessionResponse = await fetch("/api/session", { credentials: "include", signal: controller.signal });
+        if (sessionResponse.status === 503) {
+          if (active) setState({ phase: "unavailable", data: null, message: "Admin session service is not configured or is temporarily unavailable." });
+          return;
+        }
+        if (!sessionResponse.ok) throw new Error("Could not verify the admin session.");
+        const session = await sessionResponse.json();
+        if (!session.authenticated || !session.admin) {
+          if (active) setState({ phase: "signed-out", data: null, message: "A valid administrator session is required." });
+          return;
+        }
+        const response = await fetch("/api/admin/status", { credentials: "include", signal: controller.signal });
+        if (response.status === 401) {
+          if (active) setState({ phase: "signed-out", data: null, message: "Your administrator session has expired. Sign in again." });
+          return;
+        }
+        if (response.status === 503) {
+          if (active) setState({ phase: "unavailable", data: null, message: "The admin status service is temporarily unavailable." });
+          return;
+        }
+        if (!response.ok) throw new Error("Could not load the admin service overview.");
+        const data = await response.json();
+        if (data?.identity?.role !== "admin" || data?.security?.vaultHosted !== false || data?.security?.socialLogin !== false || data?.mesh?.transport !== "not_connected") {
+          if (active) setState({ phase: "invalid", data: null, message: "The service response did not match the expected private admin contract. Details are withheld." });
+          return;
+        }
+        if (active) setState({ phase: "ready", data, message: "" });
+      } catch (reason) {
+        if (active) setState({ phase: "error", data: null, message: reason.name === "AbortError" ? "Status request timed out." : reason.message || "Could not load service status." });
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+    load();
+    return () => { active = false; controller.abort(); window.clearTimeout(timeout); };
+  }, [attempt]);
+
+  async function logout() {
+    setLoggingOut(true);
+    setState({ phase: "loading", data: null, message: "" });
+    try {
+      await api("/api/admin/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      setLocation("/sign-in", { replace: true });
+    } catch {
+      setState({ phase: "error", data: null, message: "Sign-out could not be confirmed. Your session may still be active. Retry sign out." });
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  if (state.phase === "signed-out") return <Redirect to="/sign-in" />;
   return (
-    <div className="wrap loading-block" role="status" aria-label="Loading admin service status">
-      <div className="skeleton short" />
-      <div className="skeleton" />
-      <div className="skeleton large" />
-      <div className="skeleton large" />
+    <div className="admin-page">
+      <AdminHeader onLogout={logout} busy={loggingOut} />
+      <main className="wrap admin-main">
+        {state.phase === "loading" ? <AdminSkeleton /> : state.phase !== "ready" ? (
+          <section className="state-card" role="alert">
+            <div className="eyebrow">SERVICE STATUS / {state.phase === "invalid" ? "CONTRACT MISMATCH" : "UNAVAILABLE"}</div>
+            <h1>{state.phase === "invalid" ? "Overview withheld." : "Status could not load."}</h1>
+            <p>{state.message}</p>
+            <button className="button" type="button" onClick={() => setAttempt((value) => value + 1)}>Retry status check</button>
+          </section>
+        ) : (
+          <AdminOverview data={state.data} onRefresh={() => setAttempt((value) => value + 1)} />
+        )}
+      </main>
     </div>
+  );
+}
+
+function AdminSkeleton() {
+  return <div className="admin-skeleton" role="status" aria-label="Loading service overview"><LoadingLine /><LoadingLine /><div className="skeleton-box" /><div className="skeleton-box" /></div>;
+}
+
+function AdminOverview({ data, onRefresh }) {
+  const { identity, service, security, mesh } = data;
+  return (
+    <>
+      <div className="admin-title-row">
+        <div><div className="eyebrow"><Mark tone="teal">SESSION ACTIVE</Mark> PRIVATE SERVICE OVERVIEW</div><h1>Good to see<br /><em>your console.</em></h1><p>Admin service details only. No agent messages, peers, or transport controls are available here.</p></div>
+        <button className="refresh-button" type="button" onClick={onRefresh}>Refresh status <span aria-hidden="true">↻</span></button>
+      </div>
+      <div className="admin-identity"><div><span className="eyebrow">AUTHENTICATED IDENTITY</span><strong>GitMesh administrator</strong></div><span className="role-chip">{identity.role.toUpperCase()}</span></div>
+      <div className="admin-layout">
+        <section className="admin-card service-card" aria-labelledby="runtime-heading">
+          <div className="card-index"><span>01 / RUNTIME</span><Mark tone="teal">REPORTED</Mark></div>
+          <h2 id="runtime-heading">Service details</h2>
+          <dl className="detail-list"><Detail label="Service" value={service.name} /><Detail label="Uptime" value={formatUptime(service.uptimeSeconds)} /><Detail label="Node version" value={service.nodeVersion} /></dl>
+        </section>
+        <section className="admin-card mesh-card" aria-labelledby="mesh-heading">
+          <div className="card-index"><span>02 / MESH</span><Mark tone="coral">NOT CONNECTED</Mark></div>
+          <h2 id="mesh-heading">Transport status</h2>
+          <div className="transport-status"><span className="transport-glyph" aria-hidden="true">—</span><div><strong>{mesh.transport.replaceAll("_", " ")}</strong><p>Agent-to-agent transport is not connected. No live peers or messages are shown.</p></div></div>
+        </section>
+        <section className="admin-card security-card" aria-labelledby="security-heading">
+          <div className="card-index"><span>03 / BOUNDARIES</span><Mark>WEB ADMIN</Mark></div>
+          <h2 id="security-heading">Security model</h2>
+          <dl className="detail-list">
+            <Detail label="Vault hosted" value={security.vaultHosted ? "Yes" : "No"} />
+            <Detail label="Authentication" value={security.auth} />
+            <Detail label="Social login" value={security.socialLogin ? "Enabled" : "Not used"} />
+          </dl>
+        </section>
+        <aside className="admin-note">
+          <div className="eyebrow">A CLEAR BOUNDARY</div><h2>Your private vault<br />stays on your device.</h2>
+          <p>The private vault/keypad and the web admin key are separate. This console reports service metadata; it does not unlock or proxy local vault operations.</p>
+          <p>No external identity providers are used. Hosting and network providers may observe connection metadata. This is not a promise of anonymity or untraceability.</p>
+        </aside>
+      </div>
+      <div className="admin-tail"><span>GITMESH / ADMIN</span><span>NO PUBLIC SIGNUP · NO SOCIAL IDENTITY</span></div>
+    </>
   );
 }
 
@@ -372,261 +434,36 @@ function formatUptime(seconds) {
   const days = Math.floor(value / 86400);
   const hours = Math.floor((value % 86400) / 3600);
   const minutes = Math.floor((value % 3600) / 60);
-  const secs = Math.floor(value % 60);
-  return [days ? `${days}d` : null, `${hours}h`, `${minutes}m`, `${secs}s`].filter(Boolean).join(" ");
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours || days) parts.push(`${hours}h`);
+  parts.push(`${minutes}m`);
+  return parts.join(" ");
 }
 
-function AdminPage() {
-  const { isLoaded, isSignedIn } = useAuth();
-  const [result, setResult] = useState({ phase: "loading", data: null, message: "" });
-  const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    if (!isLoaded || !isSignedIn) return undefined;
-    let active = true;
-    setResult({ phase: "loading", data: null, message: "" });
-    async function loadControlRoom() {
-      try {
-        const sessionResponse = await fetch("/api/session", {
-          method: "GET",
-          credentials: "include",
-          headers: { Accept: "application/json" },
-        });
-        if (sessionResponse.status === 401) {
-          if (active) setResult({ phase: "signed-out", data: null, message: "Your web session is not authenticated by GitMesh. Sign in with the project owner's GitHub account." });
-          return;
-        }
-        if (sessionResponse.status === 403) {
-          if (active) setResult({ phase: "denied", data: null, message: "The service denied this account before loading admin status." });
-          return;
-        }
-        if (sessionResponse.status === 503) {
-          if (active) setResult({ phase: "error", data: null, message: "The session service is temporarily unavailable." });
-          return;
-        }
-        if (!sessionResponse.ok) throw new Error(`Session check returned ${sessionResponse.status}.`);
-        const session = await sessionResponse.json();
-        if (!session?.authenticated || session?.admin !== true || session?.owner !== OWNER) {
-          if (active) setResult({ phase: "denied", data: null, message: "This authenticated account is not the GitMesh owner. Admin access is denied." });
-          return;
-        }
-
-        const response = await fetch("/api/admin/status", {
-          method: "GET",
-          credentials: "include",
-          headers: { Accept: "application/json" },
-        });
-        if (response.status === 401) {
-          if (active) setResult({ phase: "signed-out", data: null, message: "The service did not recognize an authenticated owner session." });
-          return;
-        }
-        if (response.status === 403) {
-          if (active) setResult({ phase: "denied", data: null, message: "The service denied owner access. No administrator data is shown." });
-          return;
-        }
-        if (response.status === 503) {
-          if (active) setResult({ phase: "error", data: null, message: "The admin status service is temporarily unavailable." });
-          return;
-        }
-        if (!response.ok) throw new Error(`Admin status returned ${response.status}.`);
-        const data = await response.json();
-        if (
-          data?.identity?.github !== OWNER ||
-          data?.identity?.role !== "admin" ||
-          data?.security?.vaultHosted !== false
-        ) {
-          if (active) setResult({ phase: "denied", data: null, message: "The service identity or security boundary did not match the expected owner contract. Data withheld." });
-          return;
-        }
-        if (active) setResult({ phase: "ready", data, message: "" });
-      } catch (error) {
-        if (active) setResult({
-          phase: "error",
-          data: null,
-          message: error instanceof Error ? error.message : "Could not load admin status.",
-        });
-      }
-    }
-    loadControlRoom();
-    return () => { active = false; };
-  }, [isLoaded, isSignedIn, attempt]);
-
-  if (!isLoaded) return <LoadingState />;
-  if (!isSignedIn) {
-    return (
-      <div className="admin-page">
-        <AdminHeader />
-        <main className="wrap"><StateCard eyebrow="Authentication required" title="Sign in to continue." message="The admin control room is available only to the authenticated repository owner." action={<Link href="/sign-in" className="button">Owner sign in</Link>} /></main>
-      </div>
-    );
-  }
-
-  if (result.phase === "loading") return <div className="admin-page"><AdminHeader /><LoadingState /></div>;
-  if (result.phase !== "ready") {
-    const denied = result.phase === "denied";
-    return (
-      <div className="admin-page">
-        <AdminHeader />
-        <main className="wrap">
-          <StateCard
-            eyebrow={denied ? "Access denied" : result.phase === "signed-out" ? "Session not authorized" : "Service unavailable"}
-            title={denied ? "This account is not the owner." : result.phase === "signed-out" ? "Owner session required." : "Status is unavailable."}
-            message={result.message}
-            action={<>
-              {!denied && <button className="button" type="button" onClick={() => setAttempt((value) => value + 1)}>Try again</button>}
-              <Link href="/" className="button secondary">Back to GitMesh</Link>
-            </>}
-          />
-        </main>
-      </div>
-    );
-  }
-
-  const { identity, service, security, repository } = result.data;
-  return (
-    <div className="admin-page">
-      <AdminHeader />
-      <main className="wrap admin-main">
-        <div className="admin-title-row">
-          <div>
-            <div className="eyebrow">Authenticated owner view</div>
-            <h1>Control room</h1>
-            <p>Live service and repository details returned by GitMesh.</p>
-          </div>
-          <button className="refresh-button" type="button" onClick={() => setAttempt((value) => value + 1)}>Refresh status</button>
-        </div>
-        <div className="admin-identity">
-          <strong>Signed in as {identity.github}</strong>
-          <span className="mono">ROLE / {identity.role}</span>
-        </div>
-        <div className="admin-grid">
-          <section className="admin-card" aria-labelledby="service-title">
-            <div className="eyebrow">Runtime</div>
-            <h2 id="service-title">Service status</h2>
-            <dl className="detail-list">
-              <Detail label="Service" value={service.name} />
-              <Detail label="Uptime" value={formatUptime(service.uptimeSeconds)} />
-              <Detail label="Node version" value={service.nodeVersion} />
-            </dl>
-          </section>
-          <section className="admin-card" aria-labelledby="security-title">
-            <div className="eyebrow">Boundary</div>
-            <h2 id="security-title">Security model</h2>
-            <dl className="detail-list">
-              <Detail label="Vault hosted" value={security.vaultHosted ? "Yes" : "No"} />
-              <Detail label="Authentication" value={security.auth} />
-            </dl>
-          </section>
-          <section className="admin-card" aria-labelledby="repo-title">
-            <div className="eyebrow">Source</div>
-            <h2 id="repo-title">Repository</h2>
-            <dl className="detail-list">
-              <Detail label="Branch" value={repository.branch} />
-              <Detail label="Source URL" value={repository.url} link />
-            </dl>
-          </section>
-          <section className="admin-card" aria-labelledby="owner-title">
-            <div className="eyebrow">Authorization</div>
-            <h2 id="owner-title">Owner identity</h2>
-            <dl className="detail-list">
-              <Detail label="GitHub account" value={identity.github} />
-              <Detail label="Role" value={identity.role} />
-            </dl>
-          </section>
-        </div>
-        <p className="security-note"><strong>Offline vault boundary.</strong> This control room reports service metadata only. It has no vault contents, sigil field, keypad, or proxy for local unlock operations. Keep private material on your own device.</p>
-        <p className="admin-footer">Status is provided by the same-origin GitMesh API and shown only after the session and admin endpoint authorize this owner account.</p>
-      </main>
-    </div>
-  );
-}
-
-function Detail({ label, value, link = false }) {
-  const safeValue = value === undefined || value === null || value === "" ? "Unavailable" : String(value);
-  return (
-    <div className="detail-row">
-      <dt>{label}</dt>
-      <dd>{link && safeValue !== "Unavailable"
-        ? <a href={safeValue} target="_blank" rel="noreferrer">{safeValue}</a>
-        : safeValue}</dd>
-    </div>
-  );
-}
-
-function StateCard({ eyebrow, title, message, action }) {
-  return (
-    <section className="state-card">
-      <div className="eyebrow">{eyebrow}</div>
-      <h1>{title}</h1>
-      <p>{message}</p>
-      <div className="state-actions">{action}</div>
-    </section>
-  );
+function Detail({ label, value }) {
+  const display = value === undefined || value === null || value === "" ? "Unavailable" : String(value);
+  return <div className="detail-row"><dt>{label}</dt><dd>{display}</dd></div>;
 }
 
 function NotFound() {
-  return (
-    <main className="wrap">
-      <StateCard eyebrow="Not found" title="This route is not part of GitMesh." message="Return to the project page or inspect the source repository." action={<><Link href="/" className="button">GitMesh home</Link><a className="button secondary" href={SOURCE_URL}>Open source</a></>} />
-    </main>
-  );
+  return <main className="not-found"><Brand /><div className="eyebrow">404 / NOT IN THIS WORKSPACE</div><h1>That route<br /><em>doesn’t exist.</em></h1><Link className="button" href="/sign-in">Return to private access</Link></main>;
 }
 
-function ClerkRoutes() {
-  const [, setLocation] = useLocation();
+function AppRoutes() {
   return (
-    <ClerkProvider
-      publishableKey={clerkPubKey}
-      proxyUrl={clerkProxyUrl}
-      appearance={clerkAppearance}
-      signInUrl={`${basePath}/sign-in`}
-      signUpUrl={`${basePath}/sign-up`}
-      localization={{
-        signIn: { start: { title: "Owner sign in", subtitle: "Continue with GitHub as vitalitychems-dot." } },
-        signUp: { start: { title: "Owner access", subtitle: "Use GitHub account vitalitychems-dot for GitMesh administration." } },
-      }}
-      routerPush={(to) => setLocation(stripBase(to))}
-      routerReplace={(to) => setLocation(stripBase(to), { replace: true })}
-    >
-      <Switch>
-        <Route path="/" component={HomeRoute} />
-        <Route path="/admin" component={AdminPage} />
-        <Route path="/sign-in/*?" component={() => <AuthPage mode="in" />} />
-        <Route path="/sign-up/*?" component={() => <AuthPage mode="up" />} />
-        <Route component={NotFound} />
-      </Switch>
-    </ClerkProvider>
+    <Switch>
+      <Route path="/" component={AccessPage} />
+      <Route path="/sign-in" component={AccessPage} />
+      <Route path="/sign-up" component={SignUpPage} />
+      <Route path="/admin" component={AdminPage} />
+      <Route component={NotFound} />
+    </Switch>
   );
 }
 
 function App() {
-  if (!clerkPubKey) {
-    return (
-      <WouterRouter base={basePath}>
-        <Switch>
-          <Route path="/" component={HomePage} />
-          <Route path="/sign-in/*?" component={() => <AuthSetupUnavailable mode="sign in" />} />
-          <Route path="/sign-up/*?" component={() => <AuthSetupUnavailable mode="sign up" />} />
-          <Route path="/admin" component={() => <AuthSetupUnavailable mode="owner control room" />} />
-          <Route component={NotFound} />
-        </Switch>
-      </WouterRouter>
-    );
-  }
-  return <WouterRouter base={basePath}><ClerkRoutes /></WouterRouter>;
-}
-
-function AuthSetupUnavailable({ mode }) {
-  return (
-    <main className="wrap">
-      <StateCard
-        eyebrow="Authentication setup"
-        title={`${mode} is not configured.`}
-        message="The GitMesh public page remains available. Clerk authentication needs a publishable key in this environment before owner access can be used."
-        action={<><Link href="/" className="button">GitMesh home</Link><a className="button secondary" href={SOURCE_URL} target="_blank" rel="noreferrer">Read source</a></>}
-      />
-    </main>
-  );
+  return <Router base={basePath}><AppRoutes /></Router>;
 }
 
 export default App;
