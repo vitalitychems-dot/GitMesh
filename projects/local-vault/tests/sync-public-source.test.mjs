@@ -258,7 +258,12 @@ function assertSafeSyntaxPreflightFailure(fixture, expectedMessage) {
   }
 }
 
-function runSyncWithBranchSha(t, branchSha, mode = "success") {
+function runSyncWithBranchSha(
+  t,
+  branchSha,
+  mode = "success",
+  { remoteHeadPath: sharedRemoteHeadPath } = {},
+) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-branch-sha-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
 
@@ -266,6 +271,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
   const preloadPath = path.join(tempDir, "mock-github-branch-sha.mjs");
   const requestLog = path.join(tempDir, "github-requests.json");
   const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
+  const remoteHeadPath = sharedRemoteHeadPath ?? path.join(tempDir, "mock-remote-head.txt");
   const fakeToken = "test-only-not-a-real-token";
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
@@ -284,6 +290,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       `\nexport const ${privateSource} = ;\n`,
     );
   }
+  if (!sharedRemoteHeadPath) fs.writeFileSync(remoteHeadPath, branchSha);
   fs.writeFileSync(requestLog, "[]");
   const expectedSources = {
     "projects/local-vault/gitmesh-ultimate-core.mjs": fs.readFileSync(
@@ -319,10 +326,10 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       "syncBuiltinESMExports();",
       'const response = (value) => ({ ok: true, json: async () => value });',
       "const requests = [];",
-      "const branchSha = process.env.GITMESH_TEST_BRANCH_SHA;",
+      'const branchSha = fs.readFileSync(process.env.GITMESH_TEST_REMOTE_HEAD, "utf8");',
       'const baseTreeSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";',
       'const newTreeSha = "cccccccccccccccccccccccccccccccccccccccc";',
-      'const commitSha = "dddddddddddddddddddddddddddddddddddddddd";',
+      'const commitSha = process.env.GITMESH_TEST_MODE === "retry-after-ref-timeout" ? "2222222222222222222222222222222222222222" : "dddddddddddddddddddddddddddddddddddddddd";',
       'const blobShas = [',
       '  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",',
       '  "ffffffffffffffffffffffffffffffffffffffff",',
@@ -339,6 +346,12 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       "    const treeBody = JSON.parse(options.body);",
       "    request.treePaths = treeBody.tree.map((entry) => entry.path);",
       "    request.treeEntries = treeBody.tree.map(({ path, mode, type, sha }) => ({ path, mode, type, sha }));",
+      "  }",
+      '  if (method === "POST" && url.endsWith("/git/commits")) {',
+      "    request.commit = JSON.parse(options.body);",
+      "  }",
+      '  if (method === "PATCH" && url.endsWith("/git/refs/heads/main")) {',
+      "    request.refUpdate = JSON.parse(options.body);",
       "  }",
       "  requests.push(request);",
       "  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));",
@@ -389,7 +402,14 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       "    return response({ sha: commitSha });",
       "  }",
       '  if (method === "PATCH" && url.endsWith("/git/refs/heads/main")) {',
-      "    return response({ object: { sha: commitSha } });",
+      "    const refUpdate = JSON.parse(options.body);",
+      "    fs.writeFileSync(process.env.GITMESH_TEST_REMOTE_HEAD, refUpdate.sha);",
+      '    if (process.env.GITMESH_TEST_MODE === "ref-update-timeout-after-accept") {',
+      "      const error = new Error(process.env.GITMESH_TEST_NETWORK_SENTINEL);",
+      '      error.name = "TimeoutError";',
+      "      throw error;",
+      "    }",
+      "    return response({ object: { sha: refUpdate.sha } });",
       "  }",
       '  throw new Error("unexpected mocked GitHub request");',
       "};",
@@ -411,6 +431,7 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
       GITMESH_TEST_SYNTAX_LOG: syntaxInvocationLog,
       GITMESH_TEST_MUTABLE_SOURCE_PATH: mutableSourcePath,
       GITMESH_TEST_CHANGED_SOURCE: changedSourceDuringRequest,
+      GITMESH_TEST_REMOTE_HEAD: remoteHeadPath,
       NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
     },
   });
@@ -426,6 +447,8 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
     expectedSources,
     changedSourceDuringRequest,
     localCoreAfterSync: fs.readFileSync(mutableSourcePath, "utf8"),
+    remoteHeadPath,
+    remoteHeadAfterSync: fs.readFileSync(remoteHeadPath, "utf8"),
   };
 }
 
@@ -1033,4 +1056,60 @@ test("a later blob timeout prevents tree, commit, and branch writes", (t) => {
     !fixture.output.includes(fixture.privateSource),
     "source content leaked in timeout output",
   );
+});
+
+test("retry after an ambiguous ref timeout reads the latest head and never forces an update", (t) => {
+  const originalSha = "a".repeat(40);
+  const latestRemoteSha = "f".repeat(40);
+  const firstAttempt = runSyncWithBranchSha(
+    t,
+    originalSha,
+    "ref-update-timeout-after-accept",
+  );
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(firstAttempt.result.status, 1, firstAttempt.output);
+  assert.equal(
+    firstAttempt.output.trim(),
+    "GitHub request timed out during PATCH /git/refs/heads/main. " +
+      "Check the connection and retry; sync stopped.",
+  );
+  assert.equal(firstAttempt.requests.length, 8);
+  assert.deepEqual(firstAttempt.requests[6].commit.parents, [originalSha]);
+  assert.equal(firstAttempt.requests[7].refUpdate.force, false);
+  assert.equal(firstAttempt.remoteHeadAfterSync, firstAttempt.requests[7].refUpdate.sha);
+  assert.ok(!firstAttempt.output.includes(firstAttempt.fakeToken));
+  assert.ok(!firstAttempt.output.includes(firstAttempt.privateNetworkError));
+  assert.ok(!firstAttempt.output.includes(firstAttempt.privateSource));
+
+  // Simulate another writer advancing the branch before the operator retries.
+  fs.writeFileSync(firstAttempt.remoteHeadPath, latestRemoteSha);
+  const retry = runSyncWithBranchSha(
+    t,
+    latestRemoteSha,
+    "retry-after-ref-timeout",
+    { remoteHeadPath: firstAttempt.remoteHeadPath },
+  );
+
+  assert.equal(retry.result.status, 0, retry.output);
+  assert.ok(retry.output.includes("Synced 3 allowlisted source files"));
+  assert.deepEqual(
+    retry.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${latestRemoteSha}`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/trees`],
+      ["POST", `${apiRoot}/git/commits`],
+      ["PATCH", `${apiRoot}/git/refs/heads/main`],
+    ],
+  );
+  assert.deepEqual(retry.requests[6].commit.parents, [latestRemoteSha]);
+  assert.equal(retry.requests[7].refUpdate.force, false);
+  assert.equal(retry.remoteHeadAfterSync, retry.requests[7].refUpdate.sha);
+  assert.ok(!retry.output.includes(retry.fakeToken));
+  assert.ok(!retry.output.includes(retry.privateNetworkError));
+  assert.ok(!retry.output.includes(retry.privateSource));
 });
