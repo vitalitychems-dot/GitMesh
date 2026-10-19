@@ -130,6 +130,21 @@ function invalidSourceMessage(source, fileInfo, syntaxOnly) {
   );
 }
 
+function readSourceMetadata(sourcePath, source, isJavaScript, syntaxOnly) {
+  try {
+    return fs.lstatSync(sourcePath, { bigint: true });
+  } catch {
+    const fileLabel = isJavaScript ? "JavaScript source" : "Source file";
+    const repairInstruction = syntaxOnly
+      ? "Check its permissions and confirm the file still exists, then rerun --check-syntax."
+      : "Check its permissions and confirm the file still exists, then retry the source sync.";
+    throw new Error(
+      `${fileLabel} ${source} could not be inspected. ${repairInstruction} ` +
+      "No GitHub requests were made.",
+    );
+  }
+}
+
 function readSourceFiles({ syntaxOnly = false } = {}) {
   const sourceFiles = syntaxOnly
     ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
@@ -138,7 +153,7 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
   const files = sourceFiles.map(({ source, target }) => {
     const sourcePath = path.join(ROOT, source);
     const isJavaScript = path.extname(source) === ".mjs";
-    const fileInfo = fs.lstatSync(sourcePath, { bigint: true });
+    const fileInfo = readSourceMetadata(sourcePath, source, isJavaScript, syntaxOnly);
     if (fileInfo.isSymbolicLink() || fileInfo.size > BigInt(MAX_SOURCE_BYTES) || !fileInfo.isFile()) {
       throw new Error(invalidSourceMessage(source, fileInfo, syntaxOnly));
     }
@@ -155,7 +170,7 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
         "No GitHub requests were made.",
       );
     }
-    const currentInfo = fs.lstatSync(sourcePath, { bigint: true });
+    const currentInfo = readSourceMetadata(sourcePath, source, isJavaScript, syntaxOnly);
     if (!sameFileSnapshot(fileInfo, currentInfo) || BigInt(content.length) !== fileInfo.size) {
       const retryInstruction = syntaxOnly
         ? "Save the intended file and rerun --check-syntax."
@@ -212,6 +227,18 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
   return files;
 }
 
+function validatedRetryAfterSeconds(response) {
+  let value;
+  try {
+    value = response.headers?.get?.("retry-after");
+  } catch {
+    return null;
+  }
+  if (typeof value !== "string" || !/^[0-9]{1,5}$/.test(value)) return null;
+  const seconds = Number(value);
+  return Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 3600 ? seconds : null;
+}
+
 async function githubRequest(token, route, method = "GET", body = undefined) {
   let response;
   try {
@@ -245,16 +272,29 @@ async function githubRequest(token, route, method = "GET", body = undefined) {
         ? response.status
         : null;
     const statusText = status === null ? "unknown" : status;
+    const retryAfterSeconds = status === 429 ? validatedRetryAfterSeconds(response) : null;
     const retryGuidance =
-      status !== null && status >= 500
-        ? " Check the connection and retry; sync stopped."
-        : method === "PATCH" &&
-            route === "/git/refs/heads/main" &&
-            (status === 409 || status === 422)
-          ? " The branch may have advanced; rerun the sync to read the latest head; sync stopped."
-          : "";
+      status === 429
+        ? retryAfterSeconds === null
+          ? " Check GitHub's rate-limit status, wait for the limit to reset, then rerun the sync; sync stopped."
+          : ` Wait ${retryAfterSeconds} seconds, then rerun the sync; sync stopped.`
+        : status !== null && status >= 500
+          ? " Check the connection and retry; sync stopped."
+          : method === "PATCH" &&
+              route === "/git/refs/heads/main" &&
+              (status === 409 || status === 422)
+            ? " The branch may have advanced; rerun the sync to read the latest head; sync stopped."
+            : "";
+    const failureMessage =
+      status === 429
+        ? `GitHub rate limit reached during ${method} ${route}.`
+        : status === 401 || status === 403
+          ? `GitHub denied authentication or repository access with HTTP ${status} during ${method} ${route}. ` +
+            `Verify GITHUB_TOKEN is active and has Contents write access to ${OWNER}/${REPOSITORY}; ` +
+            "update it through Replit Secrets if needed; sync stopped."
+        : `GitHub request failed with HTTP ${statusText} during ${method} ${route}.`;
     throw new Error(
-      `GitHub request failed with HTTP ${statusText} during ${method} ${route}.${retryGuidance}`,
+      `${failureMessage}${retryGuidance}`,
     );
   }
   try {
