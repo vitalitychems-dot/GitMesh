@@ -1,0 +1,7 @@
+/generated-artifacts/
+/node_modules/
+**/node_modules/
+**/SovereignMeshVault/
+.env
+.env.*
+!.env.example

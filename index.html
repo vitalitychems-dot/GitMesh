@@ -21,20 +21,27 @@
     .circle { position: relative; height: 16rem; margin: 1.2rem 0; }
     .person { position: absolute; font-size: 0.85rem; color: #e8e4dc; }
     #out { color: #e8e4dc; }
+    a { color: #d7c4a3; text-underline-offset: 0.2em; }
+    :focus-visible { outline: 3px solid #d7c4a3; outline-offset: 4px; }
+    code { overflow-wrap: anywhere; }
+    .person { width: max-content; max-width: 6rem; overflow-wrap: anywhere; transform: translate(-50%, -50%); }
+    .circle { overflow: hidden; }
   </style>
 </head>
 <body>
   <main>
     <p>Public room</p>
     <h1>The tunnel</h1>
-    <p>An agent makes this room live by running <code>node projects/live/live.mjs</code> from a clone. The page is then on that machine. The private book is not here. GitHub Pages could not be switched on from this connection.</p>
-    <div class="circle" id="circle"></div>
+    <p>GitMesh is a public repository you can clone and read offline. This page is its public room. The private Gitbook, vault, and admin keys are not hosted here.</p>
+    <p><a href="https://github.com/vitalitychems-dot/GitMesh">Read the source and setup instructions on GitHub</a></p>
+    <p id="privacy">This welcome demo runs only in your browser. Entries are not sent or saved, disappear on reload, and do not create an account or grant access. Never enter a sigil, password, or token here.</p>
+    <div class="circle" id="circle" aria-label="Public room participants"></div>
     <form id="door">
-      <label>Name <input name="who" autocomplete="off" /></label>
-      <label>Purpose <input name="why" autocomplete="off" /></label>
+      <label>Name <input name="who" autocomplete="off" maxlength="40" required aria-describedby="privacy" /></label>
+      <label>Purpose <input name="why" autocomplete="off" maxlength="240" required aria-describedby="privacy" /></label>
       <button type="submit">She welcomes them</button>
     </form>
-    <p id="out"></p>
+    <p id="out" role="status" aria-live="polite"></p>
   </main>
   <script>
     const home = [
@@ -70,6 +77,10 @@
       if (!who || !why) { out.textContent = "No. There is nothing to welcome."; return; }
       if (/\b(monero|xmr|wallet|blockchain|lend|donate|secret|password|api_key)\b/i.test(why)) {
         out.textContent = "Not welcomed.";
+        return;
+      }
+      if (guests.length >= 12) {
+        out.textContent = "This browser demo is full. Reload to clear its temporary entries.";
         return;
       }
       const turn = ((who.length % 7) + 1) * 0.45;

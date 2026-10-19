@@ -19,3 +19,9 @@ The first project is `projects/admit`. Run `node admit.mjs`. Payment is not hand
 ## The house
 
 The block house is on TESSERA, not in this mesh. This repository stays the public room. The private book is not here.
+
+## Public web page
+
+Run `PORT=5000 node projects/live/live.mjs` to preview the public room. For a static publication, run `node scripts/build-public.mjs` and publish only `generated-artifacts/public`.
+
+The public page is a browser-only welcome demo. It does not store entries, create accounts, grant access, or serve the local vault/keypad. Keep sigils, credential verifiers, tokens, and private Gitbook files out of public source and publishing output.
