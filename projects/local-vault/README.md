@@ -14,9 +14,25 @@ Or use the launcher in this folder: `run-mesh.bat` on Windows, or `sh run-mesh.s
 
 Requirements: Node.js 20 or newer, Git on `PATH`, and an interactive terminal.
 
+Run the automated sigil security tests from the repository root with `node --test gitmesh-template/test/sigil-auth.test.mjs`.
+
 On first launch, choose an initial admin sigil of at least 12 characters. Later launches ask for it without echoing it. After a successful sign-in, GitMesh displays a new, randomly generated sigil once. Save it, then type `SAVED` to activate it and open the console. The prior sigil is invalidated when the replacement is saved. If you cancel instead, the prior sigil remains valid and the console stays locked.
 
 The local credential file stores a salted scrypt verifier and hashes of consumed sigils, never the active sigil itself. Generated sigils use a persistent increasing generation number and are checked against the consumed-key history to prevent reuse. The menu can also set a new sigil; prior sigils cannot be reused. There is no in-app recovery if the active sigil is lost. Existing version-1 passphrase verifier files are accepted and migrate to rotating sigils on the next successful sign-in.
+
+## Local browser keypad
+
+From the GitMesh repository root, start the optional browser console:
+
+```sh
+node projects/local-vault/keypad-server.mjs
+```
+
+Then open `http://127.0.0.1:8782` in a browser on the same machine running Node. The server binds only to the loopback interface, so it is not available through Replit's hosted preview or from another device; do not proxy or expose this port publicly. Stop it with Ctrl+C when finished. The browser keypad displays English keys, creates a fresh randomized mapping for each page session, and lets you hold a key to view its temporary session code. It does not accept sigils from the physical keyboard. The generated sigil is displayed once after sign-in and must be saved before the vault unlocks; cancelling keeps the old sigil active.
+
+The keypad accepts only ASCII letters, digits, hyphen, and underscore. If an existing legacy sigil contains other characters, use the terminal CLI to sign in and rotate it to a generated sigil before using the browser keypad.
+
+The changing key labels are input obfuscation only. They are not a real language, encryption, a secure keyboard extension, or protection against a compromised device or software that can inspect the screen or browser. Sigil characters are entered through the visible buttons; a hardware keyboard can still navigate and activate those buttons for accessibility. The local browser console can add and list records and manually export/import Git bundles. Git bundles remain unencrypted. The existing terminal menu remains available.
 
 ## Local data
 
@@ -47,6 +63,10 @@ This is separate from vault data transfer and makes an outbound HTTPS request to
 
 Run from this folder with `node ./sync-public-source.mjs`. It updates only the three fixed source paths listed in the script, on `main`, and uses a non-force ref update. It does not stage, read, or upload local vault data, bundles, or other workspace files. Do not put the token in a `.env` file, source file, Git remote URL, or command-line argument.
 
+For an offline JavaScript syntax check that does not require a GitHub token or make network requests, run `node ./sync-public-source.mjs --check-syntax`.
+
+JavaScript syntax validation times out after 10 seconds. Each GitHub API request times out after 20 seconds. These are fixed limits; there is no repository-specific or environment override.
+
 ## Security regression checks
 
-The regression harness is maintained in the Replit workspace and is not included in the GitHub source sync. From the Replit workspace root, run `python3 gitmesh-template/tests/test_security_regressions.py`. The checks use a disposable fixture and a mocked GitHub API; they do not read the active vault or make network requests. Python 3, Node.js, and Git must be available.
+From the Replit workspace root, run `node --test projects/local-vault/tests/sync-public-source.test.mjs`. The checks use temporary files and mocked GitHub requests; they do not access the active vault or make network requests. Node.js is required; Python is not used.
