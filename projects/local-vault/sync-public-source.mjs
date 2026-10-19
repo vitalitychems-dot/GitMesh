@@ -273,6 +273,10 @@ async function githubRequest(token, route, method = "GET", body = undefined) {
     const failureMessage =
       status === 429
         ? `GitHub rate limit reached during ${method} ${route}.`
+        : status === 401 || status === 403
+          ? `GitHub denied authentication or repository access with HTTP ${status} during ${method} ${route}. ` +
+            `Verify GITHUB_TOKEN is active and has Contents write access to ${OWNER}/${REPOSITORY}; ` +
+            "update it through Replit Secrets if needed; sync stopped."
         : `GitHub request failed with HTTP ${statusText} during ${method} ${route}.`;
     throw new Error(
       `${failureMessage}${retryGuidance}`,
