@@ -5,9 +5,10 @@ path = "scripts/post-merge.sh"
 timeoutMs = 180000
 
 [deployment]
-deploymentTarget = "static"
-build = ["node", "scripts/build-public.mjs"]
+deploymentTarget = "autoscale"
+build = ["npm", "run", "build"]
 publicDir = "generated-artifacts/public"
+run = ["npm", "start"]
 
 [workflows]
 runButton = "Project"
@@ -36,3 +37,16 @@ outputType = "webview"
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 24678
+externalPort = 3000
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+GITMESH_ADMIN_GITHUB_ID = "332565808"
+GITMESH_ADMIN_GITHUB_LOGIN = "vitalitychems-dot"

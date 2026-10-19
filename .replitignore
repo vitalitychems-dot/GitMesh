@@ -3,3 +3,6 @@
 .env
 .env.*
 node_modules/
+.agents/
+attached_assets/
+.git/
