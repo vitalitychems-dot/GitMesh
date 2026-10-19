@@ -101,6 +101,12 @@ function requireSha(value, label) {
 
 function invalidSourceMessage(source, fileInfo, syntaxOnly) {
   if (!syntaxOnly) {
+    if (fileInfo.isSymbolicLink()) {
+      return (
+        `Refusing to sync a symbolic-link source file: ${source}. ` +
+        "Restore it as a regular file; no GitHub requests were made."
+      );
+    }
     return `Refusing to sync an invalid or oversized source file: ${source}`;
   }
   if (fileInfo.isSymbolicLink()) {

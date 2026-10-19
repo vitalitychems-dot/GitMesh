@@ -271,12 +271,27 @@ function runSyncWithBranchSha(
   const preloadPath = path.join(tempDir, "mock-github-branch-sha.mjs");
   const requestLog = path.join(tempDir, "github-requests.json");
   const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
+  const privateSymlinkReadLog = path.join(tempDir, "private-symlink-reads.log");
   const remoteHeadPath = sharedRemoteHeadPath ?? path.join(tempDir, "mock-remote-head.txt");
   const fakeToken = "test-only-not-a-real-token";
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
   const privateResponseBody = "PRIVATE_BASE_COMMIT_RESPONSE_SENTINEL";
   const privateNetworkError = "PRIVATE_BRANCH_NETWORK_ERROR_SENTINEL";
   const advancedHeadSha = "ffffffffffffffffffffffffffffffffffffffff";
+  const privateSymlinkTargetContents = "PRIVATE_SYMLINK_TARGET_CONTENT_SENTINEL";
+  let privateSymlinkTargetDirectory;
+  let privateSymlinkTargetPath;
+  if (mode === "readme-symlink") {
+    privateSymlinkTargetDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "gitmesh-sync-private-target-"),
+    );
+    t.after(() => fs.rmSync(privateSymlinkTargetDirectory, { recursive: true, force: true }));
+    privateSymlinkTargetPath = path.join(
+      privateSymlinkTargetDirectory,
+      "PRIVATE_SYMLINK_TARGET_PATH_SENTINEL.txt",
+    );
+    fs.writeFileSync(privateSymlinkTargetPath, privateSymlinkTargetContents);
+  }
   const changedSourceDuringRequest =
     "// CHANGED_AFTER_SYNC_SNAPSHOT_SENTINEL\nexport const changedAfterSnapshot = true;\n";
   const mutableSourcePath = path.join(tempDir, "gitmesh-ultimate-core.mjs");
@@ -296,6 +311,7 @@ function runSyncWithBranchSha(
   }
   if (!sharedRemoteHeadPath) fs.writeFileSync(remoteHeadPath, branchSha);
   fs.writeFileSync(requestLog, "[]");
+  fs.writeFileSync(privateSymlinkReadLog, "");
   const expectedSources = {
     "projects/local-vault/gitmesh-ultimate-core.mjs": fs.readFileSync(
       path.join(tempDir, "gitmesh-ultimate-core.mjs"),
@@ -310,12 +326,24 @@ function runSyncWithBranchSha(
       "utf8",
     ),
   };
+  if (mode === "readme-symlink") {
+    const readmePath = path.join(tempDir, "README.md");
+    fs.unlinkSync(readmePath);
+    fs.symlinkSync(privateSymlinkTargetPath, readmePath);
+  }
   fs.writeFileSync(
     preloadPath,
     [
       'import fs from "node:fs";',
       'import childProcess from "node:child_process";',
       'import { syncBuiltinESMExports } from "node:module";',
+      "const originalReadFileSync = fs.readFileSync.bind(fs);",
+      "fs.readFileSync = (file, ...args) => {",
+      "  if (process.env.GITMESH_TEST_PRIVATE_TARGET_PATH && String(file) === process.env.GITMESH_TEST_PRIVATE_TARGET_PATH) {",
+      '    fs.appendFileSync(process.env.GITMESH_TEST_PRIVATE_TARGET_READ_LOG, "read\\n");',
+      "  }",
+      "  return originalReadFileSync(file, ...args);",
+      "};",
       "const originalSpawnSync = childProcess.spawnSync.bind(childProcess);",
       "childProcess.spawnSync = (command, args, options) => {",
       '  if (command === process.execPath && Array.isArray(args) && args.includes("--check")) {',
@@ -451,6 +479,8 @@ function runSyncWithBranchSha(
       GITMESH_TEST_MUTABLE_SOURCE_PATH: mutableSourcePath,
       GITMESH_TEST_CHANGED_SOURCE: changedSourceDuringRequest,
       GITMESH_TEST_REMOTE_HEAD: remoteHeadPath,
+      GITMESH_TEST_PRIVATE_TARGET_PATH: privateSymlinkTargetPath ?? "",
+      GITMESH_TEST_PRIVATE_TARGET_READ_LOG: privateSymlinkReadLog,
       NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
     },
   });
@@ -463,6 +493,9 @@ function runSyncWithBranchSha(
     privateResponseBody,
     privateNetworkError,
     advancedHeadSha,
+    privateSymlinkTargetPath,
+    privateSymlinkTargetContents,
+    privateSymlinkReadLog,
     syntaxInvocationLog,
     expectedSources,
     changedSourceDuringRequest,
@@ -630,11 +663,38 @@ test("normal sync rejects invalid UTF-8 in README before any GitHub request", (t
       "No GitHub requests were made.",
   );
   assert.deepEqual(fixture.requests, []);
+  assert.equal(
+    fs.readFileSync(fixture.privateSymlinkReadLog, "utf8"),
+    "",
+    "the sync followed the symlink and read the private target",
+  );
   assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
   assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub credential leaked in output");
   assert.ok(!fixture.output.includes(fixture.privateResponseBody), "server details leaked in output");
   assert.ok(!fixture.output.includes("\uFFFD"), "decoded replacement bytes leaked in output");
   assert.ok(!fixture.output.includes("SyntaxError"), "parser diagnostics leaked in output");
+});
+
+test("normal sync rejects an allowlisted symlink without reading or exposing its target", (t) => {
+  const fixture = runSyncWithBranchSha(t, "a".repeat(40), "readme-symlink");
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "Refusing to sync a symbolic-link source file: README.md. " +
+      "Restore it as a regular file; no GitHub requests were made.",
+  );
+  assert.deepEqual(fixture.requests, []);
+  assert.ok(
+    !fixture.output.includes(fixture.privateSymlinkTargetPath),
+    "private symlink target path leaked in output",
+  );
+  assert.ok(
+    !fixture.output.includes(fixture.privateSymlinkTargetContents),
+    "private symlink target contents leaked in output",
+  );
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub credential leaked in output");
 });
 
 test("sync uploads the initial source snapshot when a local file changes during GitHub requests", (t) => {
