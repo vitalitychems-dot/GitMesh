@@ -291,6 +291,9 @@ function runSyncWithBranchSha(
       `\nexport const ${privateSource} = ;\n`,
     );
   }
+  if (mode === "readme-invalid-utf8") {
+    fs.appendFileSync(path.join(tempDir, "README.md"), Buffer.from([0xc3, 0x28]));
+  }
   if (!sharedRemoteHeadPath) fs.writeFileSync(remoteHeadPath, branchSha);
   fs.writeFileSync(requestLog, "[]");
   const expectedSources = {
@@ -614,6 +617,24 @@ test("README text that is invalid JavaScript is still synced without syntax-chec
     ),
     "the README fixture did not contain invalid JavaScript text",
   );
+});
+
+test("normal sync rejects invalid UTF-8 in README before any GitHub request", (t) => {
+  const fixture = runSyncWithBranchSha(t, "a".repeat(40), "readme-invalid-utf8");
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "Source file README.md is not valid UTF-8. " +
+      "Save it as valid UTF-8 text and retry the source sync. " +
+      "No GitHub requests were made.",
+  );
+  assert.deepEqual(fixture.requests, []);
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub credential leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateResponseBody), "server details leaked in output");
+  assert.ok(!fixture.output.includes("\uFFFD"), "decoded replacement bytes leaked in output");
+  assert.ok(!fixture.output.includes("SyntaxError"), "parser diagnostics leaked in output");
 });
 
 test("sync uploads the initial source snapshot when a local file changes during GitHub requests", (t) => {

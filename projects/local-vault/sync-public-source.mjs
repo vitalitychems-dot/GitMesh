@@ -169,16 +169,23 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
       }
       throw new Error(`Refusing to sync a non-text source file: ${source}`);
     }
-    if (isJavaScript) {
-      try {
-        new TextDecoder("utf-8", { fatal: true }).decode(content);
-      } catch {
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(content);
+    } catch {
+      if (!isJavaScript) {
         throw new Error(
-          `JavaScript source ${source} is not valid UTF-8. ` +
-          "Save it as valid UTF-8 text and rerun --check-syntax. " +
+          `Source file ${source} is not valid UTF-8. ` +
+          "Save it as valid UTF-8 text and retry the source sync. " +
           "No GitHub requests were made.",
         );
       }
+      throw new Error(
+        `JavaScript source ${source} is not valid UTF-8. ` +
+        "Save it as valid UTF-8 text and rerun --check-syntax. " +
+        "No GitHub requests were made.",
+      );
+    }
+    if (isJavaScript) {
       const location = validateJavaScriptSyntax(content, source, { syntaxOnly });
       if (location) syntaxDiagnostics.push({ source, ...location });
     }
