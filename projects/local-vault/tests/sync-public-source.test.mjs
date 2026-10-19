@@ -278,6 +278,12 @@ function runSyncWithBranchSha(t, branchSha, mode = "success") {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
   }
   fs.appendFileSync(path.join(tempDir, "README.md"), `\n${privateSource}\n`);
+  if (mode === "readme-invalid-js") {
+    fs.appendFileSync(
+      path.join(tempDir, "README.md"),
+      `\nexport const ${privateSource} = ;\n`,
+    );
+  }
   fs.writeFileSync(requestLog, "[]");
   const expectedSources = {
     "projects/local-vault/gitmesh-ultimate-core.mjs": fs.readFileSync(
@@ -518,6 +524,51 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
   assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
   assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+});
+
+test("README text that is invalid JavaScript is still synced without syntax-checking it", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "readme-invalid-js");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+  const targetPaths = [
+    "projects/local-vault/gitmesh-ultimate-core.mjs",
+    "projects/local-vault/README.md",
+    "projects/local-vault/sync-public-source.mjs",
+  ];
+
+  assert.equal(fixture.result.status, 0, fixture.output);
+  assert.ok(fixture.output.includes("Synced 3 allowlisted source files"));
+  assert.deepEqual(fixture.requests[5].treePaths, targetPaths);
+  assert.equal(fixture.requests[5].treeEntries.length, targetPaths.length);
+  assert.equal(fixture.requests.length, 8, "sync did not complete entirely through the mocked API");
+  assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
+
+  const syntaxInvocations = fs
+    .readFileSync(fixture.syntaxInvocationLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(syntaxInvocations.length, 2, "README was incorrectly sent to the syntax checker");
+  assert.ok(
+    syntaxInvocations.every(({ status, inputHasSourceSentinel }) =>
+      status === 0 && !inputHasSourceSentinel,
+    ),
+    "a JavaScript check failed or received README content",
+  );
+
+  const readmeBlobRequest = fixture.requests.filter(
+    ({ method, url }) => method === "POST" && url.endsWith("/git/blobs"),
+  )[1];
+  assert.equal(
+    Buffer.from(readmeBlobRequest.blob.content, "base64").toString("utf8"),
+    fixture.expectedSources["projects/local-vault/README.md"],
+  );
+  assert.ok(
+    fixture.expectedSources["projects/local-vault/README.md"].includes(
+      `export const ${fixture.privateSource} = ;`,
+    ),
+    "the README fixture did not contain invalid JavaScript text",
+  );
 });
 
 test("sync uploads the initial source snapshot when a local file changes during GitHub requests", (t) => {
