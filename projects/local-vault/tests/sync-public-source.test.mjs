@@ -528,6 +528,12 @@ function runSyncWithBranchSha(
       "    return response({ sha: newTreeSha });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/commits")) {',
+      '    if (process.env.GITMESH_TEST_MODE === "commit-invalid-json") {',
+      "      return {",
+      "        ok: true,",
+      "        json: async () => { throw new Error(process.env.GITMESH_TEST_RESPONSE_SENTINEL); },",
+      "      };",
+      "    }",
       "    return response({ sha: commitSha });",
       "  }",
       '  if (method === "PATCH" && url.endsWith("/git/refs/heads/main")) {',
@@ -960,6 +966,38 @@ test("normal sync stops when the tree response JSON is unreadable", (t) => {
     fixture.remoteHeadAfterSync,
     branchSha,
     "branch was updated after the unreadable tree response",
+  );
+});
+
+test("normal sync stops when the created-commit response JSON is unreadable", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "commit-invalid-json");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "GitHub returned an invalid response during POST /git/commits.",
+  );
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/trees`],
+      ["POST", `${apiRoot}/git/commits`],
+    ],
+  );
+  assert.ok(!fixture.output.includes(fixture.privateResponseBody), "response sentinel leaked in output");
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  assert.equal(
+    fixture.remoteHeadAfterSync,
+    branchSha,
+    "branch was updated after the unreadable created-commit response",
   );
 });
 
