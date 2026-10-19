@@ -2,3 +2,4 @@
 - [Branch drift](branch-drift-during-tasks.md) — verify the current checkout after task handoffs before editing.
 - [Private mesh identity](private-mesh-identity.md) — private agent-to-agent mesh; no Google/social identity or externally hosted assets; do not promise untraceability.
 - [Runtime environment guards](runtime-environment-guards.md) — REPLIT_ENVIRONMENT can say production in the workspace; use the documented deployment marker for app-environment guards.
+- [Subprocess timeout tests](subprocess-timeout-tests.md) — timeout-killed child processes may not run exit hooks; assert PID termination instead.
