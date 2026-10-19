@@ -190,6 +190,37 @@ test("successful rotation invalidates the prior sigil and records it as consumed
   );
 });
 
+test("authentication rejects rotation at the maximum safe generation without prompting or rewriting credentials", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "maximum-generation-active-sigil-2026";
+  const salt = "c".repeat(32);
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt,
+    verifier: verifier(activeSigil, salt),
+    generation: Number.MAX_SAFE_INTEGER,
+    usedSigilHashes: [],
+  }));
+  const before = fs.readFileSync(authFile);
+  let replacementPromptCount = 0;
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([activeSigil]),
+      promptTextFn: async () => {
+        replacementPromptCount += 1;
+        throw new Error("Rotation confirmation must not be requested.");
+      },
+      log: () => {},
+    }),
+    /sigil generation limit has been reached/,
+  );
+
+  assert.equal(replacementPromptCount, 0);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+});
+
 test("cancelling rotation leaves the active sigil and credential file unchanged", async () => {
   const authFile = makeAuthPath();
   const activeSigil = "still-active-sigil-2026";
