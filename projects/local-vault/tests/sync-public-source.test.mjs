@@ -1540,6 +1540,35 @@ test("--check-syntax succeeds with a GitHub token and performs no sync requests"
   );
 });
 
+test("--check-syntax rejects invalid JavaScript with a GitHub token without publishing", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "syntax", {
+    checkOnly: true,
+    tokenPresent: true,
+  });
+
+  assert.equal(fixture.tokenPresent, true, "the parent process did not receive a fake token");
+  assertSafeSyntaxFailure(
+    fixture,
+    "JavaScript syntax validation failed for gitmesh-ultimate-core.mjs. " +
+      "Correct the JavaScript and rerun --check-syntax. No GitHub requests were made.",
+  );
+  assert.ok(
+    !fixture.output.includes(fixture.fakeToken),
+    "GitHub token leaked in syntax-check output",
+  );
+
+  const invocations = fs
+    .readFileSync(fixture.syntaxInvocationLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((entry) => JSON.parse(entry));
+  assert.ok(invocations.some((invocation) => invocation.status === 1), "invalid JavaScript was not rejected");
+  assert.ok(
+    invocations.every((invocation) => !Object.hasOwn(invocation.env, "GITHUB_TOKEN")),
+    "syntax subprocess inherited the GitHub token",
+  );
+});
+
 test("syntax validation rejects a source file that changes during inspection", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "changed-during-read");
   const { output, result, syntaxMarker, fetchMarker, privateTexts } = fixture;
