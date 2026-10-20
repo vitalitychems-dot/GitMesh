@@ -7,6 +7,12 @@ import { pathToFileURL } from "node:url";
 
 const WORKFLOWS = new URL("../../../.github/workflows/", import.meta.url);
 const SHA = "a".repeat(40);
+// Update these explicit reviewed SHA/release pairs only after the human review
+// in .github/ACTIONS.md. Never derive them from the workflow under review.
+const REVIEWED_ACTIONS = [
+  ["actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "v4.4.0"],
+  ["actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020", "v4.4.0"],
+];
 
 // This dependency-free policy intentionally supports block-style declarations.
 // Reject aliases, complex keys and flow mappings instead of allowing YAML syntax
@@ -124,17 +130,55 @@ test("every repository workflow uses immutable external pins with release commen
   assert.deepEqual(problems, []);
 });
 
-test("source-sync workflow uses reviewed immutable action pins with release comments", async () => {
-  const workflow = await readFile(new URL("../../../.github/workflows/local-vault-regressions.yml", import.meta.url), "utf8");
+function assertReviewedSourceSyncPins(workflow) {
   const actions = [...workflow.matchAll(/^\s*uses:\s*(\S+)\s*#\s*(v[\d.]+)\s*$/gm)];
   assert.equal(actions.length, 2);
-  assert.deepEqual(actions.map((m) => [m[1], m[2]]), [
-    ["actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "v4.4.0"],
-    ["actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020", "v4.4.0"],
-  ]);
+  assert.deepEqual(actions.map((m) => [m[1], m[2]]), REVIEWED_ACTIONS);
   assert.equal([...workflow.matchAll(/^\s*uses:/gm)].length, actions.length);
+}
+
+test("source-sync workflow uses reviewed immutable action pins with release comments", async () => {
+  const workflow = await readFile(new URL("../../../.github/workflows/local-vault-regressions.yml", import.meta.url), "utf8");
+  assertReviewedSourceSyncPins(workflow);
   assert.match(workflow, /contents: read/);
   assert.match(workflow, /persist-credentials: false/);
+});
+
+test("an action upgrade requires an intentional reviewed-pin expectation change", async () => {
+  const workflow = await readFile(new URL("../../../.github/workflows/local-vault-regressions.yml", import.meta.url), "utf8");
+  for (const [reference, release] of REVIEWED_ACTIONS) {
+    for (const proposed of [
+      workflow.replace(reference, reference.replace(/@[a-f0-9]{40}$/, `@${SHA}`)),
+      workflow.replace(`${reference} # ${release}`, `${reference} # v999.0.0`),
+    ]) {
+      assert.notEqual(proposed, workflow, "the upgrade fixture must change a reviewed pin");
+      assert.throws(() => assertReviewedSourceSyncPins(proposed), assert.AssertionError);
+    }
+  }
+});
+
+test("Dependabot proposes only the two reviewed actions with a bounded weekly schedule", async () => {
+  const config = await readFile(new URL("../../../.github/dependabot.yml", import.meta.url), "utf8");
+  // Fail closed on extra ecosystems or updater scopes. Policy changes require
+  // an intentional review of this expectation, not permissive YAML matching.
+  const policy = config.split(/\r?\n/)
+    .filter((line) => line.trim() && !line.trimStart().startsWith("#"))
+    .map((line) => line.trimEnd()).join("\n");
+  assert.equal(policy, [
+    "version: 2",
+    "updates:",
+    '  - package-ecosystem: "github-actions"',
+    '    directory: "/"',
+    "    schedule:",
+    '      interval: "weekly"',
+    '      day: "monday"',
+    "    open-pull-requests-limit: 2",
+    "    allow:",
+    '      - dependency-name: "actions/checkout"',
+    '      - dependency-name: "actions/setup-node"',
+    "    commit-message:",
+    '      prefix: "ci"',
+  ].join("\n"));
 });
 
 test("policy accepts pinned actions, local actions and explicitly supported reusable workflows", () => {
