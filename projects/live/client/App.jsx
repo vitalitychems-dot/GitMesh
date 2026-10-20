@@ -375,7 +375,9 @@ function AdminPage() {
     setLoggingOut(true);
     setState({ phase: "loading", data: null, message: "" });
     try {
-      await api("/api/admin/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      const response = await api("/api/admin/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.signedOut !== true) throw new Error("Sign-out was not confirmed.");
       setLocation("/sign-in", { replace: true });
     } catch {
       setState({ phase: "error", data: null, message: "Sign-out could not be confirmed. Your session may still be active. Retry sign out." });
