@@ -92,6 +92,8 @@ This is separate from vault data transfer and makes an outbound HTTPS request to
 
 Run from this folder with `node ./sync-public-source.mjs`. It checks only the three fixed source paths listed in the script against GitHub's current `main` tree; if their Git blob contents and file modes already match, it verifies `main` has not moved during the check and exits without creating a commit. Otherwise it syncs those paths with a non-force ref update. It does not stage, read, or upload local vault data, bundles, or other workspace files. Do not put the token in a `.env` file, source file, Git remote URL, or command-line argument.
 
+Before syncing, run `node ./sync-public-source.mjs --preview` to validate the configured source files and print only their three GitHub target paths. This local preview requires no token and makes no GitHub requests.
+
 For an offline JavaScript syntax check that does not require a GitHub token or make network requests, run `node ./sync-public-source.mjs --check-syntax`.
 
 JavaScript syntax validation times out after 10 seconds. Each GitHub API request times out after 20 seconds. These are fixed limits; there is no repository-specific or environment override.
