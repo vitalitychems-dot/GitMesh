@@ -5,7 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createKeypadServer } from "../keypad-server.mjs";
+import { createKeypadServer, listenLocalOnly } from "../keypad-server.mjs";
 
 function request(port, route, { method = "GET", body, cookie, origin } = {}) {
   return new Promise((resolve, reject) => {
@@ -87,8 +87,9 @@ test("local keypad uses per-session opaque codes and only activates a replacemen
 
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
+    listenLocalOnly(server, 0, resolve);
   });
+  assert.equal(server.address().address, "127.0.0.1");
   t.after(async () => {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(tempDirectory, { recursive: true, force: true });
@@ -105,6 +106,12 @@ test("local keypad uses per-session opaque codes and only activates a replacemen
     origin: "http://attacker.example",
   });
   assert.equal(rejectedOrigin.status, 403);
+  const rejectedTunnelPort = await request(port, "/api/auth/start", {
+    method: "POST",
+    body: { challengeId: "invalid", first: [] },
+    origin: `http://127.0.0.1:${port + 1}`,
+  });
+  assert.equal(rejectedTunnelPort.status, 403);
 
   const firstChallenge = (await request(port, "/api/keymap")).json;
   const originalSigil = "Start-GitMesh_2026";

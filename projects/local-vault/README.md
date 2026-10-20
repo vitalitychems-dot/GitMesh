@@ -10,7 +10,7 @@ From the GitMesh repository root:
 node projects/local-vault/gitmesh-ultimate-core.mjs
 ```
 
-Or use the launcher in this folder: `run-mesh.bat` on Windows, or `sh run-mesh.sh` on macOS/Linux. On iPhone/iPad, this is not a native app and cannot auto-run when downloaded; shell support depends on compatible Node.js and Git being available.
+Or use the launcher in this folder: `run-mesh.bat` on Windows, or `sh run-mesh.sh` on macOS/Linux. The terminal CLI is not a native iPhone/iPad app; use the browser keypad tunnel described below instead.
 
 Requirements: Node.js 20 or newer, Git on `PATH`, and an interactive terminal.
 
@@ -28,7 +28,33 @@ From the GitMesh repository root, start the optional browser console:
 node projects/local-vault/keypad-server.mjs
 ```
 
-Then open `http://127.0.0.1:8782` in a browser on the same machine running Node. The server binds only to the loopback interface, so it is not available through Replit's hosted preview or from another device; do not proxy or expose this port publicly. Stop it with Ctrl+C when finished. The browser keypad displays English keys, creates a fresh randomized mapping for each page session, and lets you hold a key to view its temporary session code. It does not accept sigils from the physical keyboard. The generated sigil is displayed once after sign-in and must be saved before the vault unlocks; cancelling keeps the old sigil active.
+Then open `http://127.0.0.1:8782` in a browser on the same machine running Node. The server binds only to the loopback interface; do not change it to `0.0.0.0`, publish the port, or treat Replit's hosted preview as a private tunnel. Stop it with Ctrl+C when finished. The browser keypad displays English keys, creates a fresh randomized mapping for each page session, and lets you hold a key to view its temporary session code. It does not accept sigils from the physical keyboard. The generated sigil is displayed once after sign-in and must be saved before the vault unlocks; cancelling keeps the old sigil active.
+
+### iPhone access without exposing the HTTP service
+
+Use an SSH local-port forward from an iPhone only when the vault is running on a trusted Mac or Linux computer that you control:
+
+1. On a trusted Mac or Linux computer, install Git and Node.js 20+, place the approved GitMesh source there, and start the local keypad with the command above. The `SovereignMeshVault/` directory is excluded from Git, so a fresh clone creates a separate, empty vault; it does not bring over the Replit workspace's local records or sigil.
+2. Enable SSH on that computer for a dedicated key-only account. Restrict that account to local TCP forwarding for `127.0.0.1:8782` only; an OpenSSH account rule should include:
+
+   ```text
+   Match User gitmesh-tunnel
+     AuthenticationMethods publickey
+     AllowTcpForwarding local
+     PermitOpen 127.0.0.1:8782
+     GatewayPorts no
+     PermitTTY no
+     X11Forwarding no
+     ForceCommand /usr/bin/false
+   ```
+
+   Restrict the iPhone key in that account's `authorized_keys` as well, for example: `restrict,port-forwarding,permitopen="127.0.0.1:8782",command="/usr/bin/false" ssh-ed25519 <iPhone-public-key>`. Generate the key pair in the iPhone SSH client and install only its public key on the host; never copy the private key into GitMesh. Verify the SSH host key on the iPhone. Make SSH reachable only over trusted Wi-Fi or an existing private VPN; do not create router port forwards or expose SSH publicly. Validate the host's SSH configuration (for OpenSSH, `sshd -t`) before reloading it, and do not risk disabling your existing administrator access.
+3. Install an iOS SSH client that explicitly supports forwarding a local port for use by Safari and a tunnel-only/no-shell session. Configure the iPhone's local port `8782` to forward to `127.0.0.1:8782` on the SSH host. Some clients require their documented device-wide SSH/VPN feature for Safari to use the tunnel; review that feature's traffic-routing behavior before enabling it. Keep the tunnel active.
+4. In Safari on the iPhone, open `http://127.0.0.1:8782`. Use the same local and host port: the server checks the request origin and rejects mismatched ports.
+
+The HTTP server still listens only on the host's loopback address. The SSH tunnel carries browser traffic to that loopback socket; sigil verification and vault reads/writes remain on the host. This does not make a Replit workspace's loopback port reachable from an iPhone, and the current Replit preview is not a private tunnel. If the only copy of the vault is in Replit, do not expose the HTTP service to make it reachable; the steps above require running the source and vault on a computer you control. Moving vault state is a separate operation and must use an encrypted bundle or an encrypted backup, never GitHub.
+
+Use an SSH key only for the tunnel account and keep the phone locked. The tunnel protects traffic in transit, not data at rest; enable full-disk encryption on the host (such as FileVault, BitLocker, or LUKS). Compromised devices, screen recording, malicious browser extensions, keyloggers, or a person with access to an unlocked device can capture sigils and displayed records. The rotating keypad is input obfuscation, not encryption or a secure hardware keyboard.
 
 The keypad accepts only ASCII letters, digits, hyphen, and underscore. If an existing legacy sigil contains other characters, use the terminal CLI to sign in and rotate it to a generated sigil before using the browser keypad.
 
@@ -50,6 +76,7 @@ The `.gitignore` in this folder excludes the entire vault from the public reposi
 - Checks each record's SHA-256 checksum when listing or importing it.
 - Imports only a bundle explicitly selected from `drops_inbound`; it does not watch folders or execute incoming content. Encrypted bundles must authenticate and decrypt before records can be imported.
 - Encrypts exports with AES-256-GCM and a per-bundle key derived from a user-held passphrase using scrypt. Passphrases must be 16–256 characters, are used transiently by the loopback-only local process, and are never saved or logged. Share the passphrase through a separate channel.
+- Keep a separate backup of the entire `SovereignMeshVault/` directory on an encrypted disk or in an encrypted backup system. An encrypted bundle backs up records, not the active sigil verifier or its rotation history. A stale full-vault backup can restore old verifier/history state, so protect it and verify before restoring.
 - Limits the ledger to 1,000 records and bundle files to 100 MiB before encryption (plus the small encryption header/tag).
 - Allows older unencrypted `.bundle` files only after an explicit confirmation in the CLI or browser. These files remain readable to anyone who obtains them.
 - Does not sync, publish, or push local data to GitHub.
