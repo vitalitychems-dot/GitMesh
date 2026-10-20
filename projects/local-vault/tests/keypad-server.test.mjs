@@ -24,6 +24,18 @@ test("iPhone tunnel instructions match the keypad default and origin-port valida
   assert.equal(DEFAULT_PORT, 8782);
 });
 
+test("macOS and Linux SSH forwarding restrictions match the keypad default port", () => {
+  const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const hostInstructions = readme.match(/^### macOS or Linux host\s*\n([\s\S]*?)(?=^## Local data\s*$)/m)?.[1];
+
+  assert.ok(hostInstructions, "The README must include macOS and Linux SSH instructions.");
+  const permitOpenPort = hostInstructions.match(/^\s+PermitOpen 127\.0\.0\.1:(\d+)\s*$/m)?.[1];
+  const authorizedKeysPort = hostInstructions.match(/permitopen="127\.0\.0\.1:(\d+)"/)?.[1];
+
+  assert.equal(permitOpenPort, String(DEFAULT_PORT));
+  assert.equal(authorizedKeysPort, String(DEFAULT_PORT));
+});
+
 test("README documents matching custom ports for the keypad and iPhone tunnel", () => {
   const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
