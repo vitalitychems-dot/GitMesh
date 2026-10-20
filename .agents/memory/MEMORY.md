@@ -3,3 +3,4 @@
 - [Private mesh identity](private-mesh-identity.md) — private agent mesh; no social identity or untraceability claims; share only approved, token-efficient context with supported agents.
 - [Runtime environment guards](runtime-environment-guards.md) — REPLIT_ENVIRONMENT can say production in the workspace; use the documented deployment marker for app-environment guards.
 - [Subprocess timeout tests](subprocess-timeout-tests.md) — timeout-killed child processes may not run exit hooks; assert PID termination instead.
+- [Browser validation boundaries](browser-validation-boundaries.md) — Chromium, WebKit emulation and physical iOS are separate verification targets for key saving.
