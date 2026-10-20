@@ -474,6 +474,49 @@ test("authentication rotates a version-2 credential into the maximum safe genera
   assertNoPlaintextSigil(authFile, activeSigil, session.currentSigil);
 });
 
+test("cancelling the final safe rotation leaves the current sigil active and grants no access", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "cancel-final-generation-active-sigil-2026";
+  const salt = "e".repeat(32);
+  writeAuthFixture(authFile, {
+    version: 2,
+    salt,
+    verifier: verifier(activeSigil, salt),
+    generation: Number.MAX_SAFE_INTEGER - 1,
+    usedSigilHashes: [],
+  });
+  const before = fs.readFileSync(authFile);
+  let confirmationPromptCount = 0;
+
+  const cancelFinalRotation = async () => {
+    let session;
+    await assert.rejects(
+      async () => {
+        session = await setupOrAuthenticate({
+          authFile,
+          promptLineFn: getPrompt([activeSigil]),
+          promptTextFn: async (prompt) => {
+            confirmationPromptCount += 1;
+            assert.match(prompt, /Type SAVED to activate it/);
+            return "CANCEL";
+          },
+          log: () => {},
+        });
+      },
+      /Rotation cancelled/,
+    );
+    assert.equal(session, undefined, "a cancelled rotation must not grant an authenticated session");
+    assert.deepEqual(fs.readFileSync(authFile), before);
+  };
+
+  await cancelFinalRotation();
+  await cancelFinalRotation();
+
+  assert.equal(confirmationPromptCount, 2, "the unchanged active sigil must remain accepted after cancellation");
+  assert.equal(loadAuth(authFile).generation, Number.MAX_SAFE_INTEGER - 1);
+  assert.deepEqual(loadAuth(authFile).usedSigilHashes, []);
+});
+
 test("authentication rejects rotation at the maximum safe generation without prompting or rewriting credentials", async () => {
   const authFile = makeAuthPath();
   const activeSigil = "maximum-generation-active-sigil-2026";
