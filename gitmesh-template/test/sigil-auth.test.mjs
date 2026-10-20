@@ -34,6 +34,10 @@ function loadAuth(authFile) {
   return JSON.parse(fs.readFileSync(authFile, "utf8"));
 }
 
+function writeAuthFixture(authFile, auth, mode = 0o600) {
+  fs.writeFileSync(authFile, JSON.stringify(auth), { mode });
+}
+
 function failCredentialRename(auth, authFile, options = {}) {
   return saveAuth(auth, authFile, {
     ...options,
@@ -150,13 +154,13 @@ test("simultaneous first-time setup allows only one sigil to become active", asy
 test("authentication rejects malformed consumed-sigil hashes before prompting or rewriting credentials", async () => {
   const authFile = makeAuthPath();
   const currentSigil = "current-admin-sigil-2026";
-  fs.writeFileSync(authFile, JSON.stringify({
+  writeAuthFixture(authFile, {
     version: 2,
     salt: "a".repeat(32),
     verifier: verifier(currentSigil, "a".repeat(32)),
     generation: 1,
     usedSigilHashes: ["not-a-valid-sha256-hash"],
-  }));
+  });
   const before = fs.readFileSync(authFile);
   let promptCount = 0;
 
@@ -180,13 +184,13 @@ test("authentication rejects duplicate consumed-sigil hashes before prompting or
   const authFile = makeAuthPath();
   const currentSigil = "current-admin-sigil-2026";
   const consumedHash = fingerprint("previously-consumed-sigil-2025");
-  fs.writeFileSync(authFile, JSON.stringify({
+  writeAuthFixture(authFile, {
     version: 2,
     salt: "b".repeat(32),
     verifier: verifier(currentSigil, "b".repeat(32)),
     generation: 2,
     usedSigilHashes: [consumedHash, consumedHash],
-  }));
+  });
   const before = fs.readFileSync(authFile);
   let promptCount = 0;
 
@@ -210,13 +214,13 @@ test("authentication rejects an active sigil already marked as consumed without 
   const authFile = makeAuthPath();
   const activeSigil = "active-but-consumed-sigil-2026";
   const salt = "c".repeat(32);
-  fs.writeFileSync(authFile, JSON.stringify({
+  writeAuthFixture(authFile, {
     version: 2,
     salt,
     verifier: verifier(activeSigil, salt),
     generation: 3,
     usedSigilHashes: [fingerprint(activeSigil)],
-  }));
+  });
   const before = fs.readFileSync(authFile);
   let authenticationPromptCount = 0;
   let replacementConfirmationCount = 0;
@@ -246,13 +250,13 @@ test("authentication rejects unsafe and negative generation counters before prom
   for (const generation of [Number.MAX_SAFE_INTEGER + 1, -1]) {
     const authFile = makeAuthPath();
     const salt = "e".repeat(32);
-    fs.writeFileSync(authFile, JSON.stringify({
+    writeAuthFixture(authFile, {
       version: 2,
       salt,
       verifier: verifier("current-admin-sigil-2026", salt),
       generation,
       usedSigilHashes: [],
-    }));
+    });
     const before = fs.readFileSync(authFile);
     let promptCount = 0;
 
@@ -274,15 +278,93 @@ test("authentication rejects unsafe and negative generation counters before prom
   }
 });
 
+test("private credential permissions allow authentication to reach confirmation", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "private-permissions-active-sigil-2026";
+  const salt = "f".repeat(32);
+  writeAuthFixture(authFile, {
+    version: 2,
+    salt,
+    verifier: verifier(activeSigil, salt),
+    generation: 1,
+    usedSigilHashes: [],
+  });
+  if (process.platform !== "win32") {
+    fs.chmodSync(authFile, 0o600);
+    assert.equal(fs.statSync(authFile).mode & 0o777, 0o600);
+  }
+  const before = fs.readFileSync(authFile);
+  let authenticationPromptCount = 0;
+  let replacementConfirmationCount = 0;
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: async () => {
+        authenticationPromptCount += 1;
+        return activeSigil;
+      },
+      promptTextFn: async () => {
+        replacementConfirmationCount += 1;
+        return "CANCEL";
+      },
+      log: () => {},
+    }),
+    /Rotation cancelled/,
+  );
+
+  assert.equal(authenticationPromptCount, 1);
+  assert.equal(replacementConfirmationCount, 1);
+  assert.deepEqual(fs.readFileSync(authFile), before);
+});
+
+test("POSIX credentials readable or writable by other users are rejected before prompting", {
+  skip: process.platform === "win32",
+}, async () => {
+  for (const mode of [0o640, 0o602]) {
+    const authFile = makeAuthPath();
+    const activeSigil = "broad-permissions-active-sigil-2026";
+    const salt = "9".repeat(32);
+    writeAuthFixture(authFile, {
+      version: 2,
+      salt,
+      verifier: verifier(activeSigil, salt),
+      generation: 1,
+      usedSigilHashes: [],
+    });
+    fs.chmodSync(authFile, mode);
+    assert.equal(fs.statSync(authFile).mode & 0o777, mode);
+    const before = fs.readFileSync(authFile);
+    let promptCount = 0;
+
+    await assert.rejects(
+      setupOrAuthenticate({
+        authFile,
+        promptLineFn: async () => {
+          promptCount += 1;
+          throw new Error("Unsafe credentials must be rejected before prompting.");
+        },
+        log: () => {},
+      }),
+      /local credential file is invalid/,
+      `mode ${mode.toString(8)} should be rejected`,
+    );
+
+    assert.equal(promptCount, 0, `mode ${mode.toString(8)} must not reach the sign-in prompt`);
+    assert.deepEqual(fs.readFileSync(authFile), before, `mode ${mode.toString(8)} must not rewrite credentials`);
+    assert.equal(fs.statSync(authFile).mode & 0o777, mode, `mode ${mode.toString(8)} must remain unchanged`);
+  }
+});
+
 test("a version-1 credential migrates on successful sign-in and consumes the old sigil", async () => {
   const authFile = makeAuthPath();
   const oldSigil = "legacy-passphrase-2024";
   const salt = "a".repeat(32);
-  fs.writeFileSync(authFile, JSON.stringify({
+  writeAuthFixture(authFile, {
     version: 1,
     salt,
     verifier: verifier(oldSigil, salt),
-  }));
+  });
   const output = [];
 
   const session = await setupOrAuthenticate({
@@ -339,13 +421,13 @@ test("authentication rotates a version-2 credential into the maximum safe genera
   const authFile = makeAuthPath();
   const activeSigil = "penultimate-generation-active-sigil-2026";
   const salt = "d".repeat(32);
-  fs.writeFileSync(authFile, JSON.stringify({
+  writeAuthFixture(authFile, {
     version: 2,
     salt,
     verifier: verifier(activeSigil, salt),
     generation: Number.MAX_SAFE_INTEGER - 1,
     usedSigilHashes: [],
-  }));
+  });
   const output = [];
 
   const session = await setupOrAuthenticate({
@@ -368,13 +450,13 @@ test("authentication rejects rotation at the maximum safe generation without pro
   const authFile = makeAuthPath();
   const activeSigil = "maximum-generation-active-sigil-2026";
   const salt = "c".repeat(32);
-  fs.writeFileSync(authFile, JSON.stringify({
+  writeAuthFixture(authFile, {
     version: 2,
     salt,
     verifier: verifier(activeSigil, salt),
     generation: Number.MAX_SAFE_INTEGER,
     usedSigilHashes: [],
-  }));
+  });
   const before = fs.readFileSync(authFile);
   let replacementPromptCount = 0;
 
