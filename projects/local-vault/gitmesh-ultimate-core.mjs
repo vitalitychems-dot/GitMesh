@@ -248,13 +248,22 @@ function readAuth(authFile = AUTH_FILE) {
 
 export function saveAuth(auth, authFile = AUTH_FILE, {
   renameSync = fs.renameSync,
+  openSync = fs.openSync,
+  closeSync = fs.closeSync,
   writeFileSync = fs.writeFileSync,
   linkSync = fs.linkSync,
+  randomUUID = crypto.randomUUID,
   exclusive = false,
 } = {}) {
-  const temporaryPath = path.join(path.dirname(authFile), `.auth-${crypto.randomUUID()}.tmp`);
+  const temporaryPath = path.join(path.dirname(authFile), `.auth-${randomUUID()}.tmp`);
+  let temporaryFileOwned = false;
+  let fileDescriptor;
   try {
-    writeFileSync(temporaryPath, `${JSON.stringify(auth)}\n`, { flag: "wx", mode: 0o600 });
+    fileDescriptor = openSync(temporaryPath, "wx", 0o600);
+    temporaryFileOwned = true;
+    writeFileSync(fileDescriptor, `${JSON.stringify(auth)}\n`);
+    closeSync(fileDescriptor);
+    fileDescriptor = undefined;
     if (exclusive) {
       try {
         linkSync(temporaryPath, authFile);
@@ -269,7 +278,12 @@ export function saveAuth(auth, authFile = AUTH_FILE, {
     }
     renameSync(temporaryPath, authFile);
   } catch (error) {
-    try { fs.unlinkSync(temporaryPath); } catch {}
+    if (fileDescriptor !== undefined) {
+      try { closeSync(fileDescriptor); } catch {}
+    }
+    if (temporaryFileOwned) {
+      try { fs.unlinkSync(temporaryPath); } catch {}
+    }
     throw error;
   }
 }
