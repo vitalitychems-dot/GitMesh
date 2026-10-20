@@ -174,6 +174,31 @@ h3 { margin: 1.6rem 0 0.7rem; font-size: 1.05rem; }
 .notice { min-height: 1.5rem; margin: 0.8rem 0 0; color: #a9f0df; line-height: 1.4; }
 .notice.error { color: #ffb5a8; }
 
+.bundle-dialog {
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: min(90vh, 42rem);
+  margin: auto;
+  padding: clamp(1rem, 4vw, 1.5rem);
+  border: 1px solid #526172;
+  border-radius: 1rem;
+  background: #191f28;
+  color: #f2f0eb;
+}
+.bundle-dialog::backdrop { background: rgb(4 8 12 / 76%); }
+.bundle-dialog form { display: grid; gap: 0.65rem; }
+.bundle-dialog label { margin-top: 0.2rem; color: #d9e0e8; font-size: 0.9rem; font-weight: 650; }
+.bundle-dialog input {
+  width: 100%;
+  min-height: 2.8rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #46515e;
+  border-radius: 0.7rem;
+  background: #11161d;
+  color: #f2f0eb;
+}
+.bundle-dialog #bundle-confirm-wrap { display: grid; gap: 0.65rem; }
+.bundle-dialog .actions { justify-content: flex-end; }
+
 @media (min-width: 700px) {
   .shell { width: min(100% - 2rem, 46rem); padding-top: 2.5rem; }
   .keyboard { gap: 0.45rem; }

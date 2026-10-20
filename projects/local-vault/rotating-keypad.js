@@ -30,6 +30,16 @@ const ui = {
   refreshBundles: document.querySelector("#refresh-bundles"),
   bundleList: document.querySelector("#bundle-list"),
   bundleDownload: document.querySelector("#bundle-download"),
+  bundleDialog: document.querySelector("#bundle-dialog"),
+  bundleDialogForm: document.querySelector("#bundle-dialog-form"),
+  bundleDialogTitle: document.querySelector("#bundle-dialog-title"),
+  bundleDialogHelp: document.querySelector("#bundle-dialog-help"),
+  bundlePassphrase: document.querySelector("#bundle-passphrase"),
+  bundlePassphraseConfirm: document.querySelector("#bundle-passphrase-confirm"),
+  bundleConfirmWrap: document.querySelector("#bundle-confirm-wrap"),
+  bundleDialogError: document.querySelector("#bundle-dialog-error"),
+  bundleDialogCancel: document.querySelector("#bundle-dialog-cancel"),
+  bundleDialogSubmit: document.querySelector("#bundle-dialog-submit"),
   notice: document.querySelector("#notice"),
   backspace: document.querySelector("#backspace"),
   clearEntry: document.querySelector("#clear-entry"),
@@ -46,6 +56,8 @@ const state = {
   uppercase: false,
   pendingAttempt: "",
   pendingSigil: "",
+  bundleDialogMode: "",
+  pendingBundleFilename: "",
 };
 
 function showNotice(message, isError = false) {
@@ -214,20 +226,31 @@ async function loadBundles() {
     return;
   }
   for (const filename of result.bundles) {
+    const encrypted = filename.endsWith(".bundle.enc");
     const item = document.createElement("li");
     item.className = "bundle-card";
     const label = document.createElement("span");
-    label.textContent = filename;
+    label.textContent = `${filename} · ${encrypted ? "encrypted" : "unencrypted legacy bundle"}`;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "quiet-button";
-    button.textContent = "Import";
-    button.setAttribute("aria-label", `Import ${filename}`);
+    button.textContent = encrypted ? "Import encrypted" : "Import legacy";
+    button.setAttribute("aria-label", `${encrypted ? "Import encrypted" : "Import unencrypted legacy"} bundle ${filename}`);
     button.addEventListener("click", async () => {
-      if (!window.confirm(`Import records from ${filename}? Existing records are kept.`)) return;
+      if (encrypted) {
+        openBundleDialog("import", filename);
+        return;
+      }
+      if (!window.confirm(
+        `${filename} is unencrypted and readable by anyone who obtains the file. ` +
+        "Import it only if you explicitly accept that risk. Existing records are kept. Continue?"
+      )) return;
       button.disabled = true;
       try {
-        const imported = await api("/api/import", { method: "POST", body: { filename } });
+        const imported = await api("/api/import", {
+          method: "POST",
+          body: { filename, allowUnencrypted: true },
+        });
         showNotice(`Import complete: ${imported.imported} added, ${imported.duplicates} already present.`);
         await loadRecords();
       } catch (error) {
@@ -403,19 +426,96 @@ ui.recordForm.addEventListener("submit", async (event) => {
   }
 });
 
-ui.exportBundle.addEventListener("click", async () => {
-  ui.exportBundle.disabled = true;
-  try {
-    const result = await api("/api/export", { method: "POST", body: {} });
-    ui.bundleDownload.href = result.download;
-    ui.bundleDownload.textContent = `Download ${result.filename}`;
-    ui.bundleDownload.hidden = false;
-    showNotice("Bundle exported. It is not encrypted; download it only for transfer through a trusted channel.");
-  } catch (error) {
-    showNotice(error.message, true);
-  } finally {
-    ui.exportBundle.disabled = false;
+function openBundleDialog(mode, filename = "") {
+  state.bundleDialogMode = mode;
+  state.pendingBundleFilename = filename;
+  ui.bundleDialogForm.reset();
+  ui.bundleDialogError.hidden = true;
+  ui.bundleDialogError.textContent = "";
+  const exporting = mode === "export";
+  ui.bundleDialogTitle.textContent = exporting ? "Encrypt bundle before download" : "Unlock encrypted bundle";
+  ui.bundleDialogHelp.textContent = exporting
+    ? "Choose a unique passphrase of at least 16 characters. It is sent only to this loopback service on this device, used transiently, and never saved or logged. Anyone receiving the bundle needs this passphrase."
+    : "Enter the passphrase used to encrypt this bundle. GitMesh authenticates it before importing; failed authentication adds no records.";
+  ui.bundleConfirmWrap.hidden = !exporting;
+  ui.bundlePassphraseConfirm.required = exporting;
+  ui.bundlePassphrase.autocomplete = "off";
+  ui.bundlePassphraseConfirm.autocomplete = "off";
+  ui.bundleDialogSubmit.textContent = exporting ? "Encrypt and export" : "Decrypt and import";
+  if (typeof ui.bundleDialog.showModal !== "function") {
+    showNotice("This browser cannot open the secure bundle dialog.", true);
+    state.bundleDialogMode = "";
+    state.pendingBundleFilename = "";
+    return;
   }
+  ui.bundleDialog.showModal();
+  ui.bundlePassphrase.focus();
+}
+
+ui.bundleDialogForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!ui.bundleDialogForm.reportValidity()) return;
+  const mode = state.bundleDialogMode;
+  if (mode !== "export" && mode !== "import") return;
+
+  const passphrase = ui.bundlePassphrase.value;
+  const confirmation = ui.bundlePassphraseConfirm.value;
+  if (mode === "export" && passphrase.normalize("NFC") !== confirmation.normalize("NFC")) {
+    ui.bundleDialogError.textContent = "The passphrases do not match.";
+    ui.bundleDialogError.hidden = false;
+    ui.bundlePassphraseConfirm.focus();
+    return;
+  }
+
+  ui.bundleDialogSubmit.disabled = true;
+  ui.bundleDialogCancel.disabled = true;
+  ui.bundleDialogError.hidden = true;
+  ui.bundleDialogError.textContent = "";
+  const body = mode === "export"
+    ? { passphrase }
+    : { filename: state.pendingBundleFilename, passphrase };
+  const request = api(mode === "export" ? "/api/export" : "/api/import", {
+    method: "POST",
+    body,
+  });
+  body.passphrase = "";
+  ui.bundlePassphrase.value = "";
+  ui.bundlePassphraseConfirm.value = "";
+
+  try {
+    const result = await request;
+    if (mode === "export") {
+      ui.bundleDownload.href = result.download;
+      ui.bundleDownload.download = result.filename;
+      ui.bundleDownload.textContent = `Download encrypted bundle: ${result.filename}`;
+      ui.bundleDownload.hidden = false;
+      showNotice("Encrypted bundle prepared. Share the passphrase separately from the bundle.");
+    } else {
+      await loadRecords();
+      showNotice(`Import complete: ${result.imported} added, ${result.duplicates} already present.`);
+    }
+    ui.bundleDialog.close();
+  } catch (error) {
+    ui.bundleDialogError.textContent = error.message;
+    ui.bundleDialogError.hidden = false;
+    ui.bundlePassphrase.focus();
+  } finally {
+    ui.bundleDialogSubmit.disabled = false;
+    ui.bundleDialogCancel.disabled = false;
+  }
+});
+
+ui.bundleDialogCancel.addEventListener("click", () => ui.bundleDialog.close());
+ui.bundleDialog.addEventListener("close", () => {
+  ui.bundleDialogForm.reset();
+  ui.bundleDialogError.hidden = true;
+  ui.bundleDialogError.textContent = "";
+  state.bundleDialogMode = "";
+  state.pendingBundleFilename = "";
+});
+
+ui.exportBundle.addEventListener("click", async () => {
+  openBundleDialog("export");
 });
 
 ui.refreshBundles.addEventListener("click", async () => {

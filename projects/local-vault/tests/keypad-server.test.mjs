@@ -52,6 +52,8 @@ test("local keypad uses per-session opaque codes and only activates a replacemen
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-keypad-"));
   const authFile = path.join(tempDirectory, "active_sigil.hash");
   const localRecords = [];
+  let exportCalls = 0;
+  let encryptedImportCalls = 0;
   const server = createKeypadServer({
     authFile,
     records: () => localRecords,
@@ -65,11 +67,21 @@ test("local keypad uses per-session opaque codes and only activates a replacemen
       localRecords.push(record);
       return record;
     },
-    makeBundle: () => "mesh_snapshot_test.bundle",
-    inboundBundles: () => ["known.bundle"],
+    makeBundle: (passphrase) => {
+      exportCalls += 1;
+      assert.equal(passphrase, "bundle-passphrase-16");
+      return "mesh_snapshot_test.bundle.enc";
+    },
+    inboundBundles: () => ["known.bundle", "encrypted.bundle.enc"],
     importExistingBundle: (filename) => {
       assert.equal(filename, "known.bundle");
       return { imported: 2, duplicates: 1 };
+    },
+    importEncryptedExistingBundle: (filename, passphrase) => {
+      encryptedImportCalls += 1;
+      assert.equal(filename, "encrypted.bundle.enc");
+      assert.equal(passphrase, "bundle-passphrase-16");
+      return { imported: 1, duplicates: 0 };
     },
   });
 
@@ -132,23 +144,56 @@ test("local keypad uses per-session opaque codes and only activates a replacemen
   assert.equal(listedRecords.json.records.length, 1);
   assert.equal(listedRecords.json.records[0].objectiveScope, "local test");
 
+  const rejectedExport = await request(port, "/api/export", {
+    method: "POST",
+    origin,
+    cookie: setupCookie,
+    body: { passphrase: "short" },
+  });
+  assert.equal(rejectedExport.status, 400);
+  assert.equal(exportCalls, 0);
   const exported = await request(port, "/api/export", {
     method: "POST",
     origin,
     cookie: setupCookie,
-    body: {},
+    body: { passphrase: "bundle-passphrase-16" },
   });
   assert.equal(exported.status, 200);
-  assert.equal(exported.json.filename, "mesh_snapshot_test.bundle");
+  assert.equal(exportCalls, 1);
+  assert.equal(exported.json.filename, "mesh_snapshot_test.bundle.enc");
+  assert.equal(exported.text.includes("bundle-passphrase-16"), false);
   const inbound = await request(port, "/api/inbound", { cookie: setupCookie });
-  assert.deepEqual(inbound.json.bundles, ["known.bundle"]);
-  const imported = await request(port, "/api/import", {
+  assert.deepEqual(inbound.json.bundles, ["known.bundle", "encrypted.bundle.enc"]);
+  const unconfirmedLegacyImport = await request(port, "/api/import", {
     method: "POST",
     origin,
     cookie: setupCookie,
     body: { filename: "known.bundle" },
   });
+  assert.equal(unconfirmedLegacyImport.status, 400);
+  const imported = await request(port, "/api/import", {
+    method: "POST",
+    origin,
+    cookie: setupCookie,
+    body: { filename: "known.bundle", allowUnencrypted: true },
+  });
   assert.deepEqual(imported.json, { imported: 2, duplicates: 1 });
+  const rejectedEncryptedImport = await request(port, "/api/import", {
+    method: "POST",
+    origin,
+    cookie: setupCookie,
+    body: { filename: "encrypted.bundle.enc", passphrase: "short" },
+  });
+  assert.equal(rejectedEncryptedImport.status, 400);
+  assert.equal(encryptedImportCalls, 0);
+  const encryptedImport = await request(port, "/api/import", {
+    method: "POST",
+    origin,
+    cookie: setupCookie,
+    body: { filename: "encrypted.bundle.enc", passphrase: "bundle-passphrase-16" },
+  });
+  assert.deepEqual(encryptedImport.json, { imported: 1, duplicates: 0 });
+  assert.equal(encryptedImportCalls, 1);
   const rejectedBundle = await request(port, "/api/import", {
     method: "POST",
     origin,

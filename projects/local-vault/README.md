@@ -32,7 +32,7 @@ Then open `http://127.0.0.1:8782` in a browser on the same machine running Node.
 
 The keypad accepts only ASCII letters, digits, hyphen, and underscore. If an existing legacy sigil contains other characters, use the terminal CLI to sign in and rotate it to a generated sigil before using the browser keypad.
 
-The changing key labels are input obfuscation only. They are not a real language, encryption, a secure keyboard extension, or protection against a compromised device or software that can inspect the screen or browser. Sigil characters are entered through the visible buttons; a hardware keyboard can still navigate and activate those buttons for accessibility. The local browser console can add and list records and manually export/import Git bundles. Git bundles remain unencrypted. The existing terminal menu remains available.
+The changing key labels are input obfuscation only. They are not a real language, encryption, a secure keyboard extension, or protection against a compromised device or software that can inspect the screen or browser. Sigil characters are entered through the visible buttons; a hardware keyboard can still navigate and activate those buttons for accessibility. The local browser console can add and list records and manually export/import Git bundles. New exports are encrypted before download; the existing terminal menu remains available.
 
 ## Local data
 
@@ -40,7 +40,7 @@ Runtime data lives under `projects/local-vault/SovereignMeshVault/`:
 
 - `ledger_matrix/` — local JSON records.
 - `drops_inbound/` — bundles available for manual import.
-- `bundles_outbound/` — exported bundles.
+- `bundles_outbound/` — newly exported encrypted bundles (`.bundle.enc`); older `.bundle` files, if present, are unencrypted.
 - `active_sigil.hash` — local verifier, rotation counter, and hashes of consumed sigils.
 
 The `.gitignore` in this folder excludes the entire vault from the public repository. The source code and documentation are intended to be committed; runtime records, credentials, and bundles are not.
@@ -48,14 +48,16 @@ The `.gitignore` in this folder excludes the entire vault from the public reposi
 ## Behavior and limits
 
 - Checks each record's SHA-256 checksum when listing or importing it.
-- Imports only a bundle explicitly selected from `drops_inbound`; it does not watch folders or execute incoming content.
-- Limits the ledger to 1,000 records and imported bundles to 100 MiB.
+- Imports only a bundle explicitly selected from `drops_inbound`; it does not watch folders or execute incoming content. Encrypted bundles must authenticate and decrypt before records can be imported.
+- Encrypts exports with AES-256-GCM and a per-bundle key derived from a user-held passphrase using scrypt. Passphrases must be 16–256 characters, are used transiently by the loopback-only local process, and are never saved or logged. Share the passphrase through a separate channel.
+- Limits the ledger to 1,000 records and bundle files to 100 MiB before encryption (plus the small encryption header/tag).
+- Allows older unencrypted `.bundle` files only after an explicit confirmation in the CLI or browser. These files remain readable to anyone who obtains them.
 - Does not sync, publish, or push local data to GitHub.
 - The separate source-sync script sends only the CLI source, README, and sync script to `vitalitychems-dot/GitMesh`; it never reads or uploads `SovereignMeshVault/`.
 - Rotates the admin sigil after each successful sign-in; the replacement is displayed once and must be saved before access is granted.
 - A restored older copy of the local vault can restore an older sigil verifier and rotation history. Protect backups and avoid restoring stale copies if you need to keep prior sigils permanently invalid.
 
-The scrypt verifier is local access control, not device encryption or account authentication. The sigil is shown in the terminal once per rotation, so store it somewhere secure. A checksum can detect accidental changes but is not a digital signature. Git bundles are unencrypted and readable by anyone who obtains them. File deletion cannot guarantee forensic erasure on SSDs, filesystems with journals, backups, or snapshots. Keep secrets and sensitive personal data out of records unless you have separately assessed the storage and transfer risks.
+The scrypt verifier is local access control, not device encryption or account authentication. The sigil is shown in the terminal once per rotation, so store it somewhere secure. A checksum can detect accidental changes but is not a digital signature. Encrypted bundles protect file contents from people who obtain the file, provided the passphrase is strong and kept separate; old unencrypted bundles are still readable. File deletion cannot guarantee forensic erasure on SSDs, filesystems with journals, backups, or snapshots. Keep secrets and sensitive personal data out of records unless you have separately assessed the storage and transfer risks.
 
 ## Sync source to GitHub
 
