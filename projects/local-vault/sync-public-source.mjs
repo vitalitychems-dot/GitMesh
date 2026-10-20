@@ -179,6 +179,63 @@ function readSourceMetadata(sourcePath, source, isJavaScript, syntaxOnly) {
   }
 }
 
+function readSourceContent(sourcePath, source, fileInfo, isJavaScript, syntaxOnly) {
+  const posixFlags = process.platform === "win32"
+    ? 0
+    : (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+  let fileDescriptor;
+  let content;
+  let changed = false;
+  let failed = false;
+  try {
+    fileDescriptor = fs.openSync(sourcePath, fs.constants.O_RDONLY | posixFlags);
+    const openedInfo = fs.fstatSync(fileDescriptor, { bigint: true });
+    if (!openedInfo.isFile() || !sameFileSnapshot(fileInfo, openedInfo)) {
+      changed = true;
+    } else {
+      content = fs.readFileSync(fileDescriptor);
+      const readInfo = fs.fstatSync(fileDescriptor, { bigint: true });
+      if (
+        !sameFileSnapshot(openedInfo, readInfo) ||
+        BigInt(content.length) !== openedInfo.size
+      ) {
+        changed = true;
+      }
+    }
+  } catch {
+    failed = true;
+  } finally {
+    if (fileDescriptor !== undefined) {
+      try {
+        fs.closeSync(fileDescriptor);
+      } catch {
+        failed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    const retryInstruction = syntaxOnly
+      ? "Save the intended file and rerun --check-syntax."
+      : "Save the intended file and retry the source sync; syntax validation will run again.";
+    throw new Error(
+      `JavaScript source changed during syntax validation: ${source}. ` +
+      `${retryInstruction} No GitHub requests were made.`,
+    );
+  }
+  if (failed || content === undefined) {
+    const fileLabel = isJavaScript ? "JavaScript source" : "Source file";
+    const repairInstruction = syntaxOnly
+      ? "Check its permissions and confirm the file still exists, then rerun --check-syntax."
+      : "Check its permissions and confirm the file still exists, then retry the source sync.";
+    throw new Error(
+      `${fileLabel} ${source} could not be opened. ${repairInstruction} ` +
+      "No GitHub requests were made.",
+    );
+  }
+  return content;
+}
+
 function readSourceFiles({ syntaxOnly = false } = {}) {
   const sourceFiles = syntaxOnly
     ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
@@ -191,19 +248,7 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
     if (fileInfo.isSymbolicLink() || fileInfo.size > BigInt(MAX_SOURCE_BYTES) || !fileInfo.isFile()) {
       throw new Error(invalidSourceMessage(source, fileInfo, syntaxOnly));
     }
-    let content;
-    try {
-      content = fs.readFileSync(sourcePath);
-    } catch {
-      const fileLabel = isJavaScript ? "JavaScript source" : "Source file";
-      const repairInstruction = syntaxOnly
-        ? "Check its permissions and confirm the file still exists, then rerun --check-syntax."
-        : "Check its permissions and confirm the file still exists, then retry the source sync.";
-      throw new Error(
-        `${fileLabel} ${source} could not be opened. ${repairInstruction} ` +
-        "No GitHub requests were made.",
-      );
-    }
+    const content = readSourceContent(sourcePath, source, fileInfo, isJavaScript, syntaxOnly);
     const currentInfo = readSourceMetadata(sourcePath, source, isJavaScript, syntaxOnly);
     if (!sameFileSnapshot(fileInfo, currentInfo) || BigInt(content.length) !== fileInfo.size) {
       const retryInstruction = syntaxOnly
