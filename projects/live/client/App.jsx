@@ -78,7 +78,11 @@ function AccessPage() {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        if (response.status === 401) throw new Error("That admin key was not accepted.");
+        if (response.status === 401) {
+          throw new Error(
+            "That key was not accepted. Use the latest saved web admin key, not your offline vault sigil or a key replaced by a confirmed rotation.",
+          );
+        }
         if (response.status === 409) throw new Error("Another key rotation is already in progress. Wait a moment and try again.");
         if (response.status === 429) throw new Error("Too many attempts. Pause briefly before trying again.");
         if (response.status === 503) throw new Error("Admin access is not configured or is temporarily unavailable.");
@@ -221,18 +225,34 @@ function AccessPage() {
           </section>
         ) : (
           <form className="access-form" onSubmit={submitSigil}>
-            <label className="field-label" htmlFor="admin-sigil">Admin key</label>
+            <label className="field-label" htmlFor="admin-sigil">Separate web admin key</label>
             <div className="input-wrap">
-              <input ref={inputRef} id="admin-sigil" type="password" autoComplete="current-password" spellCheck="false" required value={sigil} onChange={(event) => setSigil(event.target.value)} placeholder="Enter your one-time admin key" />
+              <input
+                ref={inputRef}
+                id="admin-sigil"
+                type="password"
+                autoComplete="current-password"
+                spellCheck="false"
+                required
+                value={sigil}
+                onChange={(event) => setSigil(event.target.value)}
+                placeholder="Enter your current web admin key"
+                aria-describedby="admin-key-help admin-key-security"
+              />
               <span className="input-mark" aria-hidden="true">KEY</span>
             </div>
             <button className="button access-submit" type="submit" disabled={busy || !sigil.trim()}>
               {busy ? "Checking key…" : "Continue to admin"} <span aria-hidden="true">↗</span>
             </button>
-            <p className="field-help">The key is sent only to this GitMesh service. No key is placed in a URL or saved by this page.</p>
+            <p id="admin-key-help" className="field-help">
+              This is not your offline vault sigil. After each confirmed sign-in, use the latest web key you saved; the replaced key stops working.
+            </p>
+            <p id="admin-key-security" className="field-help">
+              The initial setup Secret does not reset an existing key. This page sends the key only to this GitMesh service and does not save it.
+            </p>
           </form>
         )}
-        {error && <div className="notice notice-error" role="alert">{error}</div>}
+        {error && <div id="admin-key-error" className="notice notice-error" role="alert">{error}</div>}
         {phase === "error" && <button className="text-button retry-button" type="button" onClick={() => window.location.reload()}>Retry session check</button>}
         <div className="access-rule"><span /> PRIVATE ACCESS ONLY <span /> NO PUBLIC SIGNUP</div>
       </div>
