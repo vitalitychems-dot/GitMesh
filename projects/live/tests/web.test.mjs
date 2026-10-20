@@ -166,6 +166,44 @@ test("auth database failures return no private diagnostic detail", async (t) => 
   assert.equal(response.status, 503);
   assert.doesNotMatch(await response.text(), /PRIVATE|SECRET|stack|Error:/);
 });
+test("approved context is available only to an administrator and stays manual, compact, and secret-free", async (t) => {
+  const auth = {
+    configured: async () => true,
+    session: async (value) => value === "approved-test-session",
+  };
+  const base = await serve(t, await createApp({ auth, serveFrontend: false }));
+  const anonymous = await fetch(`${base}/api/admin/context-pack`);
+  assert.equal(anonymous.status, 401);
+
+  const response = await fetch(`${base}/api/admin/context-pack`, {
+    headers: { Cookie: "gm_admin=approved-test-session" },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const pack = await response.json();
+  assert.equal(pack.format, "gitmesh-approved-context-v1");
+  assert.equal(pack.delivery, "manual-copy-only");
+  assert.equal(pack.transport, "not_connected");
+  assert.match(pack.markdown, /\[IDENTITY\]/);
+  assert.match(pack.markdown, /\[STATUS\]/);
+  assert.match(pack.markdown, /\[FLOW\]/);
+  assert.match(pack.markdown, /\[BOUNDARIES\]/);
+  assert.match(pack.markdown, /\[PRIVACY\]/);
+  assert.match(pack.markdown, /\[DELIVERY\]/);
+  assert.ok(Buffer.byteLength(pack.markdown, "utf8") <= 2000);
+  assert.doesNotMatch(pack.markdown, /gh[pousr]_[A-Za-z0-9]{20,}/);
+  assert.doesNotMatch(pack.markdown, /PRIVATE_DATABASE_SECRET_SENTINEL|test-only-initial-key-never-use/);
+  assert.match(pack.markdown, /Never share GitHub tokens, web admin keys, offline sigils, credentials/);
+  assert.match(pack.markdown, /No agent automatically receives it/);
+});
+test("admin UI offers an explicit manual context handoff and reports copy status accessibly", async () => {
+  const app = await readFile(new URL("../client/App.jsx", import.meta.url), "utf8");
+  assert.match(app, /Manual agent handoff/);
+  assert.match(app, /Copy approved context/);
+  assert.match(app, /No agent is connected to this app/);
+  assert.match(app, /aria-live="polite"/);
+  assert.match(app, /nothing was sent automatically/);
+});
 test("web sign-in distinguishes the active web key from the offline vault sigil", async () => {
   const app = await readFile(new URL("../client/App.jsx", import.meta.url), "utf8");
   assert.match(app, /Separate web admin key/);

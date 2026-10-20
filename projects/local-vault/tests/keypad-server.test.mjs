@@ -5,7 +5,24 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createKeypadServer, listenLocalOnly } from "../keypad-server.mjs";
+import { createKeypadServer, DEFAULT_PORT, listenLocalOnly } from "../keypad-server.mjs";
+
+test("iPhone tunnel instructions match the keypad default and origin-port validation", () => {
+  const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const serverSource = fs.readFileSync(new URL("../keypad-server.mjs", import.meta.url), "utf8");
+  const iphoneInstructions = readme.match(/^### iPhone\s*\n([\s\S]*)/m)?.[1];
+
+  assert.ok(iphoneInstructions, "The README must include iPhone tunnel instructions.");
+  const localPort = iphoneInstructions.match(/local port `(\d+)`/)?.[1];
+  const hostPort = iphoneInstructions.match(/to \*\*`127\.0\.0\.1:(\d+)` on the host\*\*/)?.[1];
+  const safariPort = iphoneInstructions.match(/open `http:\/\/127\.0\.0\.1:(\d+)`/)?.[1];
+
+  assert.equal(localPort, String(DEFAULT_PORT));
+  assert.equal(hostPort, String(DEFAULT_PORT));
+  assert.equal(safariPort, String(DEFAULT_PORT));
+  assert.match(serverSource, /parsed\.port === String\(request\.socket\.localPort\)/);
+  assert.equal(DEFAULT_PORT, 8782);
+});
 
 function request(port, route, { method = "GET", body, cookie, origin } = {}) {
   return new Promise((resolve, reject) => {

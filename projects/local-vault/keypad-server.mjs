@@ -29,6 +29,7 @@ const SESSION_TTL_MS = 15 * 60 * 1000;
 const FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const FAILURE_LIMIT = 5;
 const LOCAL_HOST = "127.0.0.1";
+export const DEFAULT_PORT = 8782;
 
 function randomId(bytes = 24) {
   return crypto.randomBytes(bytes).toString("base64url");
@@ -572,7 +573,7 @@ export function listenLocalOnly(server, port, onReady) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     ensureVault();
-    const port = Number(process.env.GITMESH_LOCAL_PORT || 8782);
+    const port = Number(process.env.GITMESH_LOCAL_PORT || DEFAULT_PORT);
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
       throw new Error("GITMESH_LOCAL_PORT must be an integer between 1024 and 65535.");
     }
