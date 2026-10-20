@@ -23,3 +23,38 @@ To update an action:
 
 The current pins were checked against the official release tags and verified
 commits. Release comments are for humans; only the full SHAs determine what runs.
+
+## Automated proposals, manual acceptance
+
+`dependabot.yml` requests weekly Monday GitHub Actions update proposals, limited
+to `actions/checkout` and `actions/setup-node`, with at most two open version-update
+PRs. It does not enable updates for application packages or other actions, and
+does not configure automatic merging. GitHub reads this configuration from the
+repository's default branch.
+
+Treat every bot proposal as unreviewed. Keep the full commit pin and matching
+release comment; reject a proposal that replaces them with a mutable tag.
+The exact reviewed-pin expectations intentionally make an action update fail CI
+until a maintainer performs the review above and updates the expected SHA/release
+pair in `projects/local-vault/tests/ci-action-pins.test.mjs`. Do not remove that
+gate or generate its expectations from the proposed workflow.
+
+Before accepting an update:
+
+- Review the official release, resolved commit, permissions, runtime and
+  credential/platform changes.
+- Update the workflow pin, release comment and reviewed test expectation
+  together, only after that review.
+- Preserve `permissions: contents: read` and `persist-credentials: false`.
+- Require all six Windows/macOS/Linux × Node 20/24 regression jobs to pass.
+- Have a human approve and merge; do not use an auto-merge rule for these PRs.
+
+Run the local, offline policy check with:
+
+```sh
+node --test projects/local-vault/tests/ci-action-pins.test.mjs
+```
+
+The configuration and tests do not set GitHub branch-protection rules or
+repository-level merge settings. Repository owners must enforce the human-review
+and required-check rules there as well; a green local test is not release approval.
