@@ -24,6 +24,16 @@ test("iPhone tunnel instructions match the keypad default and origin-port valida
   assert.equal(DEFAULT_PORT, 8782);
 });
 
+test("README documents matching custom ports for the keypad and iPhone tunnel", () => {
+  const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+  assert.match(readme, /GITMESH_LOCAL_PORT=8783 node projects\/local-vault\/keypad-server\.mjs/);
+  assert.match(readme, /\$env:GITMESH_LOCAL_PORT = "8783"/);
+  assert.match(readme, /forward local port `8783` to `127\.0\.0\.1:8783` on the host/);
+  assert.match(readme, /open `http:\/\/127\.0\.0\.1:8783` in Safari/);
+  assert.match(readme, /The SSH examples below use the default port `8782`/);
+});
+
 function request(port, route, { method = "GET", body, cookie, origin } = {}) {
   return new Promise((resolve, reject) => {
     const serialized = body === undefined ? undefined : JSON.stringify(body);

@@ -28,7 +28,22 @@ From the GitMesh repository root, start the optional browser console:
 node projects/local-vault/keypad-server.mjs
 ```
 
-Then open `http://127.0.0.1:8782` in a browser on the same machine running Node. The server binds only to the loopback interface; do not change it to `0.0.0.0`, publish the port, or treat Replit's hosted preview as a private tunnel. Stop it with Ctrl+C when finished. The browser keypad displays English keys, creates a fresh randomized mapping for each page session, and lets you hold a key to view its temporary session code. It does not accept sigils from the physical keyboard. The generated sigil is displayed once after sign-in and must be saved before the vault unlocks; cancelling keeps the old sigil active.
+By default, open `http://127.0.0.1:8782` in a browser on the same machine running Node. The server binds only to the loopback interface; do not change it to `0.0.0.0`, publish the port, or treat Replit's hosted preview as a private tunnel. Stop it with Ctrl+C when finished. The browser keypad displays English keys, creates a fresh randomized mapping for each page session, and lets you hold a key to view its temporary session code. It does not accept sigils from the physical keyboard. The generated sigil is displayed once after sign-in and must be saved before the vault unlocks; cancelling keeps the old sigil active.
+
+To use a custom port, choose one between `1024` and `65535` (for example, `8783`) and set `GITMESH_LOCAL_PORT` when starting the keypad. On macOS or Linux:
+
+```sh
+GITMESH_LOCAL_PORT=8783 node projects/local-vault/keypad-server.mjs
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:GITMESH_LOCAL_PORT = "8783"
+node .\projects\local-vault\keypad-server.mjs
+```
+
+Keep that same port in every part of the iPhone tunnel setup: replace `8782` with your chosen port in the host's SSH `PermitOpen` and iPhone `authorized_keys` `permitopen` restrictions, set the iPhone's local forwarding port and host destination port to that value, and use it in Safari's `http://127.0.0.1:<port>` URL. For example, with `8783`, forward local port `8783` to `127.0.0.1:8783` on the host and open `http://127.0.0.1:8783` in Safari. The local port, host loopback port, and Safari URL port must match the keypad's listening port; otherwise origin validation rejects the request. The SSH examples below use the default port `8782`.
 
 ### iPhone access without exposing the HTTP service
 
@@ -158,8 +173,8 @@ For Windows-specific OpenSSH behavior, see Microsoft's [OpenSSH Server configura
 
 ### iPhone
 
-1. Install an iOS SSH client that supports local TCP forwarding reachable by Safari and a tunnel-only/no-shell session. Configure the host address as its private-network or private-VPN address, and forward the iPhone's **local port `8782`** to **`127.0.0.1:8782` on the host**. Keep the tunnel active. Some clients require their documented device-wide SSH/VPN feature for Safari to use the tunnel; review its traffic-routing behavior before enabling it.
-2. In Safari on the iPhone, open `http://127.0.0.1:8782`. The local port must be `8782`, matching the host port: the server checks the request origin against its listening port and rejects mismatches.
+1. Install an iOS SSH client that supports local TCP forwarding reachable by Safari and a tunnel-only/no-shell session. Configure the host address as its private-network or private-VPN address, and forward the iPhone's **local port `8782`** to **`127.0.0.1:8782` on the host** (the default-port example). Keep the tunnel active. Some clients require their documented device-wide SSH/VPN feature for Safari to use the tunnel; review its traffic-routing behavior before enabling it. For a custom port, use that port for both the iPhone's local port and the host loopback destination, and update the SSH restrictions above to allow that destination.
+2. In Safari on the iPhone, open `http://127.0.0.1:8782` (the default-port example). For a custom port, use `http://127.0.0.1:<port>` with the same port configured for the keypad and SSH forward. The server checks the request origin against its listening port and rejects mismatches.
 
 The HTTP server still listens only on the host's loopback address. The SSH tunnel carries browser traffic to that loopback socket; sigil verification and vault reads/writes remain on the host. This does not make a Replit workspace's loopback port reachable from an iPhone, and the current Replit preview is not a private tunnel. If the only copy of the vault is in Replit, do not expose the HTTP service to make it reachable; the steps above require running the source and vault on a computer you control. Moving vault state is a separate operation and must use an encrypted bundle or an encrypted backup, never GitHub.
 
