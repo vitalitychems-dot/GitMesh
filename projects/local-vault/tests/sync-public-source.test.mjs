@@ -10,6 +10,7 @@ const SOURCE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const REPOSITORY_ROOT = path.resolve(SOURCE_DIR, "../..");
 const DEFAULT_BRANCH = process.env.GITMESH_REPOSITORY_DEFAULT_BRANCH || "main";
 const MOCK_BASE_TREE_SHA = "b".repeat(40);
+const MULTILINGUAL_README_FIXTURE = "多言語のREADME — 東京、こんにちは! Emoji: 😀; NFC: é; decomposed: e\u0301";
 
 test("README source-sync badge targets the tracked workflow on the default branch", () => {
   if (process.env.GITHUB_ACTIONS === "true") {
@@ -469,6 +470,12 @@ function runSyncWithBranchSha(
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
   }
   fs.appendFileSync(path.join(tempDir, "README.md"), `\n${privateSource}\n`);
+  if (mode === "multilingual-readme") {
+    fs.appendFileSync(
+      path.join(tempDir, "README.md"),
+      Buffer.from(`\n${MULTILINGUAL_README_FIXTURE}\n`, "utf8"),
+    );
+  }
   if (mode === "readme-invalid-js") {
     fs.appendFileSync(
       path.join(tempDir, "README.md"),
@@ -495,6 +502,7 @@ function runSyncWithBranchSha(
       "utf8",
     ),
   };
+  const expectedReadmeBytes = fs.readFileSync(path.join(tempDir, "README.md"));
   if (mode === "readme-symlink") {
     const readmePath = path.join(tempDir, "README.md");
     fs.unlinkSync(readmePath);
@@ -759,6 +767,7 @@ function runSyncWithBranchSha(
     privateSymlinkReadLog,
     syntaxInvocationLog,
     expectedSources,
+    expectedReadmeBytes,
     changedSourceDuringRequest,
     localCoreAfterSync: fs.readFileSync(mutableSourcePath, "utf8"),
     remoteHeadPath,
@@ -959,6 +968,26 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
   assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
   assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+});
+
+test("source sync preserves multilingual README bytes in the GitHub blob", (t) => {
+  const fixture = runSyncWithBranchSha(t, "a".repeat(40), "multilingual-readme");
+  const readmeBlob = fixture.requests.filter(
+    ({ method, url }) => method === "POST" && url.endsWith("/git/blobs"),
+  )[1].blob;
+  const uploadedBytes = Buffer.from(readmeBlob.content, "base64");
+
+  assert.equal(fixture.result.status, 0, fixture.output);
+  assert.equal(readmeBlob.encoding, "base64");
+  assert.ok(
+    fixture.expectedReadmeBytes.includes(Buffer.from(MULTILINGUAL_README_FIXTURE, "utf8")),
+    "the README fixture did not contain its multibyte text",
+  );
+  assert.deepEqual(
+    uploadedBytes,
+    fixture.expectedReadmeBytes,
+    "GitHub blob bytes changed during UTF-8 validation or upload encoding",
+  );
 });
 
 test("source sync creates no GitHub writes when every allowlisted blob is current", (t) => {
