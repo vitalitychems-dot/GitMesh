@@ -236,7 +236,40 @@ function readSourceContent(sourcePath, source, fileInfo, isJavaScript, syntaxOnl
   return content;
 }
 
+function isSourcePathWithinRoot(source) {
+  if (
+    typeof source !== "string" ||
+    source.length === 0 ||
+    path.isAbsolute(source) ||
+    path.win32.isAbsolute(source) ||
+    source.split(/[\\/]/).includes("..")
+  ) {
+    return false;
+  }
+
+  const relativePath = path.relative(ROOT, path.resolve(ROOT, source));
+  return (
+    relativePath !== "" &&
+    relativePath !== ".." &&
+    !relativePath.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativePath)
+  );
+}
+
+function validateAllowlistedSourcePaths() {
+  if (
+    !Array.isArray(ALLOWED_FILES) ||
+    !ALLOWED_FILES.every((entry) => entry && isSourcePathWithinRoot(entry.source))
+  ) {
+    throw new Error(
+      "Refusing an unsafe allowlisted source path. Keep source paths relative to the GitMesh folder " +
+      "and do not use parent-directory segments. No GitHub requests were made.",
+    );
+  }
+}
+
 function readSourceFiles({ syntaxOnly = false } = {}) {
+  validateAllowlistedSourcePaths();
   const sourceFiles = syntaxOnly
     ? ALLOWED_FILES.filter(({ source }) => path.extname(source) === ".mjs")
     : ALLOWED_FILES;

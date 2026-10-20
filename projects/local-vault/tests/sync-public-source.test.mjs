@@ -438,6 +438,7 @@ function runSyncWithBranchSha(
   const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
   const privateSymlinkReadLog = path.join(tempDir, "private-symlink-reads.log");
   const raceOpenFlagsLog = path.join(tempDir, "race-open-flags.log");
+  const sourceAccessLog = path.join(tempDir, "allowlist-source-access.log");
   const remoteHeadPath = sharedRemoteHeadPath ?? path.join(tempDir, "mock-remote-head.txt");
   const fakeToken = "test-only-not-a-real-token";
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
@@ -474,9 +475,48 @@ function runSyncWithBranchSha(
   const changedSourceDuringRequest =
     "// CHANGED_AFTER_SYNC_SNAPSHOT_SENTINEL\nexport const changedAfterSnapshot = true;\n";
   const mutableSourcePath = path.join(tempDir, "gitmesh-ultimate-core.mjs");
+  let invalidAllowlistSource;
+  if (
+    [
+      "allowlist-absolute",
+      "allowlist-parent-traversal",
+      "allowlist-backslash-traversal",
+      "allowlist-windows-absolute",
+    ].includes(mode)
+  ) {
+    const invalidSourceDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "gitmesh-sync-outside-root-"),
+    );
+    t.after(() => fs.rmSync(invalidSourceDirectory, { recursive: true, force: true }));
+    const outsideSourcePath = path.join(invalidSourceDirectory, "outside-source.mjs");
+    fs.writeFileSync(outsideSourcePath, "export const outsideSource = true;\n");
+    invalidAllowlistSource = mode === "allowlist-absolute"
+      ? outsideSourcePath
+      : mode === "allowlist-parent-traversal"
+        ? path.relative(tempDir, outsideSourcePath)
+        : mode === "allowlist-backslash-traversal"
+          ? path.win32.join("..", path.basename(invalidSourceDirectory), "outside-source.mjs")
+        : path.win32.join("C:\\", "outside-root", "outside-source.mjs");
+  }
 
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
+  }
+  if (invalidAllowlistSource !== undefined) {
+    const script = fs.readFileSync(scriptPath, "utf8");
+    const originalSource = mode === "allowlist-parent-traversal"
+      ? "README.md"
+      : mode === "allowlist-backslash-traversal"
+        ? "sync-public-source.mjs"
+        : "gitmesh-ultimate-core.mjs";
+    const originalEntry = `source: ${JSON.stringify(originalSource)},`;
+    if (!script.includes(originalEntry)) {
+      throw new Error("Could not install the invalid allowlist test fixture.");
+    }
+    fs.writeFileSync(
+      scriptPath,
+      script.replace(originalEntry, `source: ${JSON.stringify(invalidAllowlistSource)},`),
+    );
   }
   if (mode === "bom-readme") {
     const readmePath = path.join(tempDir, "README.md");
@@ -505,6 +545,7 @@ function runSyncWithBranchSha(
   fs.writeFileSync(requestLog, "[]");
   fs.writeFileSync(privateSymlinkReadLog, "");
   fs.writeFileSync(raceOpenFlagsLog, "");
+  fs.writeFileSync(sourceAccessLog, "");
   const expectedSources = {
     "projects/local-vault/gitmesh-ultimate-core.mjs": fs.readFileSync(
       path.join(tempDir, "gitmesh-ultimate-core.mjs"),
@@ -538,8 +579,12 @@ function runSyncWithBranchSha(
       "const originalStatSync = fs.statSync.bind(fs);",
       "const originalReadFileSync = fs.readFileSync.bind(fs);",
       "let racedSymlinkSwap = false;",
+      "const sourceAccessPaths = new Set(JSON.parse(process.env.GITMESH_TEST_SOURCE_ACCESS_PATHS || \"[]\"));",
       "fs.lstatSync = (file, ...args) => {",
       "  const fileInfo = originalLstatSync(file, ...args);",
+      "  if (sourceAccessPaths.has(String(file))) {",
+      '    fs.appendFileSync(process.env.GITMESH_TEST_SOURCE_ACCESS_LOG, "lstat\\n");',
+      "  }",
       '  if (!racedSymlinkSwap && process.env.GITMESH_TEST_RACE_SOURCE_PATH && String(file) === process.env.GITMESH_TEST_RACE_SOURCE_PATH) {',
       "    racedSymlinkSwap = true;",
       "    fs.unlinkSync(file);",
@@ -548,6 +593,9 @@ function runSyncWithBranchSha(
       "  return fileInfo;",
       "};",
       "fs.openSync = (file, flags, ...args) => {",
+      "  if (sourceAccessPaths.has(String(file))) {",
+      '    fs.appendFileSync(process.env.GITMESH_TEST_SOURCE_ACCESS_LOG, "open\\n");',
+      "  }",
       '  if (process.env.GITMESH_TEST_RACE_SOURCE_PATH && String(file) === process.env.GITMESH_TEST_RACE_SOURCE_PATH) {',
       '    fs.appendFileSync(process.env.GITMESH_TEST_RACE_OPEN_FLAGS_LOG, JSON.stringify(flags) + "\\n");',
       "  }",
@@ -793,6 +841,17 @@ function runSyncWithBranchSha(
       GITMESH_TEST_RACE_SOURCE_PATH:
         mode === "readme-symlink-race" ? path.join(tempDir, "README.md") : "",
       GITMESH_TEST_RACE_OPEN_FLAGS_LOG: raceOpenFlagsLog,
+      GITMESH_TEST_SOURCE_ACCESS_PATHS: JSON.stringify(
+        invalidAllowlistSource === undefined
+          ? []
+          : [
+              path.join(tempDir, "gitmesh-ultimate-core.mjs"),
+              path.join(tempDir, "README.md"),
+              path.join(tempDir, "sync-public-source.mjs"),
+              path.join(tempDir, invalidAllowlistSource),
+            ],
+      ),
+      GITMESH_TEST_SOURCE_ACCESS_LOG: sourceAccessLog,
       NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
     },
   });
@@ -815,6 +874,7 @@ function runSyncWithBranchSha(
     privateSymlinkTargetContents,
     privateSymlinkReadLog,
     raceOpenFlagsLog,
+    sourceAccessLog,
     syntaxInvocationLog,
     expectedSources,
     expectedReadmeBytes,
@@ -939,6 +999,35 @@ for (const [mode, label, shaField, expectedRequests] of [
     assert.equal(fixture.remoteHeadAfterSync, branchSha, "branch was updated after an invalid response SHA");
   });
 }
+
+test("normal sync rejects absolute and parent-traversal allowlist paths before source access or GitHub", (t) => {
+  for (const mode of [
+    "allowlist-absolute",
+    "allowlist-parent-traversal",
+    "allowlist-backslash-traversal",
+    "allowlist-windows-absolute",
+  ]) {
+    const fixture = runSyncWithBranchSha(t, "a".repeat(40), mode);
+
+    assert.equal(fixture.result.status, 1, fixture.output);
+    assert.equal(
+      fixture.output.trim(),
+      "Refusing an unsafe allowlisted source path. Keep source paths relative to the GitMesh folder " +
+        "and do not use parent-directory segments. No GitHub requests were made.",
+    );
+    assert.deepEqual(fixture.requests, [], `${mode} made a GitHub request`);
+    assert.equal(
+      fs.readFileSync(fixture.sourceAccessLog, "utf8"),
+      "",
+      `${mode} inspected or opened its configured source path`,
+    );
+    assert.ok(
+      !fixture.output.includes(fixture.privateSource),
+      `${mode} leaked local source contents`,
+    );
+    assert.ok(!fixture.output.includes(fixture.fakeToken), `${mode} leaked the GitHub token`);
+  }
+});
 
 test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   const branchSha = "a".repeat(40);
