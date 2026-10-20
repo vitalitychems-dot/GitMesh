@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -36,6 +37,51 @@ function loadAuth(authFile) {
 
 function writeAuthFixture(authFile, auth, mode = 0o600) {
   fs.writeFileSync(authFile, JSON.stringify(auth), { mode });
+}
+
+function startSetupProcess({ authFile, readyFile, gateFile, sigil }) {
+  const coreModuleUrl = new URL("../../projects/local-vault/gitmesh-ultimate-core.mjs", import.meta.url).href;
+  const inputs = JSON.stringify({ authFile, readyFile, gateFile, sigil });
+  const script = `
+    import fs from "node:fs";
+    import { setTimeout as delay } from "node:timers/promises";
+    import { setupOrAuthenticate } from ${JSON.stringify(coreModuleUrl)};
+    const { authFile, readyFile, gateFile, sigil } = ${inputs};
+    let promptCount = 0;
+    const promptLineFn = async () => {
+      if (promptCount++ === 0) fs.writeFileSync(readyFile, "ready", { flag: "wx", mode: 0o600 });
+      while (!fs.existsSync(gateFile)) await delay(5);
+      return sigil;
+    };
+    try {
+      await setupOrAuthenticate({ authFile, promptLineFn, log: () => {} });
+      process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ ok: false, message: error.message }) + "\\n");
+    }
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+    env: {},
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const result = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
+  });
+  result.catch(() => {});
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 15_000);
+  child.once("close", () => clearTimeout(timeout));
+  return { child, result };
+}
+
+function assertProcessIsGone(pid) {
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, `child process ${pid} must be terminated`);
 }
 
 function failCredentialRename(auth, authFile, options = {}) {
@@ -177,6 +223,66 @@ test("simultaneous first-time setup allows only one sigil to become active", asy
   const successfulSession = results[successfulIndex].value;
   assert.equal(savedAuth.verifier, verifier(successfulSession.currentSigil, savedAuth.salt));
   assertNoPlaintextSigil(authFile, ...sigils);
+});
+
+test("simultaneous first-time setup across processes activates exactly one sigil", async () => {
+  const authFile = makeAuthPath();
+  const directory = path.dirname(authFile);
+  const gateFile = path.join(directory, "release-first-time-setup");
+  const sigils = ["process-one-initial-sigil-2026", "process-two-initial-sigil-2026"];
+  const readyFiles = sigils.map((_, index) => path.join(directory, `setup-ready-${index}`));
+  const children = sigils.map((sigil, index) => startSetupProcess({
+    authFile,
+    readyFile: readyFiles[index],
+    gateFile,
+    sigil,
+  }));
+
+  try {
+    const deadline = Date.now() + 10_000;
+    while (readyFiles.some((filename) => !fs.existsSync(filename))) {
+      if (children.some(({ child }) => child.exitCode !== null || child.signalCode !== null)) {
+        throw new Error("A setup process exited before both processes reached the prompt barrier.");
+      }
+      if (Date.now() >= deadline) throw new Error("Both setup processes did not reach the prompt barrier.");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    fs.writeFileSync(gateFile, "continue", { flag: "wx", mode: 0o600 });
+
+    const processResults = await Promise.all(children.map(({ result }) => result));
+    const outcomes = processResults.map(({ code, signal, stdout, stderr }, index) => {
+      if (signal === "SIGKILL") assertProcessIsGone(children[index].child.pid);
+      assert.equal(code, 0, `child process failed: ${stderr}`);
+      assert.equal(signal, null);
+      assert.equal(stderr, "");
+      return JSON.parse(stdout.trim());
+    });
+    const successfulIndex = outcomes.findIndex((outcome) => outcome.ok);
+    assert.notEqual(successfulIndex, -1, "one process must create the initial credential");
+    const losingIndex = 1 - successfulIndex;
+    assert.equal(outcomes[losingIndex].ok, false, "the competing process must not report setup success");
+    assert.match(outcomes[losingIndex].message, /set up by another process/);
+
+    const savedAuth = loadAuth(authFile);
+    assert.equal(savedAuth.version, 2);
+    assert.equal(savedAuth.generation, 0);
+    assert.deepEqual(savedAuth.usedSigilHashes, []);
+    assert.equal(savedAuth.verifier, verifier(sigils[successfulIndex], savedAuth.salt));
+    assertNoPlaintextSigil(authFile, ...sigils);
+  } finally {
+    const killedPids = [];
+    for (const { child } of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        if (child.pid !== undefined) killedPids.push(child.pid);
+        child.kill("SIGKILL");
+      }
+    }
+    await Promise.allSettled(children.map(({ result }) => result));
+    for (const pid of killedPids) assertProcessIsGone(pid);
+    for (const filename of [...readyFiles, gateFile]) fs.rmSync(filename, { force: true });
+  }
+
+  assert.deepEqual(fs.readdirSync(directory), [path.basename(authFile)]);
 });
 
 test("authentication rejects malformed consumed-sigil hashes before prompting or rewriting credentials", async () => {
