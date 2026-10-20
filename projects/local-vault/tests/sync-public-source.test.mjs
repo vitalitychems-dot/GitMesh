@@ -469,6 +469,13 @@ function runSyncWithBranchSha(
   for (const name of ["README.md", "sync-public-source.mjs", "gitmesh-ultimate-core.mjs"]) {
     fs.copyFileSync(path.join(SOURCE_DIR, name), path.join(tempDir, name));
   }
+  if (mode === "bom-readme") {
+    const readmePath = path.join(tempDir, "README.md");
+    fs.writeFileSync(
+      readmePath,
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), fs.readFileSync(readmePath)]),
+    );
+  }
   fs.appendFileSync(path.join(tempDir, "README.md"), `\n${privateSource}\n`);
   if (mode === "multilingual-readme") {
     fs.appendFileSync(
@@ -988,6 +995,30 @@ test("source sync preserves multilingual README bytes in the GitHub blob", (t) =
     fixture.expectedReadmeBytes,
     "GitHub blob bytes changed during UTF-8 validation or upload encoding",
   );
+});
+
+test("source sync validates and preserves a UTF-8 BOM in the README blob", (t) => {
+  const fixture = runSyncWithBranchSha(t, "a".repeat(40), "bom-readme");
+  const readmeBlob = fixture.requests.filter(
+    ({ method, url }) => method === "POST" && url.endsWith("/git/blobs"),
+  )[1].blob;
+  const uploadedBytes = Buffer.from(readmeBlob.content, "base64");
+  const bomBytes = Buffer.from([0xef, 0xbb, 0xbf]);
+
+  assert.equal(fixture.result.status, 0, fixture.output);
+  assert.equal(readmeBlob.encoding, "base64");
+  assert.deepEqual(
+    fixture.expectedReadmeBytes.subarray(0, bomBytes.length),
+    bomBytes,
+    "the original README fixture did not begin with a UTF-8 BOM",
+  );
+  assert.deepEqual(
+    uploadedBytes,
+    fixture.expectedReadmeBytes,
+    "the uploaded README blob lost or changed its UTF-8 BOM bytes",
+  );
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
 });
 
 test("source sync creates no GitHub writes when every allowlisted blob is current", (t) => {
