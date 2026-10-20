@@ -49,14 +49,14 @@ function validateJavaScriptSyntax(content, source, { syntaxOnly = false } = {}) 
     );
   }
   if (result.error || result.status !== 0) {
+    const location = result.error ? null : syntaxErrorLocation(result.stderr);
+    if (location) return location;
     if (syntaxOnly) {
       throw new Error(
         `JavaScript syntax validation failed for ${source}. ` +
         "Correct the JavaScript and rerun --check-syntax. No GitHub requests were made.",
       );
     }
-    const location = result.error ? null : syntaxErrorLocation(result.stderr);
-    if (location) return location;
     throw new Error(
       `Refusing to sync JavaScript that fails Node syntax validation: ${source}. ` +
       "Correct the JavaScript and retry the source sync. No GitHub requests were made.",
@@ -219,9 +219,14 @@ function readSourceFiles({ syntaxOnly = false } = {}) {
     const lines = orderedDiagnostics
       .map(({ source, line, column }) => `- ${source}:${line}:${column}`)
       .join("\n");
+    const heading = syntaxOnly
+      ? "JavaScript syntax validation found errors:"
+      : "Refusing to sync JavaScript with syntax errors:";
+    const instruction = syntaxOnly
+      ? "Correct each file and rerun --check-syntax."
+      : "Correct each file and retry the source sync.";
     throw new Error(
-      `Refusing to sync JavaScript with syntax errors:\n${lines}\n` +
-      "Correct each file and retry the source sync. No GitHub requests were made.",
+      `${heading}\n${lines}\n${instruction} No GitHub requests were made.`,
     );
   }
   return files;
