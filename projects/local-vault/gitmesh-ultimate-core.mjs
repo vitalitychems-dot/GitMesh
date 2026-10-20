@@ -216,7 +216,10 @@ function makeAuthRecord(sigil, generation, usedSigilHashes) {
 function readAuth(authFile = AUTH_FILE) {
   if (!fs.existsSync(authFile)) return null;
   const info = fs.lstatSync(authFile);
-  if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_AUTH_BYTES) {
+  // On Windows, stat mode bits do not describe the file's user/group ACLs.
+  const permissionsAreTooBroad =
+    process.platform !== "win32" && (info.mode & 0o077) !== 0;
+  if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_AUTH_BYTES || permissionsAreTooBroad) {
     throw new Error("The local credential file is invalid.");
   }
   let auth;
