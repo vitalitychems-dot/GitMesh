@@ -28,6 +28,7 @@ const CHALLENGE_TTL_MS = 2 * 60 * 1000;
 const SESSION_TTL_MS = 15 * 60 * 1000;
 const FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const FAILURE_LIMIT = 5;
+const LOCAL_HOST = "127.0.0.1";
 
 function randomId(bytes = 24) {
   return crypto.randomBytes(bytes).toString("base64url");
@@ -564,6 +565,10 @@ export function createKeypadServer({
   return server;
 }
 
+export function listenLocalOnly(server, port, onReady) {
+  return server.listen(port, LOCAL_HOST, onReady);
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     ensureVault();
@@ -572,7 +577,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       throw new Error("GITMESH_LOCAL_PORT must be an integer between 1024 and 65535.");
     }
     const server = createKeypadServer();
-    server.listen(port, "127.0.0.1", () => {
+    // Keep the HTTP app on loopback; iPhone access must use an SSH port-forward.
+    listenLocalOnly(server, port, () => {
       console.log(`GitMesh local keypad listening at http://127.0.0.1:${port}`);
     });
   } catch {
