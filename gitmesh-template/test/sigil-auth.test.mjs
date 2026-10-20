@@ -495,6 +495,68 @@ test("successful rotation invalidates the prior sigil and records it as consumed
   );
 });
 
+test("simultaneous sign-ins cannot return competing active sigils", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "simultaneous-sign-in-active-sigil-2026";
+  const salt = "9".repeat(32);
+  writeAuthFixture(authFile, {
+    version: 2,
+    salt,
+    verifier: verifier(activeSigil, salt),
+    generation: 4,
+    usedSigilHashes: [],
+  });
+
+  let releaseConfirmations;
+  const bothConfirmationsReady = new Promise((resolve) => {
+    releaseConfirmations = resolve;
+  });
+  let confirmationCount = 0;
+  const outputs = [[], []];
+  const attempts = [0, 1].map((index) => setupOrAuthenticate({
+    authFile,
+    promptLineFn: async () => activeSigil,
+    promptTextFn: async () => {
+      confirmationCount += 1;
+      if (confirmationCount === 2) releaseConfirmations();
+      await bothConfirmationsReady;
+      return "SAVED";
+    },
+    log: (message) => outputs[index].push(message),
+  }));
+
+  const results = await Promise.allSettled(attempts);
+  const successfulIndex = results.findIndex((result) => result.status === "fulfilled");
+  assert.notEqual(successfulIndex, -1, "one sign-in must successfully save its replacement");
+  const failedIndex = 1 - successfulIndex;
+  assert.equal(results[failedIndex].status, "rejected", "the competing sign-in must not return a session");
+  assert.match(results[failedIndex].reason.message, /credential changed during sign-in|rotation is committing/);
+  assert.equal(confirmationCount, 2, "both attempts must confirm replacements based on the same original credential");
+
+  const candidates = outputs.map((output) => output.map((message) => message.trim()).find((message) => message.startsWith("gm-")));
+  assert.ok(candidates.every(Boolean), "both replacement candidates must have reached the confirmation stage");
+  assert.notEqual(candidates[0], candidates[1]);
+  const successfulSession = results[successfulIndex].value;
+  const savedAuth = loadAuth(authFile);
+  assert.equal(candidates[successfulIndex], successfulSession.currentSigil);
+  assert.equal(savedAuth.generation, 5);
+  assert.deepEqual(savedAuth.usedSigilHashes, [fingerprint(activeSigil)]);
+  assert.equal(savedAuth.verifier, verifier(successfulSession.currentSigil, savedAuth.salt));
+  assert.notEqual(verifier(candidates[failedIndex], savedAuth.salt), savedAuth.verifier);
+  assert.equal(outputs[successfulIndex].some((message) => message.includes("Sigil rotated.")), true);
+  assert.equal(outputs[failedIndex].some((message) => message.includes("Sigil rotated.")), false);
+  assert.equal(fs.existsSync(`${authFile}.rotation.lock`), false, "the rotation lock must be released");
+  assertNoPlaintextSigil(authFile, activeSigil, ...candidates);
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: async () => activeSigil,
+      log: () => {},
+    }),
+    /Access denied/,
+  );
+});
+
 test("authentication rotates a version-2 credential into the maximum safe generation", async () => {
   const authFile = makeAuthPath();
   const activeSigil = "penultimate-generation-active-sigil-2026";

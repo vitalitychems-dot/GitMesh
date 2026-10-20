@@ -12,6 +12,7 @@ const INBOUND = path.join(VAULT, "drops_inbound");
 const OUTBOUND = path.join(VAULT, "bundles_outbound");
 const INTERNAL_GITIGNORE = [
   "active_sigil.hash",
+  "active_sigil.hash.rotation.lock",
   "security_audit.log",
   "drops_inbound/",
   "bundles_outbound/",
@@ -223,8 +224,10 @@ function readAuth(authFile = AUTH_FILE) {
     throw new Error("The local credential file is invalid.");
   }
   let auth;
+  let contents;
   try {
-    auth = JSON.parse(fs.readFileSync(authFile, "utf8"));
+    contents = fs.readFileSync(authFile);
+    auth = JSON.parse(contents.toString("utf8"));
   } catch {
     throw new Error("The local credential file is invalid.");
   }
@@ -243,7 +246,7 @@ function readAuth(authFile = AUTH_FILE) {
        new Set(auth.usedSigilHashes).size !== auth.usedSigilHashes.length)) {
     throw new Error("The local credential file is invalid.");
   }
-  return auth;
+  return { auth, contents };
 }
 
 export function saveAuth(auth, authFile = AUTH_FILE, {
@@ -288,6 +291,45 @@ export function saveAuth(auth, authFile = AUTH_FILE, {
   }
 }
 
+function saveAuthIfUnchanged(auth, authFile, expectedContents, saveAuthFn) {
+  const lockFile = `${authFile}.rotation.lock`;
+  let lockDescriptor;
+  try {
+    lockDescriptor = fs.openSync(lockFile, "wx", 0o600);
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new Error("Another sigil rotation is committing; this replacement was not saved and no new session was granted. Retry with the active sigil.");
+    }
+    throw error;
+  }
+
+  let lockIdentity;
+  try {
+    lockIdentity = fs.fstatSync(lockDescriptor);
+    fs.writeFileSync(lockDescriptor, `${process.pid}\n`);
+    fs.closeSync(lockDescriptor);
+    lockDescriptor = undefined;
+
+    const currentContents = fs.readFileSync(authFile);
+    if (!currentContents.equals(expectedContents)) {
+      throw new Error("The local credential changed during sign-in; the proposed replacement was not saved and access was not granted. Retry with the active sigil.");
+    }
+    saveAuthFn(auth, authFile);
+  } finally {
+    if (lockDescriptor !== undefined) {
+      try { fs.closeSync(lockDescriptor); } catch {}
+    }
+    if (lockIdentity) {
+      try {
+        const currentLock = fs.lstatSync(lockFile);
+        if (currentLock.dev === lockIdentity.dev && currentLock.ino === lockIdentity.ino) {
+          fs.unlinkSync(lockFile);
+        }
+      } catch {}
+    }
+  }
+}
+
 function verifySigil(sigil, auth) {
   const actual = Buffer.from(deriveSigilVerifier(sigil, auth.salt), "hex");
   const expected = Buffer.from(auth.verifier, "hex");
@@ -313,7 +355,8 @@ export async function setupOrAuthenticate({
   saveAuthFn = saveAuth,
   log = console.log,
 } = {}) {
-  const auth = readAuth(authFile);
+  const credential = readAuth(authFile);
+  const auth = credential?.auth ?? null;
   if (!auth) {
     log("First run: choose an initial admin sigil of at least 12 characters.");
     const first = await promptLineFn("New admin sigil: ");
@@ -356,7 +399,7 @@ export async function setupOrAuthenticate({
     throw new Error("Rotation cancelled. The previous sigil remains valid; access was not granted.");
   }
 
-  saveAuthFn(nextAuth, authFile);
+  saveAuthIfUnchanged(nextAuth, authFile, credential.contents, saveAuthFn);
   log("Sigil rotated. The previous sigil is now invalid.");
   return { auth: nextAuth, currentSigil: nextSigil };
 }
