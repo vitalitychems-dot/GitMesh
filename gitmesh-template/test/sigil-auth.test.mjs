@@ -50,8 +50,9 @@ function failCredentialRename(auth, authFile, options = {}) {
   });
 }
 
-function failCredentialWriteAfterPartialFile(auth, authFile) {
+function failCredentialWriteAfterPartialFile(auth, authFile, options = {}) {
   return saveAuth(auth, authFile, {
+    ...options,
     writeFileSync(temporaryPath, contents, options) {
       fs.writeFileSync(temporaryPath, contents.slice(0, 12), options);
       throw new Error("forced partial credential-write failure");
@@ -100,6 +101,26 @@ test("failed first-time setup does not report success or leave credential files 
       log: (message) => output.push(message),
     }),
     /forced credential-save failure/,
+  );
+
+  assert.equal(output.some((message) => message.includes("Admin sigil verifier saved locally.")), false);
+  assert.equal(fs.existsSync(authFile), false);
+  assert.deepEqual(fs.readdirSync(path.dirname(authFile)), []);
+});
+
+test("partial credential write failure during first-time setup leaves no files or success message", async () => {
+  const authFile = makeAuthPath();
+  const output = [];
+  const sigil = "initial-admin-sigil-2026";
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([sigil, sigil]),
+      saveAuthFn: failCredentialWriteAfterPartialFile,
+      log: (message) => output.push(message),
+    }),
+    /forced partial credential-write failure/,
   );
 
   assert.equal(output.some((message) => message.includes("Admin sigil verifier saved locally.")), false);
