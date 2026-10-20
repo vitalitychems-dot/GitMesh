@@ -139,6 +139,12 @@ a { color: inherit; text-underline-offset: .2em; }
 .role-chip { padding: 7px 9px; border: 1px solid #afc2b5; color: var(--teal-deep); font-size: .57rem; }
 .admin-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .admin-card { min-height: 228px; padding: clamp(20px, 3vw, 29px); border: 1px solid #d2dcd1; background: var(--paper); }
+.context-card { grid-column: 1 / -1; min-height: 0; }
+.context-intro { max-width: 720px; margin: -8px 0 16px; color: var(--ink-soft); font-size: .8rem; line-height: 1.6; }
+.context-preview { max-height: 260px; overflow: auto; margin: 0; padding: 15px; border: 1px solid #d2dcd1; background: #eef2eb; color: var(--ink); font: .73rem/1.7 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.context-copy { min-height: 42px; margin-top: 13px; }
+.context-copy-status { min-height: 1.5em; margin: 10px 0 0; color: var(--teal-deep); font-size: .73rem; line-height: 1.5; }
+.context-error p { margin: 0 0 8px; color: #7b3f34; font-size: .8rem; line-height: 1.55; }
 .card-index { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .55rem; }
 .card-index .signal { width: auto; height: 23px; padding: 0 8px; border-radius: 2px; font-size: .53rem; }
 .admin-card h2 { margin: 18px 0 21px; font: 650 1.28rem var(--display); letter-spacing: -.045em; }

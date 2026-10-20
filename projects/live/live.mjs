@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRateLimit } from "./admin-auth.mjs";
 import { PrivateAuth, digest } from "./private-auth.mjs";
 import { AuthStore, createAuthPool } from "./auth-store.mjs";
+import { APPROVED_CONTEXT_PACK } from "./approved-context.mjs";
 
 function cookie(req, name) {
   const parts = (req.headers.cookie || "").split(";").map((part) => part.trim());
@@ -102,6 +103,15 @@ export async function createApp({ production = process.env.NODE_ENV === "product
       service: { name: "GitMesh private node", uptimeSeconds: Math.floor(process.uptime()), nodeVersion: process.version },
       security: { vaultHosted: false, auth: "Rotating GitMesh admin key", socialLogin: false },
       mesh: { transport: "not_connected" },
+    });
+  });
+  app.get("/api/admin/context-pack", async (req, res) => {
+    if (!await auth.session(cookie(req, "gm_admin"))) return res.status(401).json({ error: "Sign in to continue." });
+    res.json({
+      format: "gitmesh-approved-context-v1",
+      delivery: "manual-copy-only",
+      transport: "not_connected",
+      markdown: APPROVED_CONTEXT_PACK,
     });
   });
   app.use("/api", (_req, res) => res.status(404).json({ error: "Endpoint not found." }));

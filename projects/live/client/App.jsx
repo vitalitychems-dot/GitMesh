@@ -437,6 +437,7 @@ function AdminOverview({ data, onRefresh }) {
             <Detail label="Social login" value={security.socialLogin ? "Enabled" : "Not used"} />
           </dl>
         </section>
+        <ApprovedContextCard />
         <aside className="admin-note">
           <div className="eyebrow">A CLEAR BOUNDARY</div><h2>Your private vault<br />stays on your device.</h2>
           <p>The private vault/keypad and the web admin key are separate. This console reports service metadata; it does not unlock or proxy local vault operations.</p>
@@ -445,6 +446,82 @@ function AdminOverview({ data, onRefresh }) {
       </div>
       <div className="admin-tail"><span>GITMESH / ADMIN</span><span>NO PUBLIC SIGNUP · NO SOCIAL IDENTITY</span></div>
     </>
+  );
+}
+
+function ApprovedContextCard() {
+  const [state, setState] = useState({ phase: "loading", markdown: "", message: "" });
+  const [attempt, setAttempt] = useState(0);
+  const [copyMessage, setCopyMessage] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api("/api/admin/context-pack")
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(response.status === 401
+            ? "Your admin session expired. Sign in again to retrieve the approved context."
+            : "The approved context could not be loaded.");
+        }
+        if (
+          payload.format !== "gitmesh-approved-context-v1" ||
+          payload.delivery !== "manual-copy-only" ||
+          payload.transport !== "not_connected" ||
+          typeof payload.markdown !== "string" ||
+          payload.markdown.length > 2000
+        ) {
+          throw new Error("The context response did not match the expected safe-sharing format.");
+        }
+        if (active) setState({ phase: "ready", markdown: payload.markdown, message: "" });
+      })
+      .catch((reason) => {
+        if (active) {
+          setState({
+            phase: "error",
+            markdown: "",
+            message: reason.name === "AbortError"
+              ? "The context request timed out."
+              : reason.message || "The approved context could not be loaded.",
+          });
+        }
+      });
+    return () => { active = false; };
+  }, [attempt]);
+
+  async function copyContext() {
+    try {
+      await navigator.clipboard.writeText(state.markdown);
+      setCopyMessage("Copied. Paste it into the agent yourself; nothing was sent automatically.");
+    } catch {
+      setCopyMessage("Clipboard access is unavailable. Select and copy the text shown above.");
+    }
+  }
+
+  return (
+    <section className="admin-card context-card" aria-labelledby="context-heading">
+      <div className="card-index"><span>04 / CONTEXT FLOW</span><Mark tone="teal">APPROVED</Mark></div>
+      <h2 id="context-heading">Manual agent handoff</h2>
+      <p className="context-intro">A compact, approved context pack for a supported agent. Review it, then copy and paste it yourself. No agent is connected to this app.</p>
+      {state.phase === "loading" ? (
+        <div role="status" aria-label="Loading approved context"><LoadingLine /></div>
+      ) : state.phase === "error" ? (
+        <div className="context-error" role="alert">
+          <p>{state.message}</p>
+          {state.message.includes("Sign in again") ? (
+            <Link className="text-button" href="/sign-in">Sign in again</Link>
+          ) : (
+            <button className="text-button" type="button" onClick={() => setAttempt((value) => value + 1)}>Retry context load</button>
+          )}
+        </div>
+      ) : (
+        <>
+          <pre className="context-preview" tabIndex={0} aria-label="Approved context pack">{state.markdown}</pre>
+          <button className="button context-copy" type="button" onClick={copyContext}>Copy approved context</button>
+          <p className="context-copy-status" role="status" aria-live="polite">{copyMessage}</p>
+        </>
+      )}
+    </section>
   );
 }
 
