@@ -213,9 +213,21 @@ function runSyncWithSyntaxResult(
       'import { syncBuiltinESMExports } from "node:module";',
       'import { fileURLToPath } from "node:url";',
       "const originalSpawnSync = childProcess.spawnSync.bind(childProcess);",
+      "const originalOpenSync = fs.openSync.bind(fs);",
       "const originalReadFileSync = fs.readFileSync.bind(fs);",
       "const originalLstatSync = fs.lstatSync.bind(fs);",
+      "const openedSourcePaths = new Map();",
       "let sourceChangedDuringRead = false;",
+      "fs.openSync = (file, ...args) => {",
+      '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "eacces-open" && typeof file === "string" && file.endsWith("sync-public-source.mjs")) {',
+      `    const error = new Error("EACCES: permission denied ${privateNodeOutput}");`,
+      '    error.code = "EACCES";',
+      "    throw error;",
+      "  }",
+      "  const descriptor = originalOpenSync(file, ...args);",
+      '  if (typeof file === "string") openedSourcePaths.set(descriptor, file);',
+      "  return descriptor;",
+      "};",
       "fs.lstatSync = (file, ...args) => {",
       '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "eacces-metadata" && typeof file === "string" && file.endsWith("sync-public-source.mjs")) {',
       '    fs.writeFileSync(process.env.GITMESH_TEST_METADATA_MARKER, "invoked");',
@@ -226,18 +238,14 @@ function runSyncWithSyntaxResult(
       "  return originalLstatSync(file, ...args);",
       "};",
       "fs.readFileSync = (file, ...args) => {",
-      '  if (typeof file === "string" && ["README.md", "gitmesh-ultimate-core.mjs", "sync-public-source.mjs"].some((name) => file === fileURLToPath(new URL(name, import.meta.url)))) {',
+      '  const sourcePath = typeof file === "string" ? file : openedSourcePaths.get(file);',
+      '  if (typeof sourcePath === "string" && ["README.md", "gitmesh-ultimate-core.mjs", "sync-public-source.mjs"].some((name) => sourcePath === fileURLToPath(new URL(name, import.meta.url)))) {',
       '    fs.writeFileSync(process.env.GITMESH_TEST_SOURCE_READ_MARKER, "invoked");',
       "  }",
-      '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "eacces-open" && typeof file === "string" && file.endsWith("sync-public-source.mjs")) {',
-      `    const error = new Error("EACCES: permission denied ${privateNodeOutput}");`,
-      '    error.code = "EACCES";',
-      "    throw error;",
-      "  }",
       "  const content = originalReadFileSync(file, ...args);",
-      '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "changed-during-read" && !sourceChangedDuringRead && typeof file === "string" && file.endsWith("gitmesh-ultimate-core.mjs")) {',
+      '  if (process.env.GITMESH_TEST_SYNTAX_FAILURE_MODE === "changed-during-read" && !sourceChangedDuringRead && typeof sourcePath === "string" && sourcePath.endsWith("gitmesh-ultimate-core.mjs")) {',
       "    sourceChangedDuringRead = true;",
-      `    fs.writeFileSync(file, "// ${privateNodeOutput}\\n");`,
+      `    fs.writeFileSync(sourcePath, "// ${privateNodeOutput}\\n");`,
       "  }",
       "  return content;",
       "};",
@@ -429,6 +437,7 @@ function runSyncWithBranchSha(
   const requestLog = path.join(tempDir, "github-requests.json");
   const syntaxInvocationLog = path.join(tempDir, "syntax-invocations.jsonl");
   const privateSymlinkReadLog = path.join(tempDir, "private-symlink-reads.log");
+  const raceOpenFlagsLog = path.join(tempDir, "race-open-flags.log");
   const remoteHeadPath = sharedRemoteHeadPath ?? path.join(tempDir, "mock-remote-head.txt");
   const fakeToken = "test-only-not-a-real-token";
   const privateSource = "PRIVATE_BRANCH_SHA_SOURCE_SENTINEL";
@@ -451,7 +460,7 @@ function runSyncWithBranchSha(
   const privateSymlinkTargetContents = "PRIVATE_SYMLINK_TARGET_CONTENT_SENTINEL";
   let privateSymlinkTargetDirectory;
   let privateSymlinkTargetPath;
-  if (mode === "readme-symlink") {
+  if (mode === "readme-symlink" || mode === "readme-symlink-race") {
     privateSymlinkTargetDirectory = fs.mkdtempSync(
       path.join(os.tmpdir(), "gitmesh-sync-private-target-"),
     );
@@ -495,6 +504,7 @@ function runSyncWithBranchSha(
   if (!sharedRemoteHeadPath) fs.writeFileSync(remoteHeadPath, branchSha);
   fs.writeFileSync(requestLog, "[]");
   fs.writeFileSync(privateSymlinkReadLog, "");
+  fs.writeFileSync(raceOpenFlagsLog, "");
   const expectedSources = {
     "projects/local-vault/gitmesh-ultimate-core.mjs": fs.readFileSync(
       path.join(tempDir, "gitmesh-ultimate-core.mjs"),
@@ -522,10 +532,39 @@ function runSyncWithBranchSha(
       'import childProcess from "node:child_process";',
       'import { createHash } from "node:crypto";',
       'import { syncBuiltinESMExports } from "node:module";',
+      "const originalLstatSync = fs.lstatSync.bind(fs);",
+      "const originalOpenSync = fs.openSync.bind(fs);",
+      "const originalFstatSync = fs.fstatSync.bind(fs);",
+      "const originalStatSync = fs.statSync.bind(fs);",
       "const originalReadFileSync = fs.readFileSync.bind(fs);",
+      "let racedSymlinkSwap = false;",
+      "fs.lstatSync = (file, ...args) => {",
+      "  const fileInfo = originalLstatSync(file, ...args);",
+      '  if (!racedSymlinkSwap && process.env.GITMESH_TEST_RACE_SOURCE_PATH && String(file) === process.env.GITMESH_TEST_RACE_SOURCE_PATH) {',
+      "    racedSymlinkSwap = true;",
+      "    fs.unlinkSync(file);",
+      "    fs.symlinkSync(process.env.GITMESH_TEST_PRIVATE_TARGET_PATH, file);",
+      "  }",
+      "  return fileInfo;",
+      "};",
+      "fs.openSync = (file, flags, ...args) => {",
+      '  if (process.env.GITMESH_TEST_RACE_SOURCE_PATH && String(file) === process.env.GITMESH_TEST_RACE_SOURCE_PATH) {',
+      '    fs.appendFileSync(process.env.GITMESH_TEST_RACE_OPEN_FLAGS_LOG, JSON.stringify(flags) + "\\n");',
+      "  }",
+      "  return originalOpenSync(file, flags, ...args);",
+      "};",
       "fs.readFileSync = (file, ...args) => {",
       "  if (process.env.GITMESH_TEST_PRIVATE_TARGET_PATH && String(file) === process.env.GITMESH_TEST_PRIVATE_TARGET_PATH) {",
       '    fs.appendFileSync(process.env.GITMESH_TEST_PRIVATE_TARGET_READ_LOG, "read\\n");',
+      "  }",
+      "  if (process.env.GITMESH_TEST_RACE_SOURCE_PATH) {",
+      '    if (typeof file === "string" && file === process.env.GITMESH_TEST_RACE_SOURCE_PATH && originalLstatSync(file).isSymbolicLink()) {',
+      '      fs.appendFileSync(process.env.GITMESH_TEST_PRIVATE_TARGET_READ_LOG, "symlink-path-read\\n");',
+      '    } else if (typeof file === "number" && process.env.GITMESH_TEST_PRIVATE_TARGET_PATH) {',
+      "      const openedInfo = originalFstatSync(file, { bigint: true });",
+      '      const targetInfo = originalStatSync(process.env.GITMESH_TEST_PRIVATE_TARGET_PATH, { bigint: true });',
+      '      if (openedInfo.dev === targetInfo.dev && openedInfo.ino === targetInfo.ino) fs.appendFileSync(process.env.GITMESH_TEST_PRIVATE_TARGET_READ_LOG, "outside-descriptor-read\\n");',
+      "    }",
       "  }",
       "  return originalReadFileSync(file, ...args);",
       "};",
@@ -751,6 +790,9 @@ function runSyncWithBranchSha(
       GITMESH_TEST_REMOTE_HEAD: remoteHeadPath,
       GITMESH_TEST_PRIVATE_TARGET_PATH: privateSymlinkTargetPath ?? "",
       GITMESH_TEST_PRIVATE_TARGET_READ_LOG: privateSymlinkReadLog,
+      GITMESH_TEST_RACE_SOURCE_PATH:
+        mode === "readme-symlink-race" ? path.join(tempDir, "README.md") : "",
+      GITMESH_TEST_RACE_OPEN_FLAGS_LOG: raceOpenFlagsLog,
       NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
     },
   });
@@ -772,6 +814,7 @@ function runSyncWithBranchSha(
     privateSymlinkTargetPath,
     privateSymlinkTargetContents,
     privateSymlinkReadLog,
+    raceOpenFlagsLog,
     syntaxInvocationLog,
     expectedSources,
     expectedReadmeBytes,
@@ -1190,6 +1233,46 @@ test("normal sync rejects an allowlisted symlink without reading or exposing its
       "Restore it as a regular file; no GitHub requests were made.",
   );
   assert.deepEqual(fixture.requests, []);
+  assert.ok(
+    !fixture.output.includes(fixture.privateSymlinkTargetPath),
+    "private symlink target path leaked in output",
+  );
+  assert.ok(
+    !fixture.output.includes(fixture.privateSymlinkTargetContents),
+    "private symlink target contents leaked in output",
+  );
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub credential leaked in output");
+});
+
+test("normal sync does not read an outside target when a source is swapped to a symlink after inspection", (t) => {
+  const fixture = runSyncWithBranchSha(t, "a".repeat(40), "readme-symlink-race");
+  const openFlags = fs
+    .readFileSync(fixture.raceOpenFlagsLog, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.ok(
+    fixture.output.includes("could not be opened") ||
+      fixture.output.includes("changed during syntax validation"),
+    fixture.output,
+  );
+  assert.deepEqual(fixture.requests, [], "the sync made GitHub requests after the path race");
+  assert.equal(
+    fs.readFileSync(fixture.privateSymlinkReadLog, "utf8"),
+    "",
+    "the race caused the outside symlink target to be read",
+  );
+  assert.equal(openFlags.length, 1, "the raced source path was not opened exactly once");
+  if (process.platform !== "win32" && typeof fs.constants.O_NOFOLLOW === "number") {
+    assert.ok(
+      openFlags[0] & fs.constants.O_NOFOLLOW,
+      "the source was opened without the available no-follow flag",
+    );
+  }
   assert.ok(
     !fixture.output.includes(fixture.privateSymlinkTargetPath),
     "private symlink target path leaked in output",
