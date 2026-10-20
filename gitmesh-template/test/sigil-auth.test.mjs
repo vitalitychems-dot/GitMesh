@@ -206,6 +206,42 @@ test("authentication rejects duplicate consumed-sigil hashes before prompting or
   assert.deepEqual(fs.readFileSync(authFile), before);
 });
 
+test("authentication rejects an active sigil already marked as consumed without rotating or rewriting credentials", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "active-but-consumed-sigil-2026";
+  const salt = "c".repeat(32);
+  fs.writeFileSync(authFile, JSON.stringify({
+    version: 2,
+    salt,
+    verifier: verifier(activeSigil, salt),
+    generation: 3,
+    usedSigilHashes: [fingerprint(activeSigil)],
+  }));
+  const before = fs.readFileSync(authFile);
+  let authenticationPromptCount = 0;
+  let replacementConfirmationCount = 0;
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: async () => {
+        authenticationPromptCount += 1;
+        return activeSigil;
+      },
+      promptTextFn: async () => {
+        replacementConfirmationCount += 1;
+        return "SAVED";
+      },
+      log: () => {},
+    }),
+    /local credential history is inconsistent; access was not granted/,
+  );
+
+  assert.equal(authenticationPromptCount, 1);
+  assert.equal(replacementConfirmationCount, 0, "the replacement sigil must not be offered for confirmation");
+  assert.deepEqual(fs.readFileSync(authFile), before, "the inconsistent credential must not be rewritten");
+});
+
 test("authentication rejects unsafe and negative generation counters before prompting or rewriting credentials", async () => {
   for (const generation of [Number.MAX_SAFE_INTEGER + 1, -1]) {
     const authFile = makeAuthPath();
