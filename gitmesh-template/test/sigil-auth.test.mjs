@@ -274,8 +274,8 @@ test("authentication rejects an active sigil already marked as consumed without 
   assert.deepEqual(fs.readFileSync(authFile), before, "the inconsistent credential must not be rewritten");
 });
 
-test("authentication rejects unsafe and negative generation counters before prompting or rewriting credentials", async () => {
-  for (const generation of [Number.MAX_SAFE_INTEGER + 1, -1]) {
+test("authentication rejects unsafe, negative, and fractional generation counters before prompting or rewriting credentials", async () => {
+  for (const generation of [Number.MAX_SAFE_INTEGER + 1, -1, 1.5]) {
     const authFile = makeAuthPath();
     const salt = "e".repeat(32);
     writeAuthFixture(authFile, {
