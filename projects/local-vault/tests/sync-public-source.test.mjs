@@ -261,6 +261,16 @@ function runSyncWithSyntaxResult(
       '      }) + "\\n");',
       "      return child;",
       "    }",
+      '    if (mode === "unrecognized-diagnostic") {',
+      "      fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify({",
+      "        ...invocation, status: 1, error: null, unrecognizedDiagnostic: true,",
+      '      }) + "\\n");',
+      "      return {",
+      "        error: undefined, status: 1, signal: null,",
+      '        stdout: "", stderr: "Unrecognized parser diagnostic PRIVATE_NODE_DIAGNOSTIC_SENTINEL PRIVATE_SYNTAX_SOURCE_SENTINEL",',
+      "        pid: 123, output: [],",
+      "      };",
+      "    }",
       '    if (mode === "syntax" || mode === "success" || mode === "eacces-open" || mode === "eacces-metadata" || mode === "multiple-syntax" || mode === "later-syntax") {',
       "      const result = originalSpawnSync(command, args, options);",
       "      fs.appendFileSync(process.env.GITMESH_TEST_SYNTAX_INVOCATION_LOG, JSON.stringify({",
@@ -1258,6 +1268,26 @@ test("syntax-check output overflow is private and stops source sync before GitHu
       "gitmesh-ultimate-core.mjs. Correct the JavaScript and retry the source sync. " +
       "No GitHub requests were made.",
   );
+});
+
+test("unrecognized Node syntax diagnostics are sanitized and stop source sync", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "unrecognized-diagnostic");
+  assertSafeSyntaxFailure(
+    fixture,
+    "Refusing to sync JavaScript that fails Node syntax validation: " +
+      "gitmesh-ultimate-core.mjs. Correct the JavaScript and retry the source sync. " +
+      "No GitHub requests were made.",
+  );
+
+  const invocations = fs
+    .readFileSync(fixture.syntaxInvocationLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((entry) => JSON.parse(entry));
+  assert.equal(invocations.length, 1, "the unrecognized diagnostic fixture was not exercised");
+  assert.equal(invocations[0].status, 1, "the parser fixture did not return a failure");
+  assert.equal(invocations[0].error, null, "the parser fixture must be a syntax failure, not a spawn error");
+  assert.equal(invocations[0].unrecognizedDiagnostic, true);
 });
 
 test("Node startup failure stays private and stops source sync before GitHub", (t) => {
