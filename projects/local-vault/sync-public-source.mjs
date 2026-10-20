@@ -413,11 +413,23 @@ function checkJavaScriptSyntax() {
   );
 }
 
+function previewSources() {
+  const files = readSourceFiles();
+  console.log(files.map(({ target }) => target).join("\n"));
+}
+
 if (process.argv.length === 3 && process.argv[2] === "--check-syntax") {
   try {
     checkJavaScriptSyntax();
   } catch (error) {
     console.error(error instanceof Error ? error.message : "JavaScript syntax validation failed.");
+    process.exitCode = 1;
+  }
+} else if (process.argv.length === 3 && process.argv[2] === "--preview") {
+  try {
+    previewSources();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Source preview failed.");
     process.exitCode = 1;
   }
 } else if (process.argv.length !== 2) {

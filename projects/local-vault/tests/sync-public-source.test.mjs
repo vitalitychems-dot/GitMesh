@@ -1704,6 +1704,55 @@ test("--check-syntax succeeds without a GitHub token or network request", (t) =>
   }
 });
 
+test("--preview lists exactly the approved target paths without a token or network request", (t) => {
+  const fixtures = [
+    runSyncWithSyntaxResult(t, "success", {
+      extraArgs: ["--preview"],
+      tokenPresent: false,
+    }),
+    runSyncWithSyntaxResult(t, "success", {
+      extraArgs: ["--preview"],
+      tokenPresent: true,
+    }),
+  ];
+  const expectedPaths = [
+    "projects/local-vault/gitmesh-ultimate-core.mjs",
+    "projects/local-vault/README.md",
+    "projects/local-vault/sync-public-source.mjs",
+  ].join("\n");
+
+  for (const fixture of fixtures) {
+    assert.equal(fixture.result.status, 0, fixture.output);
+    assert.equal(fixture.output.trim(), expectedPaths);
+    assert.ok(fs.existsSync(fixture.sourceReadMarker), "preview did not inspect its source files");
+    assert.ok(fs.existsSync(fixture.syntaxMarker), "preview did not validate JavaScript syntax");
+    assert.ok(!fs.existsSync(fixture.fetchMarker), "preview attempted a GitHub request");
+    for (const privateText of fixture.privateTexts) {
+      assert.ok(!fixture.output.includes(privateText), `preview leaked private material: ${privateText}`);
+    }
+  }
+});
+
+test("--preview rejects invalid source before listing targets or contacting GitHub", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "syntax", {
+    extraArgs: ["--preview"],
+    tokenPresent: true,
+  });
+  const invalidLine = `export const ${fixture.privateSource} = ;`;
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "Refusing to sync JavaScript with syntax errors:\n" +
+      `- gitmesh-ultimate-core.mjs:1:${invalidLine.indexOf(";") + 1}\n` +
+      "Correct each file and retry the source sync. No GitHub requests were made.",
+  );
+  assert.ok(!fs.existsSync(fixture.fetchMarker), "invalid preview attempted a GitHub request");
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "preview error leaked the GitHub token");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "preview error leaked source text");
+  assert.ok(!fixture.output.includes("projects/local-vault/"), "invalid preview printed target paths");
+});
+
 test("--check-syntax succeeds with a GitHub token and performs no sync requests", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "success", {
     checkOnly: true,
