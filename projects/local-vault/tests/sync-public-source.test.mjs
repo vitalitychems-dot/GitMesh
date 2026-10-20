@@ -1366,6 +1366,37 @@ test("normal sync reports all syntax errors in stable order without leaking sour
   assert.equal(firstFixture.output, secondFixture.output, "diagnostic ordering was unstable");
 });
 
+test("--check-syntax reports every syntax error in stable order without leaking source or parser output", (t) => {
+  const firstFixture = runSyncWithSyntaxResult(t, "multiple-syntax", { checkOnly: true });
+  const secondFixture = runSyncWithSyntaxResult(t, "multiple-syntax", { checkOnly: true });
+  const firstInvalidLine = "export const FIRST_PRIVATE_SYNTAX_SENTINEL = ;";
+  const secondInvalidLine = "export const SECOND_PRIVATE_SYNTAX_SENTINEL = ;";
+  const expected =
+    "JavaScript syntax validation found errors:\n" +
+    `- gitmesh-ultimate-core.mjs:2:${firstInvalidLine.indexOf(";") + 1}\n` +
+    `- sync-public-source.mjs:2:${secondInvalidLine.indexOf(";") + 1}\n` +
+    "Correct each file and rerun --check-syntax. No GitHub requests were made.";
+
+  assert.equal(firstFixture.tokenPresent, false, "offline syntax validation unexpectedly required a token");
+  assertSafeSyntaxFailure(firstFixture, expected);
+  assertSafeSyntaxFailure(secondFixture, expected);
+  assert.equal(firstFixture.output, secondFixture.output, "offline diagnostic ordering was unstable");
+
+  for (const fixture of [firstFixture, secondFixture]) {
+    const invocations = fs
+      .readFileSync(fixture.syntaxInvocationLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((entry) => JSON.parse(entry));
+    assert.equal(invocations.length, 2, "not every allowlisted JavaScript file was checked");
+    assert.deepEqual(
+      invocations.map(({ status }) => status),
+      [1, 1],
+      "both invalid JavaScript files must be rejected",
+    );
+  }
+});
+
 test("sync checks an earlier JavaScript file before safely rejecting a later file", (t) => {
   const fixture = runSyncWithSyntaxResult(t, "later-syntax");
   const invalidLine = `export const ${fixture.privateSource}_LATER = ;`;
@@ -1546,12 +1577,15 @@ test("--check-syntax rejects invalid JavaScript with a GitHub token without publ
     checkOnly: true,
     tokenPresent: true,
   });
+  const invalidLine = `export const ${fixture.privateSource} = ;`;
+  const invalidColumn = invalidLine.indexOf(";") + 1;
 
   assert.equal(fixture.tokenPresent, true, "the parent process did not receive a fake token");
   assertSafeSyntaxFailure(
     fixture,
-    "JavaScript syntax validation failed for gitmesh-ultimate-core.mjs. " +
-      "Correct the JavaScript and rerun --check-syntax. No GitHub requests were made.",
+    "JavaScript syntax validation found errors:\n" +
+      `- gitmesh-ultimate-core.mjs:1:${invalidColumn}\n` +
+      "Correct each file and rerun --check-syntax. No GitHub requests were made.",
   );
   assert.ok(
     !fixture.output.includes(fixture.fakeToken),
