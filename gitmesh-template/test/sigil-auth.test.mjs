@@ -238,6 +238,56 @@ test("authentication rejects duplicate consumed-sigil hashes before prompting or
   assert.deepEqual(fs.readFileSync(authFile), before);
 });
 
+test("authentication rejects malformed salts and verifiers before prompting or rewriting credentials", async () => {
+  const malformedValues = [
+    { field: "salt", value: "a".repeat(31) },
+    { field: "salt", value: "g".repeat(32) },
+    { field: "salt", value: null },
+    { field: "verifier", value: "b".repeat(127) },
+    { field: "verifier", value: "g".repeat(128) },
+    { field: "verifier", value: null },
+  ];
+
+  for (const version of [1, 2]) {
+    for (const { field, value } of malformedValues) {
+      const authFile = makeAuthPath();
+      const auth = {
+        version,
+        salt: "a".repeat(32),
+        verifier: "b".repeat(128),
+      };
+      if (version === 2) {
+        auth.generation = 0;
+        auth.usedSigilHashes = [];
+      }
+      auth[field] = value;
+      writeAuthFixture(authFile, auth);
+      const before = fs.readFileSync(authFile);
+      let promptCount = 0;
+
+      await assert.rejects(
+        setupOrAuthenticate({
+          authFile,
+          promptLineFn: async () => {
+            promptCount += 1;
+            throw new Error("Authentication must reject malformed metadata before prompting.");
+          },
+          log: () => {},
+        }),
+        /local credential file is invalid/,
+        `version ${version} ${field} value ${JSON.stringify(value)} should be rejected`,
+      );
+
+      assert.equal(promptCount, 0, `version ${version} ${field} must not reach the sign-in prompt`);
+      assert.deepEqual(
+        fs.readFileSync(authFile),
+        before,
+        `version ${version} ${field} must not rewrite credentials`,
+      );
+    }
+  }
+});
+
 test("authentication rejects an active sigil already marked as consumed without rotating or rewriting credentials", async () => {
   const authFile = makeAuthPath();
   const activeSigil = "active-but-consumed-sigil-2026";
