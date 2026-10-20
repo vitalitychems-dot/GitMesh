@@ -9,6 +9,7 @@ import test from "node:test";
 const SOURCE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPOSITORY_ROOT = path.resolve(SOURCE_DIR, "../..");
 const DEFAULT_BRANCH = process.env.GITMESH_REPOSITORY_DEFAULT_BRANCH || "main";
+const MOCK_BASE_TREE_SHA = "b".repeat(40);
 
 test("README source-sync badge targets the tracked workflow on the default branch", () => {
   if (process.env.GITHUB_ACTIONS === "true") {
@@ -504,6 +505,7 @@ function runSyncWithBranchSha(
     [
       'import fs from "node:fs";',
       'import childProcess from "node:child_process";',
+      'import { createHash } from "node:crypto";',
       'import { syncBuiltinESMExports } from "node:module";',
       "const originalReadFileSync = fs.readFileSync.bind(fs);",
       "fs.readFileSync = (file, ...args) => {",
@@ -528,6 +530,21 @@ function runSyncWithBranchSha(
       "const requests = [];",
       'const branchSha = fs.readFileSync(process.env.GITMESH_TEST_REMOTE_HEAD, "utf8");',
       'const baseTreeSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";',
+      'const currentTreeEntries = [',
+      '  ["projects/local-vault/gitmesh-ultimate-core.mjs", "gitmesh-ultimate-core.mjs"],',
+      '  ["projects/local-vault/README.md", "README.md"],',
+      '  ["projects/local-vault/sync-public-source.mjs", "sync-public-source.mjs"],',
+      '].map(([path, filename]) => {',
+      '  const content = fs.readFileSync(filename);',
+      '  const sha = createHash("sha1").update(`blob ${content.length}\\0`).update(content).digest("hex");',
+      '  return { path, mode: "100644", type: "blob", sha };',
+      '});',
+      'const isCurrentTreeMode = process.env.GITMESH_TEST_MODE === "source-current" || process.env.GITMESH_TEST_MODE === "tree-current-branch-advanced";',
+      'const matchingRemoteTree = isCurrentTreeMode',
+      '  ? [...currentTreeEntries, { path: "other/ignored.txt", mode: "100644", type: "blob", sha: "2222222222222222222222222222222222222222" }]',
+      '  : process.env.GITMESH_TEST_MODE === "one-source-diff"',
+      '    ? currentTreeEntries.map((entry, index) => index === 0 ? { ...entry, sha: "9999999999999999999999999999999999999999" } : entry)',
+      '    : [];',
       'const newTreeSha = process.env.GITMESH_TEST_MODE === "invalid-tree-sha" ? process.env.GITMESH_TEST_INVALID_TREE_SHA : "cccccccccccccccccccccccccccccccccccccccc";',
       'const commitSha = process.env.GITMESH_TEST_MODE === "retry-after-ref-timeout" ? "2222222222222222222222222222222222222222" : process.env.GITMESH_TEST_MODE === "invalid-commit-sha" ? process.env.GITMESH_TEST_INVALID_COMMIT_SHA : "dddddddddddddddddddddddddddddddddddddddd";',
       'const blobShas = [',
@@ -536,6 +553,7 @@ function runSyncWithBranchSha(
       '  "1111111111111111111111111111111111111111",',
       "];",
       "let blobIndex = 0;",
+      "let branchReadCount = 0;",
       "globalThis.fetch = async (url, options = {}) => {",
       '  const method = options.method ?? "GET";',
       "  const request = { method, url };",
@@ -556,6 +574,7 @@ function runSyncWithBranchSha(
       "  requests.push(request);",
       "  fs.writeFileSync(process.env.GITMESH_TEST_REQUEST_LOG, JSON.stringify(requests));",
       '  if (method === "GET" && url.endsWith("/git/ref/heads/main")) {',
+      "    branchReadCount += 1;",
       '    if (process.env.GITMESH_TEST_MODE === "change-source-after-read") {',
       "      fs.writeFileSync(process.env.GITMESH_TEST_MUTABLE_SOURCE_PATH, process.env.GITMESH_TEST_CHANGED_SOURCE);",
       "    }",
@@ -580,6 +599,9 @@ function runSyncWithBranchSha(
       "        json: async () => { throw new Error(process.env.GITMESH_TEST_RESPONSE_SENTINEL); },",
       "      };",
       "    }",
+      '    if (process.env.GITMESH_TEST_MODE === "tree-current-branch-advanced" && branchReadCount > 1) {',
+      '      return response({ object: { sha: process.env.GITMESH_TEST_ADVANCED_HEAD } });',
+      "    }",
       "    return response({ object: { sha: branchSha } });",
       "  }",
       '  if (method === "GET" && url.endsWith(`/git/commits/${branchSha}`)) {',
@@ -590,6 +612,16 @@ function runSyncWithBranchSha(
       "      };",
       "    }",
       "    return response({ tree: { sha: baseTreeSha } });",
+      "  }",
+      '  if (method === "GET" && url.endsWith(`/git/trees/${baseTreeSha}?recursive=1`)) {',
+      '    if (process.env.GITMESH_TEST_MODE === "tree-read-invalid-json") {',
+      "      return {",
+      "        ok: true,",
+      "        json: async () => { throw new Error(process.env.GITMESH_TEST_RESPONSE_SENTINEL); },",
+      "      };",
+      "    }",
+      '    const truncated = process.env.GITMESH_TEST_MODE === "tree-truncated";',
+      "    return response({ truncated, tree: matchingRemoteTree });",
       "  }",
       '  if (method === "POST" && url.endsWith("/git/blobs")) {',
       '    if (process.env.GITMESH_TEST_MODE.startsWith("blob-http-429") && blobIndex === 1) {',
@@ -770,6 +802,7 @@ for (const [shaKind, shaValue] of [
       const expectedRequests = [
         ["GET", `${apiRoot}/git/ref/heads/main`],
         ["GET", `${apiRoot}/git/commits/${branchSha}`],
+        ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
         ...Array.from({ length: blobIndex + 1 }, () => ["POST", `${apiRoot}/git/blobs`]),
       ];
 
@@ -802,6 +835,7 @@ for (const [mode, label, shaField, expectedRequests] of [
     [
       ["GET", "/git/ref/heads/main"],
       ["GET", "/git/commits/BRANCH_SHA"],
+      ["GET", `/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
       ["POST", "/git/blobs"],
       ["POST", "/git/blobs"],
       ["POST", "/git/blobs"],
@@ -815,6 +849,7 @@ for (const [mode, label, shaField, expectedRequests] of [
     [
       ["GET", "/git/ref/heads/main"],
       ["GET", "/git/commits/BRANCH_SHA"],
+      ["GET", `/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
       ["POST", "/git/blobs"],
       ["POST", "/git/blobs"],
       ["POST", "/git/blobs"],
@@ -858,6 +893,7 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
     [
       ["GET", `${apiRoot}/git/ref/heads/main`],
       ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
@@ -866,7 +902,7 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
       ["PATCH", `${apiRoot}/git/refs/heads/main`],
     ],
   );
-  assert.deepEqual(fixture.requests[5].treePaths, [
+  assert.deepEqual(fixture.requests[6].treePaths, [
     "projects/local-vault/gitmesh-ultimate-core.mjs",
     "projects/local-vault/README.md",
     "projects/local-vault/sync-public-source.mjs",
@@ -884,7 +920,7 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
       `${targetPath} blob did not match the validated local source`,
     );
   });
-  assert.deepEqual(fixture.requests[5].treeEntries, [
+  assert.deepEqual(fixture.requests[6].treeEntries, [
     {
       path: "projects/local-vault/gitmesh-ultimate-core.mjs",
       mode: "100644",
@@ -925,6 +961,97 @@ test("normal sync accepts a valid lowercase 40-character branch SHA", (t) => {
   assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
 });
 
+test("source sync creates no GitHub writes when every allowlisted blob is current", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "source-current");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 0, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "Sources are already current in vitalitychems-dot/GitMesh@main; no commit was created.",
+  );
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+    ],
+  );
+  assert.ok(fixture.requests.every(({ method }) => method === "GET"));
+  assert.equal(fixture.remoteHeadAfterSync, branchSha);
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+});
+
+test("source sync retries instead of skipping when main advances during the no-op check", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "tree-current-branch-advanced");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "GitHub branch changed while checking sources; rerun the sync; sync stopped.",
+  );
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+    ],
+  );
+  assert.ok(fixture.requests.every(({ method }) => method === "GET"));
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in output");
+  assert.ok(!fixture.output.includes(fixture.privateSource), "source content leaked in output");
+});
+
+test("source sync writes when one allowlisted blob differs from GitHub", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "one-source-diff");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 0, fixture.output);
+  assert.ok(fixture.output.includes("Synced 3 allowlisted source files"));
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/blobs`],
+      ["POST", `${apiRoot}/git/trees`],
+      ["POST", `${apiRoot}/git/commits`],
+      ["PATCH", `${apiRoot}/git/refs/heads/main`],
+    ],
+  );
+  assert.equal(fixture.remoteHeadAfterSync, "d".repeat(40));
+});
+
+test("source sync stops before writes if GitHub returns a truncated tree", (t) => {
+  const branchSha = "a".repeat(40);
+  const fixture = runSyncWithBranchSha(t, branchSha, "tree-truncated");
+  const apiRoot = "https://api.github.com/repos/vitalitychems-dot/GitMesh";
+
+  assert.equal(fixture.result.status, 1, fixture.output);
+  assert.equal(fixture.output.trim(), "GitHub returned an incomplete base tree; sync stopped.");
+  assert.deepEqual(
+    fixture.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", `${apiRoot}/git/ref/heads/main`],
+      ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
+    ],
+  );
+  assert.equal(fixture.remoteHeadAfterSync, branchSha);
+});
+
 test("README text that is invalid JavaScript is still synced without syntax-checking it", (t) => {
   const branchSha = "a".repeat(40);
   const fixture = runSyncWithBranchSha(t, branchSha, "readme-invalid-js");
@@ -937,9 +1064,9 @@ test("README text that is invalid JavaScript is still synced without syntax-chec
 
   assert.equal(fixture.result.status, 0, fixture.output);
   assert.ok(fixture.output.includes("Synced 3 allowlisted source files"));
-  assert.deepEqual(fixture.requests[5].treePaths, targetPaths);
-  assert.equal(fixture.requests[5].treeEntries.length, targetPaths.length);
-  assert.equal(fixture.requests.length, 8, "sync did not complete entirely through the mocked API");
+  assert.deepEqual(fixture.requests[6].treePaths, targetPaths);
+  assert.equal(fixture.requests[6].treeEntries.length, targetPaths.length);
+  assert.equal(fixture.requests.length, 9, "sync did not complete entirely through the mocked API");
   assert.ok(fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)));
 
   const syntaxInvocations = fs
@@ -1030,7 +1157,7 @@ test("sync uploads the initial source snapshot when a local file changes during 
   assert.equal(uploadedCore, fixture.expectedSources[corePath]);
   assert.notEqual(uploadedCore, fixture.changedSourceDuringRequest);
   assert.equal(fixture.localCoreAfterSync, fixture.changedSourceDuringRequest);
-  assert.equal(fixture.requests.length, 8, "sync did not complete entirely through the mocked API");
+  assert.equal(fixture.requests.length, 9, "sync did not complete entirely through the mocked API");
   assert.ok(
     fixture.requests.every(({ url }) => url.startsWith(`${apiRoot}/`)),
     "sync attempted an unexpected network request",
@@ -1075,6 +1202,7 @@ test("normal sync stops when the tree response JSON is unreadable", (t) => {
     [
       ["GET", `${apiRoot}/git/ref/heads/main`],
       ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
@@ -1106,6 +1234,7 @@ test("normal sync stops when the created-commit response JSON is unreadable", (t
     [
       ["GET", `${apiRoot}/git/ref/heads/main`],
       ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
@@ -1160,6 +1289,7 @@ for (const [mode, label, retryGuidance] of [
       [
         ["GET", `${apiRoot}/git/ref/heads/main`],
         ["GET", `${apiRoot}/git/commits/${branchSha}`],
+        ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
         ["POST", `${apiRoot}/git/blobs`],
         ["POST", `${apiRoot}/git/blobs`],
       ],
@@ -1196,6 +1326,7 @@ for (const status of [401, 403]) {
       [
         ["GET", `${apiRoot}/git/ref/heads/main`],
         ["GET", `${apiRoot}/git/commits/${branchSha}`],
+        ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
         ["POST", `${apiRoot}/git/blobs`],
         ["POST", `${apiRoot}/git/blobs`],
       ],
@@ -1717,6 +1848,10 @@ test("GitHub request timeout stops sync without leaking source or continuing wri
       '    clearTimeout(timers.get(options.signal));',
       '    return { ok: true, json: async () => ({ tree: { sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }) };',
       "  }",
+      '  if (url.endsWith("/git/trees/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?recursive=1")) {',
+      '    clearTimeout(timers.get(options.signal));',
+      '    return { ok: true, json: async () => ({ truncated: false, tree: [] }) };',
+      "  }",
       '  return new Promise((resolve, reject) => {',
       '    const onAbort = () => {',
       '      request.signalAborted = options.signal.aborted;',
@@ -1762,11 +1897,15 @@ test("GitHub request timeout stops sync without leaking source or continuing wri
       url: "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     },
     {
+      method: "GET",
+      url: "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/trees/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?recursive=1",
+    },
+    {
       method: "POST",
       url: "https://api.github.com/repos/vitalitychems-dot/GitMesh/git/blobs",
     },
   ]);
-  assert.deepEqual(observations.configuredTimeouts, [20_000, 20_000, 20_000], "the configured timeout was not attached to each request");
+  assert.deepEqual(observations.configuredTimeouts, [20_000, 20_000, 20_000, 20_000], "the configured timeout was not attached to each request");
   assert.ok(observations.requests.every(({ timeoutSignalAttached, authorizationHeaderIsExpected }) => timeoutSignalAttached && authorizationHeaderIsExpected), "request was missing its abort signal or expected credential");
   assert.ok(observations.requests.every(({ signalInitiallyAborted }) => signalInitiallyAborted === false), "a request did not start with a live signal");
   assert.equal(observations.requests.at(-1).signalAborted, true, "stalled fetch did not receive the timeout abort");
@@ -1796,6 +1935,7 @@ test("a later blob timeout prevents tree, commit, and branch writes", (t) => {
     [
       ["GET", `${apiRoot}/git/ref/heads/main`],
       ["GET", `${apiRoot}/git/commits/${branchSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
     ],
@@ -1842,10 +1982,10 @@ test("retry after an ambiguous ref timeout reads the latest head and never force
     "GitHub request timed out during PATCH /git/refs/heads/main. " +
       "Check the connection and retry; sync stopped.",
   );
-  assert.equal(firstAttempt.requests.length, 8);
-  assert.deepEqual(firstAttempt.requests[6].commit.parents, [originalSha]);
-  assert.equal(firstAttempt.requests[7].refUpdate.force, false);
-  assert.equal(firstAttempt.remoteHeadAfterSync, firstAttempt.requests[7].refUpdate.sha);
+  assert.equal(firstAttempt.requests.length, 9);
+  assert.deepEqual(firstAttempt.requests[7].commit.parents, [originalSha]);
+  assert.equal(firstAttempt.requests[8].refUpdate.force, false);
+  assert.equal(firstAttempt.remoteHeadAfterSync, firstAttempt.requests[8].refUpdate.sha);
   assert.ok(!firstAttempt.output.includes(firstAttempt.fakeToken));
   assert.ok(!firstAttempt.output.includes(firstAttempt.privateNetworkError));
   assert.ok(!firstAttempt.output.includes(firstAttempt.privateSource));
@@ -1866,6 +2006,7 @@ test("retry after an ambiguous ref timeout reads the latest head and never force
     [
       ["GET", `${apiRoot}/git/ref/heads/main`],
       ["GET", `${apiRoot}/git/commits/${latestRemoteSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
@@ -1874,9 +2015,9 @@ test("retry after an ambiguous ref timeout reads the latest head and never force
       ["PATCH", `${apiRoot}/git/refs/heads/main`],
     ],
   );
-  assert.deepEqual(retry.requests[6].commit.parents, [latestRemoteSha]);
-  assert.equal(retry.requests[7].refUpdate.force, false);
-  assert.equal(retry.remoteHeadAfterSync, retry.requests[7].refUpdate.sha);
+  assert.deepEqual(retry.requests[7].commit.parents, [latestRemoteSha]);
+  assert.equal(retry.requests[8].refUpdate.force, false);
+  assert.equal(retry.remoteHeadAfterSync, retry.requests[8].refUpdate.sha);
   assert.ok(!retry.output.includes(retry.fakeToken));
   assert.ok(!retry.output.includes(retry.privateNetworkError));
   assert.ok(!retry.output.includes(retry.privateSource));
@@ -1898,6 +2039,7 @@ test("a branch advance before ref update is rejected without overwriting the new
     [
       ["GET", `${apiRoot}/git/ref/heads/main`],
       ["GET", `${apiRoot}/git/commits/${originalSha}`],
+      ["GET", `${apiRoot}/git/trees/${MOCK_BASE_TREE_SHA}?recursive=1`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
       ["POST", `${apiRoot}/git/blobs`],
@@ -1906,9 +2048,9 @@ test("a branch advance before ref update is rejected without overwriting the new
       ["PATCH", `${apiRoot}/git/refs/heads/main`],
     ],
   );
-  assert.deepEqual(fixture.requests[6].commit.parents, [originalSha]);
-  assert.equal(fixture.requests[7].refUpdate.force, false);
-  assert.notEqual(fixture.requests[7].refUpdate.sha, fixture.advancedHeadSha);
+  assert.deepEqual(fixture.requests[7].commit.parents, [originalSha]);
+  assert.equal(fixture.requests[8].refUpdate.force, false);
+  assert.notEqual(fixture.requests[8].refUpdate.sha, fixture.advancedHeadSha);
   assert.equal(fixture.remoteHeadAfterSync, fixture.advancedHeadSha);
   assert.ok(!fixture.output.includes(fixture.privateResponseBody));
   assert.ok(!fixture.output.includes(fixture.fakeToken));

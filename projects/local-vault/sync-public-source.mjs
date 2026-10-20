@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
@@ -97,6 +98,39 @@ function requireSha(value, label) {
     throw new Error(`GitHub returned an invalid ${label}; sync stopped.`);
   }
   return value;
+}
+
+function gitBlobSha(content) {
+  return createHash("sha1")
+    .update(`blob ${content.length}\0`)
+    .update(content)
+    .digest("hex");
+}
+
+function sourceFilesMatchTree(remoteTree, files) {
+  if (!Array.isArray(remoteTree?.tree) || remoteTree.truncated !== false) {
+    throw new Error("GitHub returned an incomplete base tree; sync stopped.");
+  }
+
+  const allowedPaths = new Set(files.map(({ target }) => target));
+  const entriesByPath = new Map();
+  for (const entry of remoteTree.tree) {
+    if (!allowedPaths.has(entry?.path)) continue;
+    const entries = entriesByPath.get(entry.path) ?? [];
+    entries.push(entry);
+    entriesByPath.set(entry.path, entries);
+  }
+
+  return files.every(({ target, content }) => {
+    const entries = entriesByPath.get(target);
+    if (entries?.length !== 1) return false;
+    const [entry] = entries;
+    return entry?.mode === "100644"
+      && entry?.type === "blob"
+      && typeof entry.sha === "string"
+      && /^[a-f0-9]{40}$/.test(entry.sha)
+      && entry.sha === gitBlobSha(content);
+  });
 }
 
 function invalidSourceMessage(source, fileInfo, syntaxOnly) {
@@ -316,6 +350,21 @@ async function syncSource() {
   const parentSha = requireSha(ref?.object?.sha, "main branch commit");
   const parentCommit = await githubRequest(token, `/git/commits/${parentSha}`);
   const baseTreeSha = requireSha(parentCommit?.tree?.sha, "base tree");
+  const remoteTree = await githubRequest(
+    token,
+    `/git/trees/${baseTreeSha}?recursive=1`,
+  );
+  if (sourceFilesMatchTree(remoteTree, files)) {
+    const currentRef = await githubRequest(token, `/git/ref/heads/${BRANCH}`);
+    const currentHeadSha = requireSha(currentRef?.object?.sha, "main branch commit");
+    if (currentHeadSha !== parentSha) {
+      throw new Error("GitHub branch changed while checking sources; rerun the sync; sync stopped.");
+    }
+    console.log(
+      `Sources are already current in ${OWNER}/${REPOSITORY}@${BRANCH}; no commit was created.`,
+    );
+    return;
+  }
 
   const blobs = [];
   for (const { content } of files) {
