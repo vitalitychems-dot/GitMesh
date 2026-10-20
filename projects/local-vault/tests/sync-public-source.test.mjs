@@ -114,7 +114,7 @@ test("README timeout guidance matches the fixed source-sync limits", () => {
 function runSyncWithSyntaxResult(
   t,
   mode,
-  { checkOnly = false, tokenPresent = !checkOnly, tokenValue } = {},
+  { checkOnly = false, tokenPresent = !checkOnly, tokenValue, extraArgs = [] } = {},
 ) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-sync-syntax-"));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
@@ -310,6 +310,7 @@ function runSyncWithSyntaxResult(
   const result = spawnSync(process.execPath, [
     scriptPath,
     ...(checkOnly ? ["--check-syntax"] : []),
+    ...extraArgs,
   ], {
     cwd: tempDir,
     encoding: "utf8",
@@ -1567,6 +1568,25 @@ test("--check-syntax rejects invalid JavaScript with a GitHub token without publ
     invocations.every((invocation) => !Object.hasOwn(invocation.env, "GITHUB_TOKEN")),
     "syntax subprocess inherited the GitHub token",
   );
+});
+
+test("--check-syntax rejects unexpected arguments before any GitHub request", (t) => {
+  const fixture = runSyncWithSyntaxResult(t, "success", {
+    checkOnly: true,
+    tokenPresent: true,
+    extraArgs: ["unexpected-argument"],
+  });
+
+  assert.equal(fixture.tokenPresent, true, "the parent process did not receive a fake token");
+  assert.equal(fixture.result.status, 2, fixture.output);
+  assert.equal(
+    fixture.output.trim(),
+    "This program does not accept command-line arguments.",
+  );
+  assert.ok(!fixture.output.includes(fixture.fakeToken), "GitHub token leaked in usage output");
+  assert.ok(!fs.existsSync(fixture.sourceReadMarker), "invalid arguments caused source files to be read");
+  assert.ok(!fs.existsSync(fixture.syntaxMarker), "invalid arguments launched syntax validation");
+  assert.ok(!fs.existsSync(fixture.fetchMarker), "invalid arguments attempted a GitHub request or publish write");
 });
 
 test("syntax validation rejects a source file that changes during inspection", (t) => {
