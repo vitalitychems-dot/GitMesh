@@ -166,6 +166,14 @@ test("auth database failures return no private diagnostic detail", async (t) => 
   assert.equal(response.status, 503);
   assert.doesNotMatch(await response.text(), /PRIVATE|SECRET|stack|Error:/);
 });
+test("web sign-in distinguishes the active web key from the offline vault sigil", async () => {
+  const app = await readFile(new URL("../client/App.jsx", import.meta.url), "utf8");
+  assert.match(app, /Separate web admin key/);
+  assert.match(app, /not your offline vault sigil/);
+  assert.match(app, /latest web key you saved/);
+  assert.match(app, /initial setup Secret does not reset an existing key/);
+  assert.match(app, /key replaced by a confirmed rotation/);
+});
 test("the private client has no third-party identity, external fonts or browser credential storage", async () => {
   const files = ["App.jsx", "styles.css", "main.jsx", "index.html"];
   for (const file of files) {

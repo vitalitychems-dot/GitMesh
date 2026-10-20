@@ -9,6 +9,12 @@ Publish vetted public working-tree snapshots on top of GitHub's existing main br
 
 **How to apply:** Review the public file selection, exclude vault state, credential material, attachments and agent memory, preserve remote-only files, and never force-update a branch. Keep local private files intact.
 
+A healthy GitHub connection does not guarantee permission to update workflow files.
+
+**Why:** Repository contents and workflows have separate authorization requirements; connection health alone does not establish endpoint-specific permission.
+
+**How to apply:** Treat workflow permission separately from general repository access. Follow the integration's authorization-recovery flow and retry once rather than exporting credentials or bypassing the integration.
+
 The user authorized publication of GitMesh source on GitHub and web hosting on Replit, then clarified that the web workspace is private. Hosting must not expose the local vault/keypad server or private Gitbook.
 
 **Why:** The local administrator interface is not the web application. Isolating the web build and backend avoids exposing offline credentials or private storage.
