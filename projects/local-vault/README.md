@@ -32,33 +32,27 @@ Then open `http://127.0.0.1:8782` in a browser on the same machine running Node.
 
 ### iPhone access without exposing the HTTP service
 
-Use an SSH local-port forward from an iPhone only when the vault is running on a trusted Mac or Linux computer that you control:
+Use an SSH local-port forward from an iPhone only when the vault is running on a trusted computer that you control. The keypad HTTP listener remains on the host's loopback interface:
 
-1. On a trusted Mac or Linux computer, install Git and Node.js 20+, place the approved GitMesh source there, and start the local keypad with the command above. The `SovereignMeshVault/` directory is excluded from Git, so a fresh clone creates a separate, empty vault; it does not bring over the Replit workspace's local records or sigil.
-2. Enable SSH on that computer for a dedicated key-only account. Restrict that account to local TCP forwarding for `127.0.0.1:8782` only; an OpenSSH account rule should include:
+1. Install Git and Node.js 20+, place the approved GitMesh source on the computer, and start the local keypad with the command above. On Windows, run `node .\projects\local-vault\keypad-server.mjs` from the repository root. The `SovereignMeshVault/` directory is excluded from Git, so a fresh clone creates a separate, empty vault; it does not bring over the Replit workspace's local records or sigil.
 
-   ```text
-   Match User gitmesh-tunnel
-     AuthenticationMethods publickey
-     AllowTcpForwarding local
-     PermitOpen 127.0.0.1:8782
-     GatewayPorts no
-     PermitTTY no
-     X11Forwarding no
-     ForceCommand /usr/bin/false
-   ```
 
-   Restrict the iPhone key in that account's `authorized_keys` as well, for example: `restrict,port-forwarding,permitopen="127.0.0.1:8782",command="/usr/bin/false" ssh-ed25519 <iPhone-public-key>`. Generate the key pair in the iPhone SSH client and install only its public key on the host; never copy the private key into GitMesh. Verify the SSH host key on the iPhone. Make SSH reachable only over trusted Wi-Fi or an existing private VPN; do not create router port forwards or expose SSH publicly. Validate the host's SSH configuration (for OpenSSH, `sshd -t`) before reloading it, and do not risk disabling your existing administrator access.
-3. Install an iOS SSH client that explicitly supports forwarding a local port for use by Safari and a tunnel-only/no-shell session. Configure the iPhone's local port `8782` to forward to `127.0.0.1:8782` on the SSH host. Some clients require their documented device-wide SSH/VPN feature for Safari to use the tunnel; review that feature's traffic-routing behavior before enabling it. Keep the tunnel active.
-4. In Safari on the iPhone, open `http://127.0.0.1:8782`. Use the same local and host port: the server checks the request origin and rejects mismatched ports.
+### macOS or Linux host
 
-The HTTP server still listens only on the host's loopback address. The SSH tunnel carries browser traffic to that loopback socket; sigil verification and vault reads/writes remain on the host. This does not make a Replit workspace's loopback port reachable from an iPhone, and the current Replit preview is not a private tunnel. If the only copy of the vault is in Replit, do not expose the HTTP service to make it reachable; the steps above require running the source and vault on a computer you control. Moving vault state is a separate operation and must use an encrypted bundle or an encrypted backup, never GitHub.
+On a trusted Mac or Linux computer, enable SSH for a dedicated key-only account. Restrict that account to local TCP forwarding for `127.0.0.1:8782` only; an OpenSSH account rule should include:
 
-Use an SSH key only for the tunnel account and keep the phone locked. The tunnel protects traffic in transit, not data at rest; enable full-disk encryption on the host (such as FileVault, BitLocker, or LUKS). Compromised devices, screen recording, malicious browser extensions, keyloggers, or a person with access to an unlocked device can capture sigils and displayed records. The rotating keypad is input obfuscation, not encryption or a secure hardware keyboard.
+```text
+Match User gitmesh-tunnel
+  AuthenticationMethods publickey
+  AllowTcpForwarding local
+  PermitOpen 127.0.0.1:8782
+  GatewayPorts no
+  PermitTTY no
+  X11Forwarding no
+  ForceCommand /usr/bin/false
+```
 
-The keypad accepts only ASCII letters, digits, hyphen, and underscore. If an existing legacy sigil contains other characters, use the terminal CLI to sign in and rotate it to a generated sigil before using the browser keypad.
-
-The changing key labels are input obfuscation only. They are not a real language, encryption, a secure keyboard extension, or protection against a compromised device or software that can inspect the screen or browser. Sigil characters are entered through the visible buttons; a hardware keyboard can still navigate and activate those buttons for accessibility. The local browser console can add and list records and manually export/import Git bundles. New exports are encrypted before download; the existing terminal menu remains available.
+Restrict the iPhone key in that account's `authorized_keys` as well, for example: `restrict,port-forwarding,permitopen="127.0.0.1:8782",command="/usr/bin/false" ssh-ed25519 <iPhone-public-key>`. Generate the key pair in the iPhone SSH client and install only its public key on the host; never copy the private key into GitMesh. Verify the SSH host key on the iPhone. Make SSH reachable only over trusted Wi-Fi or an existing private VPN; do not create router port forwards or expose SSH publicly. Validate the host's SSH configuration (for OpenSSH, `sshd -t`) before reloading it, and do not risk disabling your existing administrator access.
 
 ## Local data
 
@@ -101,3 +95,76 @@ JavaScript syntax validation times out after 10 seconds. Each GitHub API request
 ## Security regression checks
 
 From the Replit workspace root, run `node --test projects/local-vault/tests/sync-public-source.test.mjs`. The checks use temporary files and mocked GitHub requests; they do not access the active vault or make network requests. Node.js is required; Python is not used.
+
+### Windows host with OpenSSH
+
+Windows users can run the same loopback-only keypad behind the Windows OpenSSH Server. These steps require an elevated PowerShell window for server setup and a separate, standard local account for the tunnel:
+
+1. Install or enable the OpenSSH Server capability if it is not already installed, then start its service:
+
+   ```powershell
+   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+   Start-Service sshd
+   ```
+
+   If Windows reports that the capability is already installed, continue with the service setup.
+2. Create a dedicated local account named `gitmesh-tunnel` that is **not** a member of Administrators. For example, in elevated PowerShell:
+
+   ```powershell
+   $password = Read-Host "Set a unique tunnel-account password" -AsSecureString
+   New-LocalUser -Name "gitmesh-tunnel" -Password $password
+   Remove-Variable password
+   ```
+
+   Sign in locally once as this account to create its Windows profile. In that account's session, create `.ssh\authorized_keys` under its profile (typically `C:\Users\gitmesh-tunnel\.ssh\authorized_keys`) and paste the iPhone SSH client's **public** key there. Keep the `.ssh` directory and key file writable only by the tunnel account and trusted administrators. Never copy the iPhone's private key to Windows or into GitMesh.
+3. Add this key restriction to the `authorized_keys` line before the `ssh-ed25519` key type and public-key text. Replace the example key and comment with the iPhone client's public key:
+
+   ```text
+   restrict,port-forwarding,permitopen="127.0.0.1:8782" ssh-ed25519 <iPhone-public-key> iPhone-gitmesh-tunnel
+   ```
+
+   `restrict` disables optional key capabilities; `port-forwarding` enables forwarding for this key, while the server rules below limit it to the one local destination.
+4. Add this account-specific block to `%ProgramData%\ssh\sshd_config`:
+
+   ```text
+   Match User gitmesh-tunnel
+     AuthenticationMethods publickey
+     PasswordAuthentication no
+     AllowTcpForwarding local
+     PermitOpen 127.0.0.1:8782
+     GatewayPorts no
+     PermitTTY no
+     ForceCommand powershell.exe -NoLogo -NoProfile -NonInteractive -Command exit
+   ```
+
+   This requires public-key authentication, permits only client-side local forwarding to the keypad, and forces any remote command or shell request to exit without opening an interactive shell. Keep the `Match` block after the global settings it should override. Validate the configuration before restarting SSH, and keep an existing administrator session open while checking access:
+
+   ```powershell
+   & "$env:WINDIR\System32\OpenSSH\sshd.exe" -t
+   Restart-Service sshd
+   ```
+
+5. In Windows Defender Firewall, restrict the inbound OpenSSH rule to the **Private** profile and `LocalSubnet`; disable any broader rule that would also allow SSH from other networks. Use trusted Wi-Fi or an existing private VPN only. Do not add a router port forward or expose SSH to the public internet.
+6. Verify the Windows SSH host-key fingerprint before accepting it on the iPhone. In elevated PowerShell, display the host's Ed25519 fingerprint with:
+
+   ```powershell
+   ssh-keygen.exe -lf "$env:ProgramData\ssh\ssh_host_ed25519_key.pub"
+   ```
+
+   Compare that fingerprint with the one shown by the iPhone SSH client through a separate trusted channel; do not blindly accept an unknown host key.
+
+For Windows-specific OpenSSH behavior, see Microsoft's [OpenSSH Server configuration for Windows](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration) and the [Win32 OpenSSH `sshd_config` reference](https://github.com/PowerShell/Win32-OpenSSH/wiki/sshd_config).
+
+
+### iPhone
+
+1. Install an iOS SSH client that supports local TCP forwarding reachable by Safari and a tunnel-only/no-shell session. Configure the host address as its private-network or private-VPN address, and forward the iPhone's **local port `8782`** to **`127.0.0.1:8782` on the host**. Keep the tunnel active. Some clients require their documented device-wide SSH/VPN feature for Safari to use the tunnel; review its traffic-routing behavior before enabling it.
+2. In Safari on the iPhone, open `http://127.0.0.1:8782`. The local port must be `8782`, matching the host port: the server checks the request origin against its listening port and rejects mismatches.
+
+The HTTP server still listens only on the host's loopback address. The SSH tunnel carries browser traffic to that loopback socket; sigil verification and vault reads/writes remain on the host. This does not make a Replit workspace's loopback port reachable from an iPhone, and the current Replit preview is not a private tunnel. If the only copy of the vault is in Replit, do not expose the HTTP service to make it reachable; the steps above require running the source and vault on a computer you control. Moving vault state is a separate operation and must use an encrypted bundle or an encrypted backup, never GitHub.
+
+Use an SSH key only for the tunnel account and keep the phone locked. The tunnel protects traffic in transit, not data at rest; enable full-disk encryption on the host (such as FileVault, BitLocker, or LUKS). Compromised devices, screen recording, malicious browser extensions, keyloggers, or a person with access to an unlocked device can capture sigils and displayed records. The rotating keypad is input obfuscation, not encryption or a secure hardware keyboard.
+
+The keypad accepts only ASCII letters, digits, hyphen, and underscore. If an existing legacy sigil contains other characters, use the terminal CLI to sign in and rotate it to a generated sigil before using the browser keypad.
+
+The changing key labels are input obfuscation only. They are not a real language, encryption, a secure keyboard extension, or protection against a compromised device or software that can inspect the screen or browser. Sigil characters are entered through the visible buttons; a hardware keyboard can still navigate and activate those buttons for accessibility. The local browser console can add and list records and manually export/import Git bundles. New exports are encrypted before download; the existing terminal menu remains available.
