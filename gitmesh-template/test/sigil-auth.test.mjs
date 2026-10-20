@@ -474,6 +474,55 @@ test("authentication rotates a version-2 credential into the maximum safe genera
   assertNoPlaintextSigil(authFile, activeSigil, session.currentSigil);
 });
 
+test("manual sigil changes work after the final automatic rotation without advancing generation", async () => {
+  const authFile = makeAuthPath();
+  const initialSigil = "last-automatic-generation-active-sigil-2026";
+  const salt = "f".repeat(32);
+  writeAuthFixture(authFile, {
+    version: 2,
+    salt,
+    verifier: verifier(initialSigil, salt),
+    generation: Number.MAX_SAFE_INTEGER - 1,
+    usedSigilHashes: [],
+  });
+
+  const session = await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([initialSigil]),
+    promptTextFn: getPrompt(["SAVED"]),
+    log: () => {},
+  });
+  const finalAutomaticSigil = session.currentSigil;
+  const manualReplacement = "manual-after-final-rotation-sigil-2026";
+
+  assert.equal(session.auth.generation, Number.MAX_SAFE_INTEGER);
+  await changeSigil(session, {
+    authFile,
+    promptLineFn: getPrompt([manualReplacement, manualReplacement]),
+    log: () => {},
+  });
+
+  const changed = loadAuth(authFile);
+  const expectedHistory = [fingerprint(initialSigil), fingerprint(finalAutomaticSigil)];
+  assert.equal(session.currentSigil, manualReplacement);
+  assert.equal(session.auth.generation, Number.MAX_SAFE_INTEGER);
+  assert.equal(changed.generation, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(changed.usedSigilHashes, expectedHistory);
+  assert.equal(changed.verifier, verifier(manualReplacement, changed.salt));
+  assertNoPlaintextSigil(authFile, initialSigil, finalAutomaticSigil, manualReplacement);
+
+  for (const consumedSigil of [initialSigil, finalAutomaticSigil]) {
+    await assert.rejects(
+      setupOrAuthenticate({
+        authFile,
+        promptLineFn: getPrompt([consumedSigil]),
+        log: () => {},
+      }),
+      /Access denied/,
+    );
+  }
+});
+
 test("cancelling the final safe rotation leaves the current sigil active and grants no access", async () => {
   const authFile = makeAuthPath();
   const activeSigil = "cancel-final-generation-active-sigil-2026";
