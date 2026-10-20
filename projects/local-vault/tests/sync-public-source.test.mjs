@@ -7,6 +7,64 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 const SOURCE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const REPOSITORY_ROOT = path.resolve(SOURCE_DIR, "../..");
+const DEFAULT_BRANCH = process.env.GITMESH_REPOSITORY_DEFAULT_BRANCH || "main";
+
+test("README source-sync badge targets the tracked workflow on the default branch", () => {
+  if (process.env.GITHUB_ACTIONS === "true") {
+    assert.ok(
+      process.env.GITMESH_REPOSITORY_DEFAULT_BRANCH,
+      "workflow must provide the repository's current default branch",
+    );
+  }
+  const readme = fs.readFileSync(path.join(REPOSITORY_ROOT, "README.md"), "utf8");
+  const badges = [...readme.matchAll(/^\[!\[[^\]]+\]\(([^)]+)\)\]\(([^)]+)\)$/gm)];
+  assert.equal(badges.length, 1, "README must have exactly one status badge");
+
+  const [, imageHref, linkHref] = badges[0];
+  const imageUrl = new URL(imageHref);
+  const linkUrl = new URL(linkHref);
+  for (const url of [imageUrl, linkUrl]) {
+    assert.equal(url.protocol, "https:");
+    assert.equal(url.hostname, "github.com");
+    assert.equal(url.username, "", "badge URLs must not contain embedded credentials");
+    assert.equal(url.password, "", "badge URLs must not contain embedded credentials");
+  }
+
+  const basePath = "/vitalitychems-dot/GitMesh/actions/workflows/";
+  const imageMatch = imageUrl.pathname.match(
+    /^\/vitalitychems-dot\/GitMesh\/actions\/workflows\/([A-Za-z0-9._-]+\.ya?ml)\/badge\.svg$/,
+  );
+  const linkMatch = linkUrl.pathname.match(
+    /^\/vitalitychems-dot\/GitMesh\/actions\/workflows\/([A-Za-z0-9._-]+\.ya?ml)$/,
+  );
+  assert.ok(imageMatch, "badge image must use a GitMesh Actions workflow URL");
+  assert.ok(linkMatch, "badge link must open a GitMesh Actions workflow");
+  assert.equal(imageMatch[1], linkMatch[1], "badge image and link must name the same workflow");
+  assert.ok(imageUrl.pathname.startsWith(basePath));
+  assert.ok(linkUrl.pathname.startsWith(basePath));
+
+  assert.deepEqual(
+    [...imageUrl.searchParams.entries()],
+    [["branch", DEFAULT_BRANCH]],
+    "badge image must target the default branch without extra query parameters",
+  );
+  assert.deepEqual(
+    [...linkUrl.searchParams.entries()],
+    [["query", `branch:${DEFAULT_BRANCH}`]],
+    "badge link must target the default branch without extra query parameters",
+  );
+
+  const workflowPath = path.posix.join(".github", "workflows", imageMatch[1]);
+  const tracked = spawnSync("git", ["ls-files", "--error-unmatch", "--", workflowPath], {
+    cwd: REPOSITORY_ROOT,
+    encoding: "utf8",
+    timeout: 5000,
+    windowsHide: true,
+  });
+  assert.equal(tracked.status, 0, `README badge workflow must be tracked: ${workflowPath}`);
+  assert.equal(tracked.stdout.trim(), workflowPath);
+});
 
 function timeoutFromSource(source, pattern, label) {
   const match = source.match(pattern);
