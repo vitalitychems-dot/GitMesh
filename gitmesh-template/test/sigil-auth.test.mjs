@@ -53,10 +53,17 @@ function failCredentialRename(auth, authFile, options = {}) {
 function failCredentialWriteAfterPartialFile(auth, authFile, options = {}) {
   return saveAuth(auth, authFile, {
     ...options,
-    writeFileSync(temporaryPath, contents, options) {
-      fs.writeFileSync(temporaryPath, contents.slice(0, 12), options);
+    writeFileSync(fileDescriptor, contents) {
+      fs.writeFileSync(fileDescriptor, contents.slice(0, 12));
       throw new Error("forced partial credential-write failure");
     },
+  });
+}
+
+function saveAuthWithFixedTemporaryPath(auth, authFile, options = {}) {
+  return saveAuth(auth, authFile, {
+    ...options,
+    randomUUID: () => "preexisting-collision",
   });
 }
 
@@ -598,6 +605,49 @@ test("partial credential write failure preserves the active sigil and removes th
     log: () => {},
   });
   assert.notEqual(authenticatedSession.currentSigil, activeSigil);
+});
+
+test("temporary-file creation collision preserves the existing file and active credential", async () => {
+  const authFile = makeAuthPath();
+  const activeSigil = "temp-collision-current-sigil-2026";
+  await setupOrAuthenticate({
+    authFile,
+    promptLineFn: getPrompt([activeSigil, activeSigil]),
+    log: () => {},
+  });
+  const authBefore = fs.readFileSync(authFile);
+  const temporaryPath = path.join(path.dirname(authFile), ".auth-preexisting-collision.tmp");
+  const temporaryContents = Buffer.from("pre-existing temporary file; leave unchanged");
+  fs.writeFileSync(temporaryPath, temporaryContents, { flag: "wx", mode: 0o600 });
+
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([activeSigil]),
+      promptTextFn: getPrompt(["SAVED"]),
+      saveAuthFn: saveAuthWithFixedTemporaryPath,
+      log: () => {},
+    }),
+    (error) => error?.code === "EEXIST",
+  );
+
+  assert.deepEqual(fs.readFileSync(temporaryPath), temporaryContents);
+  assert.deepEqual(fs.readFileSync(authFile), authBefore);
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(authFile)).sort(),
+    [path.basename(authFile), path.basename(temporaryPath)].sort(),
+  );
+  await assert.rejects(
+    setupOrAuthenticate({
+      authFile,
+      promptLineFn: getPrompt([activeSigil]),
+      promptTextFn: getPrompt(["CANCEL"]),
+      log: () => {},
+    }),
+    /Rotation cancelled/,
+  );
+  assert.deepEqual(fs.readFileSync(authFile), authBefore);
+  assert.deepEqual(fs.readFileSync(temporaryPath), temporaryContents);
 });
 
 test("manual changes store the replacement privately and reject previously used sigils", async () => {
