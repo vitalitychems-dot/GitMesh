@@ -81,13 +81,31 @@
         <h3>Saved on this device</h3>
         <ul id="record-list" class="record-list"></ul>
         <div class="actions bundle-actions">
-          <button id="export-bundle" class="quiet-button" type="button">Export bundle</button>
+          <button id="export-bundle" class="quiet-button" type="button">Export encrypted bundle</button>
           <button id="refresh-bundles" class="quiet-button" type="button">Check inbound folder</button>
         </div>
-        <p class="muted">Bundles are not encrypted. Put bundles you trust in the local <code>drops_inbound</code> folder before importing.</p>
+        <p class="muted">New exports are encrypted with a passphrase you choose. Put encrypted bundles in the local <code>drops_inbound</code> folder before importing. Older unencrypted bundles require a separate confirmation.</p>
         <ul id="bundle-list" class="bundle-list"></ul>
-        <a id="bundle-download" class="download-link" hidden>Download exported bundle</a>
+        <a id="bundle-download" class="download-link" download hidden>Download encrypted bundle</a>
       </section>
+
+      <dialog id="bundle-dialog" class="bundle-dialog" aria-labelledby="bundle-dialog-title" aria-describedby="bundle-dialog-help">
+        <form id="bundle-dialog-form">
+          <h2 id="bundle-dialog-title">Encrypt bundle</h2>
+          <p id="bundle-dialog-help" class="muted">Use a unique passphrase with at least 16 characters. GitMesh uses it only in this local session; it is not saved or logged.</p>
+          <label for="bundle-passphrase">Bundle passphrase</label>
+          <input id="bundle-passphrase" type="password" minlength="16" maxlength="256" autocomplete="off" spellcheck="false" required>
+          <div id="bundle-confirm-wrap">
+            <label for="bundle-passphrase-confirm">Confirm passphrase</label>
+            <input id="bundle-passphrase-confirm" type="password" minlength="16" maxlength="256" autocomplete="off" spellcheck="false" required>
+          </div>
+          <p id="bundle-dialog-error" class="notice error" role="alert" hidden></p>
+          <div class="actions">
+            <button id="bundle-dialog-cancel" class="quiet-button" type="button">Cancel</button>
+            <button id="bundle-dialog-submit" class="primary-button" type="submit">Encrypt and export</button>
+          </div>
+        </form>
+      </dialog>
 
       <p id="notice" class="notice" role="status" aria-live="polite"></p>
     </main>

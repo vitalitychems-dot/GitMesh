@@ -1,8 +1,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  decryptBundleFile,
+  encryptBundleFile,
+  MAX_BUNDLE_BYTES,
+  MAX_ENCRYPTED_BUNDLE_BYTES,
+  validateBundlePassphrase,
+} from "./bundle-crypto.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const VAULT = path.join(ROOT, "SovereignMeshVault");
@@ -23,7 +31,6 @@ const INTERNAL_GITIGNORE = [
 ].join("\n");
 const MAX_RECORDS = 1000;
 const MAX_RECORD_BYTES = 64 * 1024;
-const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
 const MAX_AUTH_BYTES = 70 * 1024 * 1024;
 const MAX_SIGIL_HISTORY = 1_000_000;
 const SCRYPT_OPTIONS = { N: 32_768, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
@@ -522,26 +529,62 @@ async function addRecord() {
   console.log(`Saved and verified record ${record.id}.`);
 }
 
-export function exportBundle() {
+export function exportBundle(passphrase) {
+  const normalizedPassphrase = validateBundlePassphrase(passphrase);
   listLocalRecords();
   validateBundleTree("main");
-  const filename = `mesh_snapshot_${new Date().toISOString().replace(/[:.]/g, "-")}_${crypto.randomUUID().slice(0, 8)}.bundle`;
+  const filename = `mesh_snapshot_${new Date().toISOString().replace(/[:.]/g, "-")}_${crypto.randomUUID().slice(0, 12)}.bundle.enc`;
   const bundlePath = path.join(OUTBOUND, filename);
-  runGit(["bundle", "create", bundlePath, "main"]);
-  console.log(`Exported bundle: ${path.relative(ROOT, bundlePath)}`);
-  console.log("Bundles are not encrypted. Transfer them only through a channel you trust.");
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-export-"));
+  const plaintextPath = path.join(tempDirectory, "snapshot.bundle");
+  const encryptedTempPath = path.join(OUTBOUND, `.${crypto.randomUUID()}.bundle.enc.tmp`);
+  let exportError;
+  try {
+    runGit(["bundle", "create", plaintextPath, "main"]);
+    const info = fs.lstatSync(plaintextPath);
+    if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > MAX_BUNDLE_BYTES) {
+      throw new Error("Bundle must be between 1 byte and 100 MiB.");
+    }
+    encryptBundleFile(plaintextPath, encryptedTempPath, normalizedPassphrase);
+    fs.linkSync(encryptedTempPath, bundlePath);
+  } catch (error) {
+    exportError = error;
+  } finally {
+    try { fs.unlinkSync(encryptedTempPath); } catch {}
+    try {
+      fs.rmSync(tempDirectory, { recursive: true, force: true });
+    } catch {
+      exportError = new Error(
+        `${exportError instanceof Error ? exportError.message : "Bundle export failed."} Temporary plaintext cleanup also failed.`,
+      );
+    }
+  }
+  if (exportError) throw exportError;
+  console.log(`Exported encrypted bundle: ${path.relative(ROOT, bundlePath)}`);
   return filename;
+}
+
+function validateBundleFile(bundlePath, maxBytes = MAX_BUNDLE_BYTES) {
+  const info = fs.lstatSync(bundlePath);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("The selected bundle is not a regular file.");
+  if (info.size <= 0 || info.size > maxBytes) {
+    throw new Error(`Bundle must be between 1 byte and ${Math.floor(maxBytes / (1024 * 1024))} MiB.`);
+  }
+  return bundlePath;
 }
 
 function safeBundlePath(filename) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}\.bundle$/.test(filename)) {
     throw new Error("Invalid bundle filename.");
   }
-  const bundlePath = path.join(INBOUND, filename);
-  const info = fs.lstatSync(bundlePath);
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error("The selected bundle is not a regular file.");
-  if (info.size <= 0 || info.size > MAX_BUNDLE_BYTES) throw new Error("Bundle must be between 1 byte and 100 MiB.");
-  return bundlePath;
+  return validateBundleFile(path.join(INBOUND, filename));
+}
+
+function safeEncryptedBundlePath(filename) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}\.bundle\.enc$/.test(filename)) {
+    throw new Error("Invalid encrypted bundle filename.");
+  }
+  return validateBundleFile(path.join(INBOUND, filename), MAX_ENCRYPTED_BUNDLE_BYTES);
 }
 
 function validateBundleTree(ref) {
@@ -569,14 +612,20 @@ function validateBundleTree(ref) {
 
 export function listInboundBundles() {
   return fs.readdirSync(INBOUND)
-    .filter((name) => name.endsWith(".bundle"))
+    .filter((name) => name.endsWith(".bundle") || name.endsWith(".bundle.enc"))
     .filter((name) => {
-      try { safeBundlePath(name); return true; } catch { return false; }
+      try {
+        if (name.endsWith(".bundle.enc")) safeEncryptedBundlePath(name);
+        else safeBundlePath(name);
+        return true;
+      } catch {
+        return false;
+      }
     });
 }
 
-export function importBundle(filename) {
-  const bundlePath = safeBundlePath(filename);
+function importBundleAtPath(bundlePath) {
+  validateBundleFile(bundlePath);
   runGit(["bundle", "verify", bundlePath]);
   const heads = runGit(["bundle", "list-heads", bundlePath]).split("\n").filter(Boolean);
   const mainHeads = heads.filter((line) => /\srefs\/heads\/main$/.test(line));
@@ -632,11 +681,33 @@ export function importBundle(filename) {
   }
 }
 
+export function importBundle(filename) {
+  return importBundleAtPath(safeBundlePath(filename));
+}
+
+export function importEncryptedBundle(filename, passphrase) {
+  const encryptedPath = safeEncryptedBundlePath(filename);
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "gitmesh-import-"));
+  const plaintextPath = path.join(tempDirectory, "decrypted.bundle");
+  try {
+    decryptBundleFile(encryptedPath, plaintextPath, passphrase);
+    return importBundleAtPath(plaintextPath);
+  } finally {
+    try { fs.rmSync(tempDirectory, { recursive: true, force: true }); } catch {}
+  }
+}
+
 async function importFromMenu() {
   const bundles = fs.readdirSync(INBOUND)
-    .filter((name) => name.endsWith(".bundle"))
+    .filter((name) => name.endsWith(".bundle") || name.endsWith(".bundle.enc"))
     .filter((name) => {
-      try { safeBundlePath(name); return true; } catch { return false; }
+      try {
+        if (name.endsWith(".bundle.enc")) safeEncryptedBundlePath(name);
+        else safeBundlePath(name);
+        return true;
+      } catch {
+        return false;
+      }
     });
   if (!bundles.length) {
     console.log(`No usable bundles found in ${path.relative(ROOT, INBOUND)}.`);
@@ -648,7 +719,27 @@ async function importFromMenu() {
   if (!/^\d+$/.test(selection)) throw new Error("Enter a bundle number from the list.");
   const index = Number(selection) - 1;
   if (index < 0 || index >= bundles.length) throw new Error("Bundle number is out of range.");
-  importBundle(bundles[index]);
+  const filename = bundles[index];
+  if (filename.endsWith(".bundle.enc")) {
+    const passphrase = await promptLine("Bundle passphrase (hidden): ");
+    importEncryptedBundle(filename, passphrase);
+    return;
+  }
+  console.log("This legacy bundle is unencrypted and readable by anyone who obtains it.");
+  if (await promptText("Type IMPORT to explicitly continue: ") !== "IMPORT") {
+    console.log("Import cancelled.");
+    return;
+  }
+  importBundle(filename);
+}
+
+async function exportFromMenu() {
+  const passphrase = await promptLine("New bundle passphrase (at least 16 characters, hidden): ");
+  const confirmation = await promptLine("Confirm bundle passphrase: ");
+  if (passphrase.normalize("NFC") !== confirmation.normalize("NFC")) {
+    throw new Error("Bundle passphrases did not match.");
+  }
+  exportBundle(passphrase);
 }
 
 export async function changeSigil(session, {
@@ -693,7 +784,7 @@ async function runMenu(session) {
     try {
       if (choice === "1") await addRecord();
       else if (choice === "2") verifyLedger();
-      else if (choice === "3") exportBundle();
+      else if (choice === "3") await exportFromMenu();
       else if (choice === "4") await importFromMenu();
       else if (choice === "5") await changeSigil(session);
       else if (choice === "0") return;

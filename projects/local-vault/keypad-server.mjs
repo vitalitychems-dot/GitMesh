@@ -3,10 +3,12 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { MAX_ENCRYPTED_BUNDLE_BYTES, validateBundlePassphrase } from "./bundle-crypto.mjs";
 import {
   addLocalRecord,
   ensureVault,
   exportBundle,
+  importEncryptedBundle,
   importBundle,
   listInboundBundles,
   listLocalRecords,
@@ -165,7 +167,8 @@ function validateRecordInput(body) {
 }
 
 function validateBundleName(name) {
-  if (typeof name !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}\.bundle$/.test(name)) {
+  if (typeof name !== "string" ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}\.bundle(?:\.enc)?$/.test(name)) {
     throw new Error("Choose a listed bundle.");
   }
 }
@@ -178,6 +181,7 @@ export function createKeypadServer({
   makeBundle = exportBundle,
   inboundBundles = listInboundBundles,
   importExistingBundle = importBundle,
+  importEncryptedExistingBundle = importEncryptedBundle,
 } = {}) {
   const challenges = new Map();
   const pendingLogins = new Map();
@@ -471,11 +475,15 @@ export function createKeypadServer({
       }
     }
     if (route === "POST /api/export") {
+      const body = await readJson(request);
       try {
-        const filename = makeBundle();
+        validateBundlePassphrase(body.passphrase);
+        const filename = makeBundle(body.passphrase);
+        validateBundleName(filename);
+        if (!filename.endsWith(".bundle.enc")) throw new Error("Bundle export must be encrypted.");
         return sendJson(response, requestId, 200, { filename, download: `/api/export/${encodeURIComponent(filename)}` });
       } catch {
-        return sendJson(response, requestId, 400, { error: "Bundle export failed. No bundle was prepared." });
+        return sendJson(response, requestId, 400, { error: "Encrypted bundle export failed. Check the passphrase and vault state." });
       }
     }
     if (route === "GET /api/inbound") {
@@ -485,25 +493,41 @@ export function createKeypadServer({
       const body = await readJson(request);
       validateBundleName(body.filename);
       try {
-        const result = importExistingBundle(body.filename);
+        let result;
+        if (body.filename.endsWith(".bundle.enc")) {
+          validateBundlePassphrase(body.passphrase);
+          result = importEncryptedExistingBundle(body.filename, body.passphrase);
+        } else {
+          if (body.allowUnencrypted !== true) {
+            return sendJson(response, requestId, 400, {
+              error: "This older bundle is unencrypted. Confirm explicitly before importing it.",
+            });
+          }
+          result = importExistingBundle(body.filename);
+        }
         return sendJson(response, requestId, 200, result);
       } catch {
-        return sendJson(response, requestId, 400, { error: "Import failed. No invalid records were added." });
+        return sendJson(response, requestId, 400, {
+          error: body.filename.endsWith(".bundle.enc")
+            ? "Bundle authentication or validation failed. No records were imported."
+            : "Import failed. No invalid records were added.",
+        });
       }
     }
     if (request.method === "GET" && url.pathname.startsWith("/api/export/")) {
       const filename = decodeURIComponent(url.pathname.slice("/api/export/".length));
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}\.bundle$/.test(filename)) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}\.bundle\.enc$/.test(filename)) {
         return sendJson(response, requestId, 400, { error: "Invalid bundle name." });
       }
       const bundlePath = path.join(VAULT, "bundles_outbound", filename);
       try {
         const info = fs.lstatSync(bundlePath);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > 100 * 1024 * 1024) {
+        if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > MAX_ENCRYPTED_BUNDLE_BYTES) {
           return sendJson(response, requestId, 404, { error: "Bundle not found." });
         }
         response.setHeader("Content-Type", "application/octet-stream");
         response.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+        response.setHeader("Cache-Control", "no-store");
         response.setHeader("Content-Length", info.size);
         return fs.createReadStream(bundlePath).pipe(response);
       } catch {
