@@ -27,17 +27,21 @@ set -euo pipefail
 usage() {
   cat <<'U'
 Usage: bundle-verify-import.sh --in DIR --name NAME --signer FPR --target REPO
-                               [--provenance-log FILE] [--verify-only]
+                               [--provenance-log FILE] [--verify-only] [--allow-replay]
   --signer          full primary-key fingerprint (40 hex, or 64 for v5 keys)
                     the SHA256SUMS signature must come from. Its public key
                     (plus any revocation) must already be in your gpg keyring.
   --provenance-log  JSONL file to append an import record to
                     (default: $HOME/.airgap/provenance.jsonl, outside any repo)
   --verify-only     run every check, import nothing (dry run)
+  --allow-replay    accept a bundle whose signed created_utc is OLDER than the
+                    newest one already imported under the same --name (per the
+                    provenance log). Off by default. See "Replay and re-import"
+                    in docs/SECURE-DATA-FLOW.md for what this does and doesn't cover.
 U
 }
 
-IN="" NAME="" SIGNER="" TARGET="" PLOG="${HOME}/.airgap/provenance.jsonl" VERIFY_ONLY=0
+IN="" NAME="" SIGNER="" TARGET="" PLOG="${HOME}/.airgap/provenance.jsonl" VERIFY_ONLY=0 ALLOW_REPLAY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --in) IN=$2; shift 2;;
@@ -46,6 +50,7 @@ while [ $# -gt 0 ]; do
     --target) TARGET=$2; shift 2;;
     --provenance-log) PLOG=$2; shift 2;;
     --verify-only) VERIFY_ONLY=1; shift;;
+    --allow-replay) ALLOW_REPLAY=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "unknown arg: $1" >&2; usage; exit 2;;
   esac
@@ -140,6 +145,19 @@ PSIGN=$(jq -r '.signer // "" | ascii_upcase' "$WORK/in/$PROVF")
 [[ "$WANT" =~ ^[0-9a-f]{64}$ ]] || die "provenance has no valid plaintext_bundle_sha256"
 [ "$PNAME" = "$NAME" ] || die "provenance name '$PNAME' != --name '$NAME'"
 [ "$PSIGN" = "$SIGNER" ] || die "provenance signer does not match --signer"
+CREATED=$(jq -r '.created_utc // ""' "$WORK/in/$PROVF")
+[[ "$CREATED" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || die "provenance has no valid created_utc"
+# Replay guard (best effort, local only): refuse a bundle that is older than the
+# newest one already imported under this --name, according to the local log.
+LAST=""
+if [ -f "$PLOG" ]; then
+  LAST=$(jq -rR --arg n "$NAME" 'fromjson? | select(type=="object" and .name==$n) | .created_utc // empty' "$PLOG" 2>/dev/null | sort | tail -1)
+fi
+if [ -n "$LAST" ] && [[ "$CREATED" < "$LAST" ]]; then
+  [ "$ALLOW_REPLAY" = 1 ] || die "possible replay: bundle created $CREATED is older than the last import of '$NAME' ($LAST); pass --allow-replay only if intended"
+  echo "WARN older than last import of '$NAME' ($LAST); continuing because of --allow-replay"
+fi
+echo "ok   provenance (name, signer, created_utc $CREATED${LAST:+, last import $LAST})"
 
 # 4. Decrypt the private copy.
 case "$ENC" in
@@ -167,14 +185,14 @@ fi
 #    with object fsck so a malformed object aborts the fetch.
 git -C "$TARGET" -c transfer.fsckObjects=true -c fetch.fsckObjects=true \
   fetch --no-tags --no-write-fetch-head "$WORK/b.bundle" "refs/heads/*:refs/remotes/airgap/$NAME/*" 2>&1 | sed 's/^/     /' \
-  || die "git fetch/fsck rejected the bundle; nothing imported"
+  || die "git fetch rejected the bundle (fsck error, or a non-fast-forward update of an existing quarantine ref); rejected refs unchanged, no log record written"
 echo "ok   import with transfer.fsckObjects + fetch.fsckObjects"
 
 # 7. Provenance record, kept outside the repo; commit a copy via reviewed PR if wanted.
 mkdir -p "$(dirname "$PLOG")"
 git -C "$TARGET" for-each-ref --format='%(refname)%09%(objectname)' "refs/remotes/airgap/$NAME/" \
-| jq -cR --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg n "$NAME" --arg s "$SIGNER" --arg b "$GOT" \
+| jq -cR --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg n "$NAME" --arg s "$SIGNER" --arg b "$GOT" --arg c "$CREATED" \
       --arg tg "$(basename "$(cd "$TARGET" && pwd)")" \
-      -s '{imported_utc:$t,name:$n,signer:$s,bundle_sha256:$b,target:$tg,
+      -s '{imported_utc:$t,name:$n,created_utc:$c,signer:$s,bundle_sha256:$b,target:$tg,
            refs:[split("\n")[]|select(length>0)|split("\t")|{ref:.[0],sha:.[1]}]}' >> "$PLOG"
 echo "IMPORT OK: refs under refs/remotes/airgap/$NAME/ ; provenance -> $PLOG"
