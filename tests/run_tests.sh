@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2015  # "A && ok || bad" is intended: ok and bad always return 0
 # tests/run_tests.sh: runnable tests for tools/bundle-export.sh and
 # tools/bundle-verify-import.sh. Everything (gpg homes, keys, repos, bundles)
 # lives under one mktemp dir that is removed on exit. Throwaway keys only;
@@ -63,7 +64,7 @@ PLOG="$T/prov.jsonl"
 
 echo "== 1 good path (export, verify-only, import)"
 expect_ok "export gpg" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/o1" --name t1 --sign-key "$S" --gpg-recipient "$R"
-[ "$(ls -A "$T/o1" | wc -l)" = 4 ] && ! ls -A "$T/o1" | grep -q '\.tmp\.' && ok "exactly 4 files, no staging leftovers" || bad "out dir contents: $(ls -A "$T/o1")"
+[ "$(find "$T/o1" -mindepth 1 -maxdepth 1 | wc -l)" = 4 ] && ! compgen -G "$T/o1/.*.tmp.*" >/dev/null && ok "exactly 4 files, no staging leftovers" || bad "out dir contents: $(find "$T/o1" -mindepth 1 -maxdepth 1)"
 jq -e 'has("exporter_host")|not' "$T/o1/t1.provenance.json" >/dev/null && ok "no exporter_host by default" || bad "host leaked"
 expect_ok "verify-only" "$RECV" "$IMPORT" --in "$T/o1" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
 [ -z "$(git -C "$DST" for-each-ref refs/remotes/airgap)" ] && ok "verify-only imported nothing" || bad "verify-only imported refs"
@@ -194,7 +195,7 @@ esac
 exec "$REALT" "\$@"
 SH
 chmod +x "$T/fshim/$tool"; done
-for mode in "cp 2" "mv 3"; do set -- $mode
+for mode in "cp 2" "mv 3"; do read -r -a MA <<<"$mode"; set -- "${MA[@]}"
   OUTF="$T/oFail-$1"; rm -rf "$OUTF"
   expect_fail "export fails on $1 #$2 into --out" "nothing left behind" "$SEND" env PATH="$T/fshim:$PATH" FAIL_OUT="$OUTF" "FAIL_AT_$1=$2" \
     "$EXPORT" --repo "$SRC" --out "$OUTF" --name mf --sign-key "$S" --gpg-recipient "$R"
@@ -217,11 +218,13 @@ expect_fail "import with --signer = subkey fpr" "fingerprint mismatch|full 40/64
 
 echo "== 13 credentials stripped from origin URL"
 git clone -q "$SRC" "$T/cred"
-git -C "$T/cred" remote set-url origin 'https://user:s3cret@example.invalid/org/repo.git?token=AAA&access_token=BBB#frag-CCC'
+# Sentinels are non-hex (z, q, T, O, K...), so they can never match the hex
+# fingerprints that the provenance also holds; matched as whole words (-w).
+git -C "$T/cred" remote set-url origin 'https://zzUSERqq:zzPASSqq@example.invalid/org/repo.git?token=zzTOKENqq&access_token=zzACCESSqq#frag-zzFRAGqq'
 expect_ok "export from repo with credentialed origin" "$SEND" "$EXPORT" --repo "$T/cred" --out "$T/oC" --name cr --sign-key "$S" --gpg-recipient "$R"
 O=$(jq -r .source_origin "$T/oC/cr.provenance.json"); echo "      | source_origin: $O"
 [ "$O" = "https://example.invalid/org/repo.git" ] && ok "userinfo, query and fragment stripped" || bad "origin not stripped: $O"
-grep -Eq 's3cret|AAA|BBB|CCC|token' "$T/oC/cr.provenance.json" && bad "credential text in provenance" || ok "no credential text anywhere in provenance"
+grep -Ewq 'zzUSERqq|zzPASSqq|zzTOKENqq|zzACCESSqq|zzFRAGqq|token|access_token' "$T/oC/cr.provenance.json" && bad "credential text in provenance" || ok "no credential text anywhere in provenance"
 # Unusual forms (GitAI P3): uppercase scheme, scp-style user:tok@, '/' in the password, ;token= params.
 n=0
 while IFS='|' read -r url want; do n=$((n+1))
@@ -316,7 +319,102 @@ expect_ok "B with --allow-replay (fast-forward) imports" "$RECV" "$IMPORT" --in 
 [ "$(git -C "$D17" rev-parse refs/remotes/airgap/eq/main)" = "$EQB" ] && ok "ref at B after --allow-replay" || bad "ref not at B"
 jq -e 'has("manifest_sha256") and .status=="imported"' "$L17" >/dev/null && ok "import log records manifest_sha256 and status" || bad "log lacks manifest_sha256/status"
 
-echo "== temp dirs left by the scripts: $(ls -A "$T/tmp" | wc -l)"
-[ -z "$(ls -A "$T/tmp")" ] && ok "no temp dirs left" || bad "leftover temp: $(ls -A "$T/tmp")"
+echo "== 18 Pen review: globs, branchless bundles, names, spaces, --since, signals, exit codes, log"
+# expect_rc NAME RC PATTERN HOME cmd...: exact exit code AND message.
+expect_rc() { local name=$1 want=$2 pat=$3; shift 3; run_as "$@"; local rc=$?
+  if [ "$rc" = "$want" ] && grep -Eq "$pat" "$T/out"; then ok "$name (rc=$rc)"; else bad "$name (rc=$rc, want $want and /$pat/)"; fi; }
+empty_dir() { [ -d "$1" ] && [ -z "$(find "$1" -mindepth 1 -maxdepth 1)" ]; }
+# (a) --refs glob is not expanded against the caller's cwd (Pen MF1). Before the fix,
+#     the file '--branches=featZ' below turned --refs '--branches=feat*' into
+#     '--branches=featZ', which matches no branch, so the wrong refs were exported.
+git -C "$SRC" branch feat1 main
+mkdir -p "$T/globcwd"; : >"$T/globcwd/--branches=featZ"; : >"$T/globcwd/mainX"
+( cd "$T/globcwd" && GNUPGHOME="$SEND" "$EXPORT" --repo "$SRC" --out "$T/oGlob" --name gl --sign-key "$S" --gpg-recipient "$R" --refs '--branches=feat*' ) >"$T/out" 2>&1 \
+  && ok "export --refs '--branches=feat*' from a cwd with matching file names" || { indent <"$T/out"; bad "glob export failed"; }
+jq -e '[.heads[].ref]==["refs/heads/feat1"]' "$T/oGlob/gl.provenance.json" >/dev/null 2>&1 && ok "bundle carries exactly refs/heads/feat1 (pattern reached git unexpanded)" || bad "glob refs wrong: $(jq -c .heads "$T/oGlob/gl.provenance.json" 2>&1)"
+git -C "$SRC" branch -q -D feat1
+# (b) branchless bundles (Pen MF2): export refuses, and a hand-built one fails import.
+git -C "$SRC" tag v1 main
+expect_fail "export --refs HEAD refused" "no branches" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oH0" --name hd --sign-key "$S" --gpg-recipient "$R" --refs HEAD
+expect_fail "export --refs v1 (tag only) refused" "no branches" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oV0" --name tg --sign-key "$S" --gpg-recipient "$R" --refs v1
+hand_bundle() { # hand_bundle NAME OUTDIR REV...: validly signed + encrypted, no export-side checks
+  local n=$1 o=$2; shift 2; mkdir -p "$o"
+  git -C "$SRC" bundle create "$T/hb.bundle" "$@" >/dev/null 2>&1 || return 1
+  GNUPGHOME="$SEND" gpg --batch --yes --trust-model always --encrypt --recipient "$R" --output "$o/$n.bundle.gpg" "$T/hb.bundle" 2>/dev/null || return 1
+  jq -cn --arg n "$n" --arg s "$S" --arg r "$R" --arg p "$(sha256sum "$T/hb.bundle" | cut -d' ' -f1)" --arg c "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{name:$n,created_utc:$c,plaintext_bundle_sha256:$p,encryption:"gpg",recipient:$r,signer:$s,redacted:true}' >"$o/$n.provenance.json"
+  ( cd "$o" && sha256sum -- "$n.bundle.gpg" "$n.provenance.json" >"$n.SHA256SUMS" )
+  GNUPGHOME="$SEND" gpg --batch --yes --local-user "$S" --armor --detach-sign --output "$o/$n.SHA256SUMS.asc" "$o/$n.SHA256SUMS" 2>/dev/null
+  rm -f "$T/hb.bundle"
+}
+D18="$T/d18"; L18="$T/p18.jsonl"; git init -q -b main "$D18"; git -C "$D18" commit -q --allow-empty -m base
+for kind in "hd HEAD" "tg v1"; do read -r -a KA <<<"$kind"; set -- "${KA[@]}"
+  if hand_bundle "$1" "$T/oB$1" "$2"; then
+    expect_rc "import of a $2-only bundle fails" 6 "no branches" "$RECV" "$IMPORT" --in "$T/oB$1" --name "$1" --signer "$S" --target "$D18" --provenance-log "$L18"
+    ! grep -q 'IMPORT OK' "$T/out" && [ -z "$(git -C "$D18" for-each-ref refs/remotes/airgap)" ] && [ ! -e "$L18" ] \
+      && ok "$2-only: no IMPORT OK, no refs, no log row" || bad "$2-only bundle reported or imported something"
+    expect_rc "verify-only of a $2-only bundle fails too" 6 "no branches" "$RECV" "$IMPORT" --in "$T/oB$1" --name "$1" --signer "$S" --target "$D18" --provenance-log "$L18" --verify-only
+  else bad "could not hand-build $2-only bundle"; fi
+done
+git -C "$SRC" tag -d v1 >/dev/null
+# (c) --name with a leading dash (Pen SF1)
+expect_rc "export --name -x refused" 1 "not starting with" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oDash" --name -x --sign-key "$S" --gpg-recipient "$R"
+expect_rc "import --name -x refused" 1 "not starting with" "$RECV" "$IMPORT" --in "$T/o1" --name -x --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
+# (d) a flag with no value -> usage, rc 2 (Pen nit 1)
+expect_rc "export: --out with no value" 2 "missing value for --out" "$SEND" "$EXPORT" --repo "$SRC" --name nv --sign-key "$S" --gpg-recipient "$R" --out
+expect_rc "import: --target with no value" 2 "missing value for --target" "$RECV" "$IMPORT" --in "$T/o1" --name t1 --signer "$S" --target
+# (e) spaces in --out, --in, --repo, --provenance-log and TMPDIR (Pen SF6)
+mkdir -p "$T/tmp sp"; git clone -q "$SRC" "$T/src sp"; git init -q -b main "$T/dst sp"; git -C "$T/dst sp" commit -q --allow-empty -m base
+expect_ok "export with spaces in --repo/--out/TMPDIR" "$SEND" env TMPDIR="$T/tmp sp" "$EXPORT" --repo "$T/src sp" --out "$T/o sp" --name sp --sign-key "$S" --gpg-recipient "$R"
+expect_ok "import with spaces in --in/--target/--provenance-log/TMPDIR" "$RECV" env TMPDIR="$T/tmp sp" "$IMPORT" --in "$T/o sp" --name sp --signer "$S" --target "$T/dst sp" --provenance-log "$T/log sp/p.jsonl"
+[ "$(git -C "$T/dst sp" rev-parse refs/remotes/airgap/sp/main 2>/dev/null)" = "$(git -C "$SRC" rev-parse main)" ] && empty_dir "$T/tmp sp" \
+  && ok "spaced paths: ref imported, spaced TMPDIR left empty" || bad "spaced paths"
+# (f) --since incremental round trip + missing prerequisite (Pen SF6, SF2, SF3)
+HEADNOW=$(git -C "$SRC" rev-parse main)
+expect_ok "incremental export --since GOOD" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oInc" --name inc --sign-key "$S" --gpg-recipient "$R" --refs main --since "$GOOD"
+expect_ok "incremental import on top of a target that has GOOD" "$RECV" "$IMPORT" --in "$T/oInc" --name inc --signer "$S" --target "$DST" --provenance-log "$PLOG"
+[ "$(git -C "$DST" rev-parse refs/remotes/airgap/inc/main 2>/dev/null)" = "$HEADNOW" ] && ok "incremental ref = source main" || bad "incremental ref"
+git init -q -b main "$T/dempty"
+expect_rc "incremental into an empty repo: missing prerequisite" 6 "bundle verify failed" "$RECV" "$IMPORT" --in "$T/oInc" --name inc --signer "$S" --target "$T/dempty" --provenance-log "$T/pe.jsonl" --verify-only
+grep -qi 'prerequisite' "$T/out" && ok "git's own message (which prerequisite is missing) is shown" || bad "git bundle verify stderr hidden"
+# (g) exit code per failure class (Pen SF3)
+expect_rc "edited manifest -> 3" 3 "BADSIG" "$RECV" "$IMPORT" --in "$T/oM" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
+grep -q 'gpg --verify stderr' "$T/out" && ok "gpg --verify stderr shown on signature failure" || bad "gpg stderr hidden"
+expect_rc "attacker signature -> 3" 3 "signature|GOODSIG|BADSIG" "$RECV" "$IMPORT" --in "$T/oA" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
+expect_rc "tampered bundle -> 4" 4 "checksum mismatch" "$RECV" "$IMPORT" --in "$T/oT" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
+expect_rc "symlink on medium -> 4" 4 "symlink" "$RECV" "$IMPORT" --in "$T/oL" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
+if [ -e "$T/oG/ag.bundle.age" ]; then
+  expect_rc "age wrong identity -> 5" 5 "age decrypt failed" "$RECV" env AGE_IDENTITY="$T/age2.key" "$IMPORT" --in "$T/oG" --name ag --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
+  grep -q 'decrypt stderr' "$T/out" && ok "age stderr shown on decrypt failure" || bad "age stderr hidden"
+else skip "age exit code (no age bundle)"; fi
+expect_rc "replay -> 7" 7 "possible replay" "$RECV" "$IMPORT" --in "$T/rpOld" --name rp --signer "$S" --target "$D15" --provenance-log "$L15"
+# (h) unreadable / non-regular provenance log fails loudly (Pen SF3)
+mkdir -p "$T/plogdir"
+expect_rc "provenance log is a directory" 1 "cannot read provenance log" "$RECV" "$IMPORT" --in "$T/o1" --name t1 --signer "$S" --target "$DST" --provenance-log "$T/plogdir" --verify-only
+cp "$PLOG" "$T/p000.jsonl"; chmod 000 "$T/p000.jsonl"
+if [ -r "$T/p000.jsonl" ]; then skip "chmod 000 log still readable (running as root)"
+else expect_rc "provenance log chmod 000" 1 "cannot read provenance log" "$RECV" "$IMPORT" --in "$T/o1" --name t1 --signer "$S" --target "$DST" --provenance-log "$T/p000.jsonl" --verify-only; fi
+chmod 600 "$T/p000.jsonl"
+# (i) identical re-import adds no log row; rows list only this bundle's refs (Pen nit 4)
+N0=$(wc -l <"$PLOG")
+expect_ok "re-import t1 (identical, nothing changes)" "$RECV" "$IMPORT" --in "$T/o1" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG"
+[ "$(wc -l <"$PLOG")" = "$N0" ] && grep -q 'no new row' "$T/out" && ok "identical re-import wrote no new log row" || bad "log grew on identical re-import"
+tail -1 "$PLOG" | jq -e '[.refs[].ref]==["refs/remotes/airgap/inc/main"]' >/dev/null && ok "log row lists only the bundle's own refs" || bad "log row refs: $(tail -1 "$PLOG" | jq -c .refs)"
+# (j) SIGTERM during export -> rc 143, nothing left in --out or TMPDIR (Pen SF6, nit 2)
+mkdir -p "$T/sshim" "$T/tmpk"; REALG=$(command -v gpg)
+cat >"$T/sshim/gpg" <<SH
+#!/usr/bin/env bash
+case " \$* " in *" --encrypt "*) : >"$T/enc-started"; sleep 2;; esac
+exec "$REALG" "\$@"
+SH
+chmod +x "$T/sshim/gpg"; rm -f "$T/enc-started"
+GNUPGHOME="$SEND" PATH="$T/sshim:$PATH" TMPDIR="$T/tmpk" "$EXPORT" --repo "$SRC" --out "$T/oTerm" --name tm --sign-key "$S" --gpg-recipient "$R" >"$T/out" 2>&1 &
+EPID=$!; for _ in $(seq 1 100); do [ -e "$T/enc-started" ] && break; sleep 0.1; done
+kill -TERM "$EPID" 2>/dev/null; wait "$EPID"; RC=$?
+[ "$RC" = 143 ] && ok "SIGTERM during export exits 143" || { indent <"$T/out"; bad "SIGTERM rc=$RC (want 143)"; }
+{ [ ! -e "$T/oTerm" ] || empty_dir "$T/oTerm"; } && empty_dir "$T/tmpk" && ok "after SIGTERM: --out and TMPDIR empty" || bad "leftovers after SIGTERM"
+
+echo "== temp dirs left by the scripts: $(find "$T/tmp" -mindepth 1 -maxdepth 1 | wc -l)"
+empty_dir "$T/tmp" && ok "no temp dirs left" || bad "leftover temp: $(find "$T/tmp" -mindepth 1 -maxdepth 1)"
 echo "SUMMARY: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" = 0 ]
