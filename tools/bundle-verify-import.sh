@@ -17,7 +17,8 @@
 #   * --signer must be a full 40- (or 64-) hex fingerprint. It is compared as a
 #     plain string, never as a regex.
 #   * The manifest must list exactly one encrypted bundle and the provenance file.
-#   * The import runs with transfer.fsckObjects and fetch.fsckObjects on.
+#   * The import runs with transfer.fsckObjects and fetch.fsckObjects on, and
+#     with git fetch --atomic, so it is all-or-nothing across refs.
 #   * JSON is read and written with jq, never with sed or printf.
 #
 # Import never overwrites existing branches: refs land under
@@ -34,9 +35,9 @@ Usage: bundle-verify-import.sh --in DIR --name NAME --signer FPR --target REPO
   --provenance-log  JSONL file to append an import record to
                     (default: $HOME/.airgap/provenance.jsonl, outside any repo)
   --verify-only     run every check, import nothing (dry run)
-  --allow-replay    accept a bundle whose signed created_utc is OLDER than the
-                    newest one already imported under the same --name (per the
-                    provenance log). Off by default. See "Replay and re-import"
+  --allow-replay    accept a bundle whose signed created_utc is older than, or
+                    equal to with a different signed manifest, the newest one
+                    already imported under the same --name (per the provenance log). Off by default. See "Replay and re-import"
                     in docs/SECURE-DATA-FLOW.md for what this does and doesn't cover.
 U
 }
@@ -147,16 +148,41 @@ PSIGN=$(jq -r '.signer // "" | ascii_upcase' "$WORK/in/$PROVF")
 [ "$PSIGN" = "$SIGNER" ] || die "provenance signer does not match --signer"
 CREATED=$(jq -r '.created_utc // ""' "$WORK/in/$PROVF")
 [[ "$CREATED" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || die "provenance has no valid created_utc"
-# Replay guard (best effort, local only): refuse a bundle that is older than the
-# newest one already imported under this --name, according to the local log.
-LAST=""
+# Replay guard (best effort, local only): refuse a bundle whose signed created_utc
+# is OLDER THAN OR EQUAL TO the newest one already imported under this --name,
+# according to the local log. created_utc has 1-second resolution, so an equal
+# timestamp only counts as the same bundle (an idempotent re-import) when the
+# signed manifest hash also matches a successful import with that timestamp.
+# Only successful imports (status "imported", or older records without a status)
+# count; failure records never advance the guard.
+MSHA=$(sha256sum "$WORK/in/$SUMS" | cut -d' ' -f1)
+LAST="" SAME=0
 if [ -f "$PLOG" ]; then
-  LAST=$(jq -rR --arg n "$NAME" 'fromjson? | select(type=="object" and .name==$n) | .created_utc // empty' "$PLOG" 2>/dev/null | sort | tail -1)
+  OKREC='fromjson? | select(type=="object" and .name==$n and ((.status // "imported")=="imported"))'
+  LAST=$(jq -rR --arg n "$NAME" "$OKREC"' | .created_utc // empty' "$PLOG" 2>/dev/null | sort | tail -1)
+  if [ -n "$LAST" ] && [ "$CREATED" = "$LAST" ]; then
+    # Same bundle = same signed manifest hash; records from before manifest_sha256
+    # was logged fall back to the signed plaintext_bundle_sha256 (= logged bundle_sha256).
+    SAME=$(jq -rR --arg n "$NAME" --arg c "$CREATED" --arg m "$MSHA" \
+      "$OKREC"' | select(.created_utc==$c and .manifest_sha256==$m) | 1' "$PLOG" 2>/dev/null | grep -c . || true)
+    [ "$SAME" -gt 0 ] && SAME=1 || SAME=0
+    if [ "$SAME" = 0 ]; then
+      LEGACY=$(jq -rR --arg n "$NAME" --arg c "$CREATED" \
+        "$OKREC"' | select(.created_utc==$c and (has("manifest_sha256")|not)) | .bundle_sha256 // empty' "$PLOG" 2>/dev/null || true)
+      [ -n "$LEGACY" ] && printf '%s\n' "$LEGACY" | grep -qxF -- "$WANT" && SAME=1
+    fi
+  fi
 fi
-if [ -n "$LAST" ] && [[ "$CREATED" < "$LAST" ]]; then
-  [ "$ALLOW_REPLAY" = 1 ] || die "possible replay: bundle created $CREATED is older than the last import of '$NAME' ($LAST); pass --allow-replay only if intended"
-  echo "WARN older than last import of '$NAME' ($LAST); continuing because of --allow-replay"
+if [ -n "$LAST" ] && { [[ "$CREATED" < "$LAST" ]] || { [ "$CREATED" = "$LAST" ] && [ "$SAME" = 0 ]; }; }; then
+  if [ "$CREATED" = "$LAST" ]; then
+    WHY="has the same created_utc ($CREATED) as the last import of '$NAME' but a different signed manifest"
+  else
+    WHY="created $CREATED is older than the last import of '$NAME' ($LAST)"
+  fi
+  [ "$ALLOW_REPLAY" = 1 ] || die "possible replay: bundle $WHY; pass --allow-replay only if intended"
+  echo "WARN possible replay: bundle $WHY; continuing because of --allow-replay"
 fi
+[ "$SAME" = 1 ] && echo "note same bundle as the last import of '$NAME' (manifest sha256 matches): re-import is a no-op"
 echo "ok   provenance (name, signer, created_utc $CREATED${LAST:+, last import $LAST})"
 
 # 4. Decrypt the private copy.
@@ -181,18 +207,35 @@ if [ "$VERIFY_ONLY" = 1 ]; then
   echo "VERIFY-ONLY OK: nothing imported"; exit 0
 fi
 
-# 6. Import into a quarantine namespace (no branch is overwritten; no force),
-#    with object fsck so a malformed object aborts the fetch.
-git -C "$TARGET" -c transfer.fsckObjects=true -c fetch.fsckObjects=true \
-  fetch --no-tags --no-write-fetch-head "$WORK/b.bundle" "refs/heads/*:refs/remotes/airgap/$NAME/*" 2>&1 | sed 's/^/     /' \
-  || die "git fetch rejected the bundle (fsck error, or a non-fast-forward update of an existing quarantine ref); rejected refs unchanged, no log record written"
-echo "ok   import with transfer.fsckObjects + fetch.fsckObjects"
+# Import record, kept outside the repo (append-only JSONL, built with jq).
+# log_record STATUS [DETAIL]: STATUS is "imported" or "rejected".
+log_record() {
+  mkdir -p "$(dirname "$PLOG")"
+  git -C "$TARGET" for-each-ref --format='%(refname)%09%(objectname)' "refs/remotes/airgap/$NAME/" \
+  | jq -cR --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg n "$NAME" --arg s "$SIGNER" --arg b "$GOT" --arg c "$CREATED" \
+        --arg m "$MSHA" --arg st "$1" --arg d "${2:-}" --arg tg "$(basename "$(cd "$TARGET" && pwd)")" \
+        -s '{imported_utc:$t,status:$st,name:$n,created_utc:$c,signer:$s,bundle_sha256:$b,manifest_sha256:$m,target:$tg,
+             refs:[split("\n")[]|select(length>0)|split("\t")|{ref:.[0],sha:.[1]}]}
+            + (if $d!="" then {detail:$d} else {} end)' >> "$PLOG"
+}
 
-# 7. Provenance record, kept outside the repo; commit a copy via reviewed PR if wanted.
-mkdir -p "$(dirname "$PLOG")"
-git -C "$TARGET" for-each-ref --format='%(refname)%09%(objectname)' "refs/remotes/airgap/$NAME/" \
-| jq -cR --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg n "$NAME" --arg s "$SIGNER" --arg b "$GOT" --arg c "$CREATED" \
-      --arg tg "$(basename "$(cd "$TARGET" && pwd)")" \
-      -s '{imported_utc:$t,name:$n,created_utc:$c,signer:$s,bundle_sha256:$b,target:$tg,
-           refs:[split("\n")[]|select(length>0)|split("\t")|{ref:.[0],sha:.[1]}]}' >> "$PLOG"
+# 6. Import into a quarantine namespace (no branch is overwritten; no force),
+#    with object fsck so a malformed object aborts the fetch. --atomic makes the
+#    ref update all-or-nothing: if ANY ref is rejected (e.g. a diverged main next
+#    to a brand-new branch), NO ref is created or moved.
+if ! git -C "$TARGET" -c transfer.fsckObjects=true -c fetch.fsckObjects=true \
+     fetch --atomic --no-tags --no-write-fetch-head "$WORK/b.bundle" "refs/heads/*:refs/remotes/airgap/$NAME/*" \
+     >"$WORK/fetch.log" 2>&1; then
+  sed 's/^/     /' "$WORK/fetch.log"
+  # A failure record (status "rejected") is written for the audit trail; the
+  # replay guard ignores it. refs[] shows the quarantine refs as they still are.
+  log_record rejected "git fetch --atomic rejected the bundle; no refs changed" \
+    || echo "WARN could not write failure record to $PLOG" >&2
+  die "git fetch rejected the bundle (fsck error, or a non-fast-forward update of an existing quarantine ref); atomic fetch: no refs created or changed; failure record (status rejected) -> $PLOG"
+fi
+sed 's/^/     /' "$WORK/fetch.log"
+echo "ok   atomic import with transfer.fsckObjects + fetch.fsckObjects"
+
+# 7. Provenance record; commit a copy via reviewed PR if wanted.
+log_record imported
 echo "IMPORT OK: refs under refs/remotes/airgap/$NAME/ ; provenance -> $PLOG"
