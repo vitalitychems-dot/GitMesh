@@ -95,16 +95,23 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/bundle-export.XXXXXX") || die "mktemp failed";
 
 # 1. Build the bundle (plaintext only ever exists inside $WORK).
 BUNDLE="$WORK/$NAME.bundle"
-# shellcheck disable=SC2086
-if [ -n "$SINCE" ]; then
-  git -C "$REPO" bundle create "$BUNDLE" $REFS "^$SINCE" 2>"$WORK/bundle.log" || { cat "$WORK/bundle.log" >&2; die "git bundle create failed"; }
-else
-  git -C "$REPO" bundle create "$BUNDLE" $REFS 2>"$WORK/bundle.log" || { cat "$WORK/bundle.log" >&2; die "git bundle create failed"; }
-fi
-git -C "$REPO" bundle verify "$BUNDLE" >/dev/null 2>&1 || die "bundle failed self-verify"
+# --refs is split on whitespace into an array with globbing OFF, so a pattern such
+# as 'main*' reaches git as written and is never expanded against files in the
+# caller's current directory (which could silently pick the wrong refs).
+set -f; read -r -a REF_ARR <<<"$REFS"; set +f
+[ "${#REF_ARR[@]}" -gt 0 ] || die "--refs is empty"
+git -C "$REPO" bundle create "$BUNDLE" "${REF_ARR[@]}" ${SINCE:+"^$SINCE"} 2>"$WORK/bundle.log" \
+  || { cat "$WORK/bundle.log" >&2; die "git bundle create failed"; }
+git -C "$REPO" bundle verify "$BUNDLE" >"$WORK/bverify.log" 2>&1 \
+  || { cat "$WORK/bverify.log" >&2; die "bundle failed self-verify"; }
+# The importer only takes refs/heads/*: refuse a bundle with no branch (e.g. --refs
+# HEAD or a tag only) here, instead of handing over a bundle that imports nothing.
+LIST_HEADS=$(git bundle list-heads "$BUNDLE")
+grep -q ' refs/heads/' <<<"$LIST_HEADS" \
+  || die "bundle has no branches (refs/heads/*); the importer would import nothing. Pass branch names in --refs"
 PLAIN_SHA=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
 # Heads as JSON built by jq, so quotes/backslashes in ref names stay valid JSON.
-HEADS_JSON=$(git bundle list-heads "$BUNDLE" | jq -cR -s '[split("\n")[]|select(length>0)|capture("^(?<sha>[0-9a-f]+) (?<ref>.+)$")]')
+HEADS_JSON=$(printf '%s\n' "$LIST_HEADS" | jq -cR -s '[split("\n")[]|select(length>0)|capture("^(?<sha>[0-9a-f]+) (?<ref>.+)$")]')
 
 # 2. Encrypt to the exact recipient (full primary fingerprint; gpg picks that key's
 #    encryption subkey), then drop the plaintext. --trust-model always is acceptable
@@ -164,9 +171,15 @@ gpg --batch --yes --local-user "$SIGN_KEY" --armor --detach-sign --output "$WORK
 
 # 5. Self-check before handing anything over.
 ( cd "$WORK" && sha256sum --quiet --strict -c "$NAME.SHA256SUMS" ) || die "manifest self-check failed"
-ST=$(gpg --batch --status-fd 1 --verify "$WORK/$NAME.SHA256SUMS.asc" "$WORK/$NAME.SHA256SUMS" 2>/dev/null || true)
-printf '%s\n' "$ST" | grep -q '^\[GNUPG:\] GOODSIG ' \
-  && [ "$(printf '%s\n' "$ST" | awk '$2=="VALIDSIG"{print $NF}')" = "$SIGN_KEY" ] || die "signature self-check failed"
+# gpg's stderr is kept in a log and printed (with the status lines) on failure.
+# Here-strings, not pipes into grep -q, so pipefail can never turn an early grep
+# exit (SIGPIPE on the writer) into a false failure.
+ST=$(gpg --batch --status-fd 1 --verify "$WORK/$NAME.SHA256SUMS.asc" "$WORK/$NAME.SHA256SUMS" 2>"$WORK/verify.log" || true)
+if ! grep -q '^\[GNUPG:\] GOODSIG ' <<<"$ST" \
+   || [ "$(awk '$2=="VALIDSIG"{print $NF}' <<<"$ST")" != "$SIGN_KEY" ]; then
+  { echo "gpg --verify stderr:"; cat "$WORK/verify.log"; echo "gpg status:"; printf '%s\n' "$ST"; } >&2
+  die "signature self-check failed"
+fi
 
 FILES=("$(basename "$ENC")" "$NAME.provenance.json" "$NAME.SHA256SUMS" "$NAME.SHA256SUMS.asc")
 if [ "$DRY" = 1 ]; then
