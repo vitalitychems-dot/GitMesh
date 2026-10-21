@@ -78,8 +78,20 @@ key_ok() {
 key_ok "$SIGN_KEY" s || die "sign key $SIGN_KEY missing, revoked, expired or cannot sign"
 [ -z "$GPG_RCPT" ] || key_ok "$GPG_RCPT" e || die "recipient $GPG_RCPT missing, revoked, expired or cannot encrypt"
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/bundle-export.XXXXXX"); chmod 700 "$WORK"
-trap 'rm -rf "$WORK"' EXIT
+# Cleanup is armed before the first write. Until the export completes (DONE=1),
+# any exit (error, full disk, signal) removes the work dir AND every file this
+# run staged or placed in --out, so a failed export leaves nothing behind.
+WORK="" STAGED=() PLACED=() DONE=0
+cleanup() {
+  if [ "$DONE" != 1 ]; then
+    local x
+    for x in "${STAGED[@]}" "${PLACED[@]}"; do [ -n "$x" ] && rm -f -- "$x"; done
+  fi
+  [ -z "$WORK" ] || rm -rf -- "$WORK"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/bundle-export.XXXXXX") || die "mktemp failed"; chmod 700 "$WORK"
 
 # 1. Build the bundle (plaintext only ever exists inside $WORK).
 BUNDLE="$WORK/$NAME.bundle"
@@ -107,7 +119,9 @@ fi
 rm -f "$BUNDLE"
 
 # 3. Provenance record (no secrets; PLAINTEXT on the medium, see the doc).
-ORIGIN=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null | sed -E 's#^([a-z+]+://)[^@/]+@#\1#' || true)
+ORIGIN=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null | sed -E 's#^([a-z][a-z0-9+.-]*://)[^@/]+@#\1#; s#[?\#].*$##' || true)
+# ^ drops userinfo (user:token@) and the whole query string and fragment
+#   (?token=..., &access_token=..., #...), which can carry credentials.
 HOST=""; [ "$WITH_HOST" = 0 ] || HOST=$(hostname -s 2>/dev/null || echo unknown)
 jq -cn --arg name "$NAME" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --arg origin "${ORIGIN:-local}" --arg since "$SINCE" --argjson heads "$HEADS_JSON" \
@@ -118,9 +132,12 @@ jq -cn --arg name "$NAME" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   + (if $redact==1 then {redacted:true} else {source_origin:$origin, since:$since, heads:$heads} end)
   + (if $host!="" then {exporter_host:$host} else {} end)' > "$WORK/$NAME.provenance.json"
 
-# 4. Manifest + detached signature with the exact signing key.
+# 4. Manifest + detached signature. --local-user is the primary fingerprint without
+#    "!", so gpg may use a signing SUBKEY of that primary (subkey-signing setups).
+#    The self-check below and the importer both bind the signature to the PRIMARY
+#    fingerprint (last field of VALIDSIG), so no other key can stand in.
 ( cd "$WORK" && sha256sum "$(basename "$ENC")" "$NAME.provenance.json" > "$NAME.SHA256SUMS" )
-gpg --batch --yes --local-user "${SIGN_KEY}!" --armor --detach-sign --output "$WORK/$NAME.SHA256SUMS.asc" "$WORK/$NAME.SHA256SUMS"
+gpg --batch --yes --local-user "$SIGN_KEY" --armor --detach-sign --output "$WORK/$NAME.SHA256SUMS.asc" "$WORK/$NAME.SHA256SUMS"
 
 # 5. Self-check before handing anything over.
 ( cd "$WORK" && sha256sum --quiet --strict -c "$NAME.SHA256SUMS" ) || die "manifest self-check failed"
@@ -140,15 +157,17 @@ mkdir -p "$OUT"
 for f in "${FILES[@]}"; do
   [ ! -e "$OUT/$f" ] && [ ! -L "$OUT/$f" ] || die "refusing to overwrite $OUT/$f"
 done
-STAGED=()
 for f in "${FILES[@]}"; do
-  t=$(mktemp "$OUT/.${f}.tmp.XXXXXX"); STAGED+=("$t")
-  cp -- "$WORK/$f" "$t"; sync -- "$t" 2>/dev/null || true
+  t=$(mktemp "$OUT/.${f}.tmp.XXXXXX") || die "cannot create temp file in $OUT"
+  STAGED+=("$t")
+  cp -- "$WORK/$f" "$t" || die "write to $OUT failed (disk full?); nothing left behind"
+  sync -- "$t" 2>/dev/null || true
 done
-trap 'rm -f "${STAGED[@]}" 2>/dev/null; rm -rf "$WORK"' EXIT
 for i in "${!FILES[@]}"; do
   f=${FILES[$i]}; t=${STAGED[$i]}
   mv -n -- "$t" "$OUT/$f" 2>/dev/null || true
-  [ ! -e "$t" ] || die "refusing to overwrite $OUT/$f (appeared during export)"
+  [ ! -e "$t" ] || die "could not place $OUT/$f (exists or rename failed); nothing left behind"
+  PLACED+=("$OUT/$f")
 done
+DONE=1
 echo "EXPORT OK: $OUT/$NAME.* (encryption=$METHOD, signer=$SIGN_KEY)"
