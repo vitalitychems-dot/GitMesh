@@ -83,7 +83,7 @@ echo "== 3 revoked signer key"
 expect_ok "export signed by sender2 (before revocation)" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oR" --name rv --sign-key "$S2" --gpg-recipient "$R"
 expect_ok "verify-only before revocation" "$RECV" "$IMPORT" --in "$T/oR" --name rv --signer "$S2" --target "$DST" --provenance-log "$PLOG" --verify-only
 sed 's/^:-----BEGIN/-----BEGIN/' "$SEND/openpgp-revocs.d/$S2.rev" | gpg --homedir "$RECV" --batch --quiet --import 2>/dev/null
-gpg --homedir "$RECV" --batch --with-colons --list-keys "$S2" | grep -q '^pub:r:' && echo "      | (sender2 now revoked in receiver keyring)"
+grep -q '^pub:r:' <<<"$(gpg --homedir "$RECV" --batch --with-colons --list-keys "$S2")" && echo "      | (sender2 now revoked in receiver keyring)"
 expect_fail "revoked signer rejected" "REVOKED|REVKEYSIG|KEYREVOKED" "$RECV" "$IMPORT" --in "$T/oR" --name rv --signer "$S2" --target "$DST" --provenance-log "$PLOG" --verify-only
 if [ -n "${ORIG_IMPORT:-}" ]; then
   if run_as "$RECV" bash "$ORIG_IMPORT" --in "$T/oR" --name rv --signer "$S2" --target "$DST" --provenance-log "$T/orig.jsonl" --verify-only
@@ -231,7 +231,7 @@ while IFS='|' read -r url want; do n=$((n+1))
   git -C "$T/cred" remote set-url origin "$url"
   if GNUPGHOME="$SEND" "$EXPORT" --repo "$T/cred" --out "$T/oC$n" --name "cr$n" --sign-key "$S" --gpg-recipient "$R" >"$T/out" 2>&1; then
     O=$(jq -r .source_origin "$T/oC$n/cr$n.provenance.json"); echo "      | $url -> $O"
-    if [ "$O" = "$want" ] && ! grep -Eq 'S3CRET|scptok|pa/ss|semitok' "$T/oC$n/cr$n.provenance.json"; then ok "origin stripped: $want"
+    if [ "$O" = "$want" ] && ! grep -Eq 'S3CRET|scptok|pa/ss|semitok|QQ' "$T/oC$n/cr$n.provenance.json"; then ok "origin stripped: $want"
     else bad "origin form $n: got '$O', want '$want'"; fi
   else indent <"$T/out"; bad "export with origin form $n"; fi
 done <<'URLS'
@@ -239,13 +239,14 @@ HTTPS://User:S3CRET@Example.invalid/org/repo.git|https://Example.invalid/org/rep
 deploy:scptok@git.example.invalid:org/repo.git|git.example.invalid:org/repo.git
 https://user:pa/ss@example.invalid/org/repo.git|https://example.invalid/org/repo.git
 https://example.invalid/org/repo.git;token=semitok;x=1|https://example.invalid/org/repo.git
+https://usQQ@erQQ:passQQ@example.invalid/org/repo.git|https://example.invalid/org/repo.git
 URLS
 
 echo "== 14 expired signer key"
 gpg --homedir "$SEND" --batch --passphrase '' --faked-system-time 20200101T000000 \
     --quick-gen-key "expired <ex@example.invalid>" default default 2020-06-01 >/dev/null 2>&1
 EX=$(gpg --homedir "$SEND" --batch --with-colons --list-keys ex@example.invalid 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')
-gpg --homedir "$SEND" --batch --with-colons --list-keys "$EX" 2>/dev/null | grep -q '^pub:e:' && ok "key created 2020-01-01, expired 2020-06-01" || bad "expired key setup"
+grep -q '^pub:e:' <<<"$(gpg --homedir "$SEND" --batch --with-colons --list-keys "$EX" 2>/dev/null)" && ok "key created 2020-01-01, expired 2020-06-01" || bad "expired key setup"
 pubto "$SEND" "$EX" "$RECV"
 expect_fail "export refuses an expired --sign-key" "revoked, expired" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oEx0" --name ex --sign-key "$EX" --gpg-recipient "$R"
 # Hand-build a bundle signed while the key was still valid (faked 2020-03-01 clock).
@@ -413,6 +414,19 @@ EPID=$!; for _ in $(seq 1 100); do [ -e "$T/enc-started" ] && break; sleep 0.1; 
 kill -TERM "$EPID" 2>/dev/null; wait "$EPID"; RC=$?
 [ "$RC" = 143 ] && ok "SIGTERM during export exits 143" || { indent <"$T/out"; bad "SIGTERM rc=$RC (want 143)"; }
 { [ ! -e "$T/oTerm" ] || empty_dir "$T/oTerm"; } && empty_dir "$T/tmpk" && ok "after SIGTERM: --out and TMPDIR empty" || bad "leftovers after SIGTERM"
+
+echo "== 19 follow-up: --refs option allow-list (GitAI L1), usage hint (L3)"
+# 'main --output=FILE' used to reach git bundle create as an option: FILE was
+# truncated (or created) and the export still printed OK.
+printf 'keep-me\n' >"$T/victim"; cp "$T/victim" "$T/victim.orig"
+expect_rc "--refs 'main --output=EXISTING' refused" 1 "not allowed" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oL1a" --name la --sign-key "$S" --gpg-recipient "$R" --refs "main --output=$T/victim"
+cmp -s "$T/victim" "$T/victim.orig" && ok "existing file named in --output= is untouched" || bad "victim file changed: $(wc -c <"$T/victim") bytes"
+expect_rc "--refs 'main --output=NEW' refused" 1 "not allowed" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oL1b" --name lb --sign-key "$S" --gpg-recipient "$R" --refs "main --output=$T/newfile"
+[ ! -e "$T/newfile" ] && [ ! -e "$T/oL1a" ] && [ ! -e "$T/oL1b" ] && ok "no file created (target, --out dirs)" || bad "file created by refused --refs"
+expect_rc "--refs '-q main' refused" 1 "not allowed" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oL1c" --name lc --sign-key "$S" --gpg-recipient "$R" --refs "-q main"
+expect_ok "--refs '--all' still allowed" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oL1d" --name ld --sign-key "$S" --gpg-recipient "$R" --refs "--all" --dry-run
+expect_ok "--refs '--glob=refs/heads/m*' still allowed" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oL1e" --name le --sign-key "$S" --gpg-recipient "$R" --refs "--glob=refs/heads/m*" --dry-run
+grep -q -- "--branches=PATTERN" <<<"$("$EXPORT" --help 2>&1)" && ok "usage tells refs/heads/* users to use --branches=" || bad "usage hint missing"
 
 echo "== temp dirs left by the scripts: $(find "$T/tmp" -mindepth 1 -maxdepth 1 | wc -l)"
 empty_dir "$T/tmp" && ok "no temp dirs left" || bad "leftover temp: $(find "$T/tmp" -mindepth 1 -maxdepth 1)"
