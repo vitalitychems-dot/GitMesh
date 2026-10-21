@@ -27,20 +27,28 @@ Usage: bundle-export.sh --repo PATH --out DIR --name NAME --sign-key FPR
                        out of the plaintext provenance file
   --with-host          record the exporter's short hostname (off by default)
   --dry-run build and self-check in a temp dir, print the plan, keep nothing
+Needs bash >= 4, GNU coreutils (sha256sum), git, gpg, jq (and age for --age-recipient).
+Exit codes: 0 ok | 1 error | 2 usage | 129/130/143 interrupted by HUP/INT/TERM
+(the cleanup trap removes everything this run wrote).
+Temp space: the plaintext and the encrypted bundle sit side by side in
+$TMPDIR/bundle-export.XXXXXX (mode 700), about 2x the bundle size. Point TMPDIR
+at an encrypted volume with room to spare; see docs/SECURE-DATA-FLOW.md.
 U
 }
 
+# need FLAG ARGS...: a flag that takes a value must have one (usage + rc 2, not a raw bash error).
+need() { [ $# -ge 2 ] || { echo "missing value for $1" >&2; usage; exit 2; }; }
 REPO="" OUT="" NAME="" SIGN_KEY="" GPG_RCPT="" AGE_RCPT="" REFS="--branches" SINCE="" DRY=0 REDACT=0 WITH_HOST=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --repo) REPO=$2; shift 2;;
-    --out) OUT=$2; shift 2;;
-    --name) NAME=$2; shift 2;;
-    --sign-key) SIGN_KEY=$2; shift 2;;
-    --gpg-recipient) GPG_RCPT=$2; shift 2;;
-    --age-recipient) AGE_RCPT=$2; shift 2;;
-    --refs) REFS=$2; shift 2;;
-    --since) SINCE=$2; shift 2;;
+    --repo) need "$@"; REPO=$2; shift 2;;
+    --out) need "$@"; OUT=$2; shift 2;;
+    --name) need "$@"; NAME=$2; shift 2;;
+    --sign-key) need "$@"; SIGN_KEY=$2; shift 2;;
+    --gpg-recipient) need "$@"; GPG_RCPT=$2; shift 2;;
+    --age-recipient) need "$@"; AGE_RCPT=$2; shift 2;;
+    --refs) need "$@"; REFS=$2; shift 2;;
+    --since) need "$@"; SINCE=$2; shift 2;;
     --redact-provenance) REDACT=1; shift;;
     --with-host) WITH_HOST=1; shift;;
     --dry-run) DRY=1; shift;;
@@ -50,12 +58,14 @@ while [ $# -gt 0 ]; do
 done
 
 die() { echo "bundle-export: $*" >&2; exit 1; }
+((BASH_VERSINFO[0] >= 4)) || die "bash >= 4 required (macOS: brew install bash)"
+grep -q GNU <<<"$(sha256sum --version 2>/dev/null)" || die "GNU sha256sum required (macOS: brew install coreutils)"
 is_fpr() { [[ "$1" =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ ]]; }
 [ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SIGN_KEY" ] || { usage; exit 2; }
 [ "$DRY" = 1 ] || [ -n "$OUT" ] || die "--out is required unless --dry-run"
 [ -n "$GPG_RCPT" ] || [ -n "$AGE_RCPT" ] || die "need --gpg-recipient or --age-recipient"
 [ -z "$GPG_RCPT" ] || [ -z "$AGE_RCPT" ] || die "pick one of --gpg-recipient / --age-recipient"
-case "$NAME" in *[!A-Za-z0-9._-]*|""|.*) die "--name may only use A-Z a-z 0-9 . _ - (not starting with .)";; esac
+case "$NAME" in *[!A-Za-z0-9._-]*|""|[.-]*) die "--name may only use A-Z a-z 0-9 . _ - (not starting with . or -)";; esac
 SIGN_KEY=${SIGN_KEY// /}; SIGN_KEY=${SIGN_KEY^^}
 is_fpr "$SIGN_KEY" || die "--sign-key must be a full 40/64-hex fingerprint"
 if [ -n "$GPG_RCPT" ]; then
@@ -67,6 +77,14 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo: $REPO
 command -v gpg >/dev/null || die "gpg is required (signing, and encryption unless age is used)"
 command -v jq >/dev/null || die "jq is required"
 [ -z "$AGE_RCPT" ] || command -v age >/dev/null || die "age not installed"
+EXT=gpg; [ -z "$AGE_RCPT" ] || EXT=age
+FILES=("$NAME.bundle.$EXT" "$NAME.provenance.json" "$NAME.SHA256SUMS" "$NAME.SHA256SUMS.asc")
+# Early overwrite check, before any expensive work (the late check below stays, for races).
+if [ "$DRY" != 1 ]; then
+  for f in "${FILES[@]}"; do
+    [ ! -e "$OUT/$f" ] && [ ! -L "$OUT/$f" ] || die "refusing to overwrite $OUT/$f"
+  done
+fi
 
 # key_ok FPR CAP: the exact key exists, is not revoked/expired, and has capability CAP (s|e).
 key_ok() {
@@ -90,7 +108,8 @@ cleanup() {
   [ -z "$WORK" ] || rm -rf -- "$WORK"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM HUP
+# Conventional 128+signal exit codes; the EXIT trap still cleans up.
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/bundle-export.XXXXXX") || die "mktemp failed"; chmod 700 "$WORK"
 
 # 1. Build the bundle (plaintext only ever exists inside $WORK).
@@ -109,7 +128,7 @@ git -C "$REPO" bundle verify "$BUNDLE" >"$WORK/bverify.log" 2>&1 \
 LIST_HEADS=$(git bundle list-heads "$BUNDLE")
 grep -q ' refs/heads/' <<<"$LIST_HEADS" \
   || die "bundle has no branches (refs/heads/*); the importer would import nothing. Pass branch names in --refs"
-PLAIN_SHA=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
+PLAIN_SHA=$(sha256sum -- "$BUNDLE" | cut -d' ' -f1)
 # Heads as JSON built by jq, so quotes/backslashes in ref names stay valid JSON.
 HEADS_JSON=$(printf '%s\n' "$LIST_HEADS" | jq -cR -s '[split("\n")[]|select(length>0)|capture("^(?<sha>[0-9a-f]+) (?<ref>.+)$")]')
 
@@ -166,11 +185,11 @@ jq -cn --arg name "$NAME" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 #    "!", so gpg may use a signing SUBKEY of that primary (subkey-signing setups).
 #    The self-check below and the importer both bind the signature to the PRIMARY
 #    fingerprint (last field of VALIDSIG), so no other key can stand in.
-( cd "$WORK" && sha256sum "$(basename "$ENC")" "$NAME.provenance.json" > "$NAME.SHA256SUMS" )
+( cd "$WORK" && sha256sum -- "$(basename "$ENC")" "$NAME.provenance.json" > "$NAME.SHA256SUMS" )
 gpg --batch --yes --local-user "$SIGN_KEY" --armor --detach-sign --output "$WORK/$NAME.SHA256SUMS.asc" "$WORK/$NAME.SHA256SUMS"
 
 # 5. Self-check before handing anything over.
-( cd "$WORK" && sha256sum --quiet --strict -c "$NAME.SHA256SUMS" ) || die "manifest self-check failed"
+( cd "$WORK" && sha256sum --quiet --strict -c -- "$NAME.SHA256SUMS" ) || die "manifest self-check failed"
 # gpg's stderr is kept in a log and printed (with the status lines) on failure.
 # Here-strings, not pipes into grep -q, so pipefail can never turn an early grep
 # exit (SIGPIPE on the writer) into a false failure.
@@ -181,7 +200,7 @@ if ! grep -q '^\[GNUPG:\] GOODSIG ' <<<"$ST" \
   die "signature self-check failed"
 fi
 
-FILES=("$(basename "$ENC")" "$NAME.provenance.json" "$NAME.SHA256SUMS" "$NAME.SHA256SUMS.asc")
+[ "${FILES[0]}" = "$(basename "$ENC")" ] || die "internal: file list mismatch"
 if [ "$DRY" = 1 ]; then
   echo "DRY-RUN OK: would write to ${OUT:-<out>}:"; printf '%s\n' "${FILES[@]}"
   echo "heads: $HEADS_JSON"; exit 0
