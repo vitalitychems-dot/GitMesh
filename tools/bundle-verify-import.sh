@@ -188,7 +188,7 @@ if [ -e "$PLOG" ] || [ -L "$PLOG" ]; then
     if [ "$SAME" = 0 ]; then
       LEGACY=$(jq -rR --arg n "$NAME" --arg c "$CREATED" \
         "$OKREC"' | select(.created_utc==$c and (has("manifest_sha256")|not)) | .bundle_sha256 // empty' "$PLOG" 2>/dev/null || true)
-      [ -n "$LEGACY" ] && printf '%s\n' "$LEGACY" | grep -qxF -- "$WANT" && SAME=1
+      [ -n "$LEGACY" ] && grep -qxF -- "$WANT" <<<"$LEGACY" && SAME=1
     fi
   fi
 fi

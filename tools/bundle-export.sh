@@ -21,7 +21,11 @@ Usage: bundle-export.sh --repo PATH --out DIR --name NAME --sign-key FPR
                         [--refs "main other-branch" | --since REV]
                         [--redact-provenance] [--with-host] [--dry-run]
   --sign-key / --gpg-recipient   full 40- (or 64-) hex fingerprint, no short ids
-  --refs    refs to include (default: all branches)
+  --refs    refs to include (default: all branches). Plain ref names (main,
+            feat/x, ^old) plus only these options: --branches[=PATTERN],
+            --glob=PATTERN, --all. Any other word starting with '-' is refused.
+            For a refs/heads/* pattern use --branches=PATTERN (e.g.
+            --refs '--branches=feat*'), not 'refs/heads/feat*'.
   --since   only commits after REV on the given refs (incremental bundle)
   --redact-provenance  leave source_origin, since and heads (ref names + SHAs)
                        out of the plaintext provenance file
@@ -61,6 +65,20 @@ die() { echo "bundle-export: $*" >&2; exit 1; }
 ((BASH_VERSINFO[0] >= 4)) || die "bash >= 4 required (macOS: brew install bash)"
 grep -q GNU <<<"$(sha256sum --version 2>/dev/null)" || die "GNU sha256sum required (macOS: brew install coreutils)"
 is_fpr() { [[ "$1" =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ ]]; }
+# --refs is split on whitespace into an array with globbing OFF, so a pattern such
+# as 'main*' reaches git as written and is never expanded against files in the
+# caller's current directory (which could silently pick the wrong refs).
+set -f; read -r -a REF_ARR <<<"$REFS"; set +f
+[ "${#REF_ARR[@]}" -gt 0 ] || die "--refs is empty"
+# Every word goes to 'git bundle create' as an argument, so a word starting with
+# '-' is a git option (e.g. --output=FILE would truncate FILE while the export
+# still says OK). Allow only the rev-list options that select refs.
+for w in "${REF_ARR[@]}"; do
+  case "$w" in
+    --branches|--branches=?*|--glob=?*|--all) ;;
+    -*) die "--refs: option '$w' not allowed (only --branches[=PATTERN], --glob=PATTERN, --all and ref names)";;
+  esac
+done
 [ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SIGN_KEY" ] || { usage; exit 2; }
 [ "$DRY" = 1 ] || [ -n "$OUT" ] || die "--out is required unless --dry-run"
 [ -n "$GPG_RCPT" ] || [ -n "$AGE_RCPT" ] || die "need --gpg-recipient or --age-recipient"
@@ -114,11 +132,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/bundle-export.XXXXXX") || die "mktemp failed";
 
 # 1. Build the bundle (plaintext only ever exists inside $WORK).
 BUNDLE="$WORK/$NAME.bundle"
-# --refs is split on whitespace into an array with globbing OFF, so a pattern such
-# as 'main*' reaches git as written and is never expanded against files in the
-# caller's current directory (which could silently pick the wrong refs).
-set -f; read -r -a REF_ARR <<<"$REFS"; set +f
-[ "${#REF_ARR[@]}" -gt 0 ] || die "--refs is empty"
+# (--refs was split and checked into REF_ARR above, before any file was written.)
 git -C "$REPO" bundle create "$BUNDLE" "${REF_ARR[@]}" ${SINCE:+"^$SINCE"} 2>"$WORK/bundle.log" \
   || { cat "$WORK/bundle.log" >&2; die "git bundle create failed"; }
 git -C "$REPO" bundle verify "$BUNDLE" >"$WORK/bverify.log" 2>&1 \
@@ -148,7 +162,8 @@ rm -f "$BUNDLE"
 # strip_origin URL: keep only scheme://host[:port]/path (or host:path for scp-style),
 # never userinfo, query, fragment or ;params, which can all carry credentials.
 #   * scheme is matched case-insensitively and printed lower-case (HTTPS://u:p@ ok)
-#   * userinfo: if there is an '@' before the first '/', drop through it; else if a
+#   * userinfo: if there is an '@' before the first '/', drop through the LAST such
+#     '@' (https://us@er:pass@host -> host, never "er:pass@host"); else if a
 #     ':' comes before the first '/' and an '@' follows (a password containing '/',
 #     e.g. user:pa/ss@host), drop through the LAST '@'. This can over-strip a path
 #     like host:8080/a@b to "b"; losing text is preferred to leaking a token.
@@ -164,7 +179,8 @@ strip_origin() {
   else
     printf '%s' "$u"; return                   # local path
   fi
-  if [[ "$rest" =~ ^[^/@]*@ ]]; then rest=${rest#*@}
+  local auth=${rest%%/*}                      # authority: up to the first '/'
+  if [[ "$auth" == *@* ]]; then rest=${auth##*@}${rest:${#auth}}
   elif [[ "$rest" =~ ^[^/@]*:[^@]*@ ]]; then rest=${rest##*@}
   fi
   rest=${rest%%[?#;]*}
