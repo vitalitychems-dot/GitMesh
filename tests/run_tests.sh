@@ -13,7 +13,9 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 EXPORT="$HERE/tools/bundle-export.sh"
 IMPORT="$HERE/tools/bundle-verify-import.sh"
-T=$(mktemp -d "${TMPDIR:-/tmp}/airgap-tests.XXXXXX"); chmod 700 "$T"
+T=$(mktemp -d "${TMPDIR:-/tmp}/airgap-tests.XXXXXX") || { echo "ABORT: mktemp failed" >&2; exit 2; }
+[ -n "$T" ] && [ -d "$T" ] && [ ! -L "$T" ] || { echo "ABORT: bad temp dir '$T'" >&2; exit 2; }
+chmod 700 "$T" || { echo "ABORT: chmod failed" >&2; exit 2; }
 SEND="$T/gnupg-sender" RECV="$T/gnupg-receiver" ATK="$T/gnupg-attacker"
 mkdir -m 700 "$SEND" "$RECV" "$ATK" "$T/tmp"
 export TMPDIR="$T/tmp"   # scripts' temp dirs land here so leftovers are countable
@@ -90,7 +92,9 @@ fi
 echo "== 4 tampering"
 cp -r "$T/o1" "$T/oT"; printf 'x' >> "$T/oT/t1.bundle.gpg"
 expect_fail "1 byte appended to encrypted bundle" "checksum mismatch" "$RECV" "$IMPORT" --in "$T/oT" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
-cp -r "$T/o1" "$T/oM"; sed -i 's/^\(.\)/0/' "$T/oM/t1.SHA256SUMS"
+cp -r "$T/o1" "$T/oM"; # Flip the first hex digit of the first line (always a real change, never a no-op).
+awk 'NR==1{c=substr($0,1,1); $0=(c=="0"?"1":"0") substr($0,2)} {print}' "$T/oM/t1.SHA256SUMS" > "$T/oM/s" && mv "$T/oM/s" "$T/oM/t1.SHA256SUMS"
+cmp -s "$T/o1/t1.SHA256SUMS" "$T/oM/t1.SHA256SUMS" && bad "manifest edit was a no-op" 
 expect_fail "edited manifest" "BADSIG|signature" "$RECV" "$IMPORT" --in "$T/oM" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
 # A correctly signed manifest that leaves the provenance out
 cp -r "$T/o1" "$T/oP"; grep -v provenance "$T/oP/t1.SHA256SUMS" > "$T/oP/s" && mv "$T/oP/s" "$T/oP/t1.SHA256SUMS"
@@ -175,6 +179,92 @@ else skip "age not installed"; fi
 
 echo "== 10 refuse overwrite"
 expect_fail "re-export same name" "refusing to overwrite" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/o1" --name t1 --sign-key "$S" --gpg-recipient "$R"
+
+echo "== 11 mid-export failure leaves nothing in --out"
+mkdir -p "$T/fshim"
+for tool in cp mv; do REALT=$(command -v $tool)
+cat > "$T/fshim/$tool" <<SH
+#!/usr/bin/env bash
+# Fail (as if the disk were full) on the Nth $tool whose last arg is inside \$FAIL_OUT.
+last="\${@: -1}"
+case "\$last" in "\$FAIL_OUT"/*)
+  n=\$(( \$(cat "\$FAIL_OUT.cnt.$tool" 2>/dev/null || echo 0) + 1 )); echo \$n > "\$FAIL_OUT.cnt.$tool"
+  if [ "\$n" = "\${FAIL_AT_$tool:-0}" ]; then echo "$tool: No space left on device (simulated)" >&2; exit 1; fi;;
+esac
+exec "$REALT" "\$@"
+SH
+chmod +x "$T/fshim/$tool"; done
+for mode in "cp 2" "mv 3"; do set -- $mode
+  OUTF="$T/oFail-$1"; rm -rf "$OUTF"
+  expect_fail "export fails on $1 #$2 into --out" "nothing left behind" "$SEND" env PATH="$T/fshim:$PATH" FAIL_OUT="$OUTF" "FAIL_AT_$1=$2" \
+    "$EXPORT" --repo "$SRC" --out "$OUTF" --name mf --sign-key "$S" --gpg-recipient "$R"
+  [ -d "$OUTF" ] && [ -z "$(ls -A "$OUTF")" ] && ok "--out is empty after $1 failure (no bundle, no temp files)" || bad "leftovers after $1 failure: $(ls -A "$OUTF" 2>&1)"
+done
+expect_ok "same export succeeds afterwards" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oFail-cp" --name mf --sign-key "$S" --gpg-recipient "$R"
+
+echo "== 12 signing subkey"
+gpg --homedir "$SEND" --batch --passphrase '' --quick-gen-key "subkey-signer <sk@example.invalid>" ed25519 cert never >/dev/null 2>&1
+SK=$(gpg --homedir "$SEND" --batch --with-colons --list-keys sk@example.invalid 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')
+gpg --homedir "$SEND" --batch --passphrase '' --quick-add-key "$SK" ed25519 sign never >/dev/null 2>&1
+SUBF=$(gpg --homedir "$SEND" --batch --with-colons --list-keys "$SK" 2>/dev/null | awk -F: '$1=="fpr"{n++; if(n==2){print $10; exit}}')
+pubto "$SEND" "$SK" "$RECV"
+[ -n "$SUBF" ] && [ "$SUBF" != "$SK" ] && ok "cert-only primary with a separate signing subkey" || bad "subkey setup"
+expect_ok "export with --sign-key = primary (signs with subkey)" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oSK" --name sk --sign-key "$SK" --gpg-recipient "$R"
+VS=$(GNUPGHOME="$RECV" gpg --batch --status-fd 1 --verify "$T/oSK/sk.SHA256SUMS.asc" "$T/oSK/sk.SHA256SUMS" 2>/dev/null | awk '$2=="VALIDSIG"{print $3, $NF}')
+[ "$VS" = "$SUBF $SK" ] && ok "VALIDSIG: signed by subkey, primary = --sign-key" || bad "VALIDSIG fields: $VS"
+expect_ok "import with --signer = primary" "$RECV" "$IMPORT" --in "$T/oSK" --name sk --signer "$SK" --target "$DST" --provenance-log "$PLOG" --verify-only
+expect_fail "import with --signer = subkey fpr" "fingerprint mismatch|full 40/64-hex|not from" "$RECV" "$IMPORT" --in "$T/oSK" --name sk --signer "$SUBF" --target "$DST" --provenance-log "$PLOG" --verify-only
+
+echo "== 13 credentials stripped from origin URL"
+git clone -q "$SRC" "$T/cred"
+git -C "$T/cred" remote set-url origin 'https://user:s3cret@example.invalid/org/repo.git?token=AAA&access_token=BBB#frag-CCC'
+expect_ok "export from repo with credentialed origin" "$SEND" "$EXPORT" --repo "$T/cred" --out "$T/oC" --name cr --sign-key "$S" --gpg-recipient "$R"
+O=$(jq -r .source_origin "$T/oC/cr.provenance.json"); echo "      | source_origin: $O"
+[ "$O" = "https://example.invalid/org/repo.git" ] && ok "userinfo, query and fragment stripped" || bad "origin not stripped: $O"
+grep -Eq 's3cret|AAA|BBB|CCC|token' "$T/oC/cr.provenance.json" && bad "credential text in provenance" || ok "no credential text anywhere in provenance"
+
+echo "== 14 expired signer key"
+gpg --homedir "$SEND" --batch --passphrase '' --faked-system-time 20200101T000000 \
+    --quick-gen-key "expired <ex@example.invalid>" default default 2020-06-01 >/dev/null 2>&1
+EX=$(gpg --homedir "$SEND" --batch --with-colons --list-keys ex@example.invalid 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')
+gpg --homedir "$SEND" --batch --with-colons --list-keys "$EX" 2>/dev/null | grep -q '^pub:e:' && ok "key created 2020-01-01, expired 2020-06-01" || bad "expired key setup"
+pubto "$SEND" "$EX" "$RECV"
+expect_fail "export refuses an expired --sign-key" "revoked, expired" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/oEx0" --name ex --sign-key "$EX" --gpg-recipient "$R"
+# Hand-build a bundle signed while the key was still valid (faked 2020-03-01 clock).
+cp -r "$T/o1" "$T/oEx"; for f in "$T/oEx"/t1.*; do mv "$f" "${f/\/t1./\/ex.}"; done
+jq -c --arg s "$EX" '.name="ex" | .signer=$s' "$T/oEx/ex.provenance.json" > "$T/oEx/p" && mv "$T/oEx/p" "$T/oEx/ex.provenance.json"
+( cd "$T/oEx" && sha256sum ex.bundle.gpg ex.provenance.json > ex.SHA256SUMS )
+GNUPGHOME="$SEND" gpg --batch --yes --faked-system-time 20200301T000000 --local-user "$EX" --armor --detach-sign \
+  --output "$T/oEx/ex.SHA256SUMS.asc" "$T/oEx/ex.SHA256SUMS" 2>/dev/null
+expect_fail "signature by now-expired key rejected" "EXPIRED|EXPKEYSIG|KEYEXPIRED" "$RECV" "$IMPORT" --in "$T/oEx" --name ex --signer "$EX" --target "$DST" --provenance-log "$PLOG" --verify-only
+if [ -n "${ORIG_IMPORT:-}" ]; then
+  if run_as "$RECV" bash "$ORIG_IMPORT" --in "$T/oEx" --name ex --signer "$EX" --target "$DST" --provenance-log "$T/orig.jsonl" --verify-only
+  then echo "INFO  original script ACCEPTS the expired key"; else echo "INFO  original script rejected the expired key"; fi
+fi
+
+echo "== 15 replay and re-import"
+D15="$T/d15"; L15="$T/p15.jsonl"; git init -q -b main "$D15"; git -C "$D15" commit -q --allow-empty -m base
+expect_ok "export OLD (main at c2) as 'rp'" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/rpOld" --name rp --sign-key "$S" --gpg-recipient "$R"
+sleep 1; echo 3 >"$SRC/f"; git -C "$SRC" commit -qam c3; NEW=$(git -C "$SRC" rev-parse main)
+expect_ok "export NEW (main at c3) as 'rp'" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/rpNew" --name rp --sign-key "$S" --gpg-recipient "$R"
+expect_ok "import NEW" "$RECV" "$IMPORT" --in "$T/rpNew" --name rp --signer "$S" --target "$D15" --provenance-log "$L15"
+expect_ok "re-import the same NEW bundle (idempotent)" "$RECV" "$IMPORT" --in "$T/rpNew" --name rp --signer "$S" --target "$D15" --provenance-log "$L15"
+[ "$(git -C "$D15" rev-parse refs/remotes/airgap/rp/main)" = "$NEW" ] && ok "ref unchanged by re-import" || bad "ref changed by re-import"
+expect_fail "replay OLD signed bundle under same name" "possible replay" "$RECV" "$IMPORT" --in "$T/rpOld" --name rp --signer "$S" --target "$D15" --provenance-log "$L15"
+expect_fail "replay OLD with --allow-replay: git refuses non-fast-forward" "non-fast-forward|rejected" "$RECV" "$IMPORT" --in "$T/rpOld" --name rp --signer "$S" --target "$D15" --provenance-log "$L15" --allow-replay
+[ "$(git -C "$D15" rev-parse refs/remotes/airgap/rp/main)" = "$NEW" ] && ok "quarantine ref still at NEW (no rollback)" || bad "ref rolled back"
+# Diverged history under the same name (e.g. force-pushed source): newer, but not a fast-forward.
+git clone -q "$SRC" "$T/div"; git -C "$T/div" reset -q --hard HEAD~1; echo div >"$T/div/f"; git -C "$T/div" commit -qam div
+sleep 1; expect_ok "export diverged history as 'rp'" "$SEND" "$EXPORT" --repo "$T/div" --out "$T/rpDiv" --name rp --sign-key "$S" --gpg-recipient "$R"
+expect_fail "import diverged over existing ref" "non-fast-forward|rejected" "$RECV" "$IMPORT" --in "$T/rpDiv" --name rp --signer "$S" --target "$D15" --provenance-log "$L15"
+[ "$(git -C "$D15" rev-parse refs/remotes/airgap/rp/main)" = "$NEW" ] && ok "existing quarantine ref not overwritten" || bad "ref overwritten"
+# Replay of an old bundle under a NEW name is NOT detected: it lands in its own namespace.
+# Renaming the files does not help: the signed manifest names rp.* and the signed provenance says name "rp".
+mkdir "$T/rpRen"; for f in "$T/rpOld"/rp.*; do b=${f##*/}; cp "$f" "$T/rpRen/rp2.${b#rp.}"; done
+expect_fail "old bundle renamed to another --name" "manifest (must list|lists unexpected)|provenance name" "$RECV" "$IMPORT" --in "$T/rpRen" --name rp2 --signer "$S" --target "$D15" --provenance-log "$L15" --verify-only
+D15b="$T/d15b"; git init -q -b main "$D15b"; git -C "$D15b" commit -q --allow-empty -m base
+expect_ok "old bundle into a fresh receiver (no log): accepted, documented limitation" "$RECV" "$IMPORT" --in "$T/rpOld" --name rp --signer "$S" --target "$D15b" --provenance-log "$T/p15b.jsonl"
+jq -e 'has("created_utc")' "$L15" >/dev/null && ok "import log records signed created_utc" || bad "no created_utc in log"
 
 echo "== temp dirs left by the scripts: $(ls -A "$T/tmp" | wc -l)"
 [ -z "$(ls -A "$T/tmp")" ] && ok "no temp dirs left" || bad "leftover temp: $(ls -A "$T/tmp")"
