@@ -94,7 +94,7 @@ cp -r "$T/o1" "$T/oT"; printf 'x' >> "$T/oT/t1.bundle.gpg"
 expect_fail "1 byte appended to encrypted bundle" "checksum mismatch" "$RECV" "$IMPORT" --in "$T/oT" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
 cp -r "$T/o1" "$T/oM"; # Flip the first hex digit of the first line (always a real change, never a no-op).
 awk 'NR==1{c=substr($0,1,1); $0=(c=="0"?"1":"0") substr($0,2)} {print}' "$T/oM/t1.SHA256SUMS" > "$T/oM/s" && mv "$T/oM/s" "$T/oM/t1.SHA256SUMS"
-cmp -s "$T/o1/t1.SHA256SUMS" "$T/oM/t1.SHA256SUMS" && bad "manifest edit was a no-op" 
+cmp -s "$T/o1/t1.SHA256SUMS" "$T/oM/t1.SHA256SUMS" && bad "manifest edit was a no-op"
 expect_fail "edited manifest" "BADSIG|signature" "$RECV" "$IMPORT" --in "$T/oM" --name t1 --signer "$S" --target "$DST" --provenance-log "$PLOG" --verify-only
 # A correctly signed manifest that leaves the provenance out
 cp -r "$T/o1" "$T/oP"; grep -v provenance "$T/oP/t1.SHA256SUMS" > "$T/oP/s" && mv "$T/oP/s" "$T/oP/t1.SHA256SUMS"
@@ -222,6 +222,21 @@ expect_ok "export from repo with credentialed origin" "$SEND" "$EXPORT" --repo "
 O=$(jq -r .source_origin "$T/oC/cr.provenance.json"); echo "      | source_origin: $O"
 [ "$O" = "https://example.invalid/org/repo.git" ] && ok "userinfo, query and fragment stripped" || bad "origin not stripped: $O"
 grep -Eq 's3cret|AAA|BBB|CCC|token' "$T/oC/cr.provenance.json" && bad "credential text in provenance" || ok "no credential text anywhere in provenance"
+# Unusual forms (GitAI P3): uppercase scheme, scp-style user:tok@, '/' in the password, ;token= params.
+n=0
+while IFS='|' read -r url want; do n=$((n+1))
+  git -C "$T/cred" remote set-url origin "$url"
+  if GNUPGHOME="$SEND" "$EXPORT" --repo "$T/cred" --out "$T/oC$n" --name "cr$n" --sign-key "$S" --gpg-recipient "$R" >"$T/out" 2>&1; then
+    O=$(jq -r .source_origin "$T/oC$n/cr$n.provenance.json"); echo "      | $url -> $O"
+    if [ "$O" = "$want" ] && ! grep -Eq 'S3CRET|scptok|pa/ss|semitok' "$T/oC$n/cr$n.provenance.json"; then ok "origin stripped: $want"
+    else bad "origin form $n: got '$O', want '$want'"; fi
+  else indent <"$T/out"; bad "export with origin form $n"; fi
+done <<'URLS'
+HTTPS://User:S3CRET@Example.invalid/org/repo.git|https://Example.invalid/org/repo.git
+deploy:scptok@git.example.invalid:org/repo.git|git.example.invalid:org/repo.git
+https://user:pa/ss@example.invalid/org/repo.git|https://example.invalid/org/repo.git
+https://example.invalid/org/repo.git;token=semitok;x=1|https://example.invalid/org/repo.git
+URLS
 
 echo "== 14 expired signer key"
 gpg --homedir "$SEND" --batch --passphrase '' --faked-system-time 20200101T000000 \
@@ -258,6 +273,7 @@ git clone -q "$SRC" "$T/div"; git -C "$T/div" reset -q --hard HEAD~1; echo div >
 sleep 1; expect_ok "export diverged history as 'rp'" "$SEND" "$EXPORT" --repo "$T/div" --out "$T/rpDiv" --name rp --sign-key "$S" --gpg-recipient "$R"
 expect_fail "import diverged over existing ref" "non-fast-forward|rejected" "$RECV" "$IMPORT" --in "$T/rpDiv" --name rp --signer "$S" --target "$D15" --provenance-log "$L15"
 [ "$(git -C "$D15" rev-parse refs/remotes/airgap/rp/main)" = "$NEW" ] && ok "existing quarantine ref not overwritten" || bad "ref overwritten"
+tail -1 "$L15" | jq -e '.status=="rejected" and .name=="rp"' >/dev/null && ok "failed import leaves a status=rejected log record" || bad "no failure record"
 # Replay of an old bundle under a NEW name is NOT detected: it lands in its own namespace.
 # Renaming the files does not help: the signed manifest names rp.* and the signed provenance says name "rp".
 mkdir "$T/rpRen"; for f in "$T/rpOld"/rp.*; do b=${f##*/}; cp "$f" "$T/rpRen/rp2.${b#rp.}"; done
@@ -265,6 +281,40 @@ expect_fail "old bundle renamed to another --name" "manifest (must list|lists un
 D15b="$T/d15b"; git init -q -b main "$D15b"; git -C "$D15b" commit -q --allow-empty -m base
 expect_ok "old bundle into a fresh receiver (no log): accepted, documented limitation" "$RECV" "$IMPORT" --in "$T/rpOld" --name rp --signer "$S" --target "$D15b" --provenance-log "$T/p15b.jsonl"
 jq -e 'has("created_utc")' "$L15" >/dev/null && ok "import log records signed created_utc" || bad "no created_utc in log"
+
+echo "== 16 atomic import: diverged main + new branch creates no refs (GitAI P1)"
+D16="$T/d16"; L16="$T/p16.jsonl"; git init -q -b main "$D16"; git -C "$D16" commit -q --allow-empty -m base
+expect_ok "import NEW as 'rp' into a fresh receiver" "$RECV" "$IMPORT" --in "$T/rpNew" --name rp --signer "$S" --target "$D16" --provenance-log "$L16"
+git clone -q "$T/div" "$T/div2"; git -C "$T/div2" branch newbr
+sleep 1; expect_ok "export diverged main + new branch 'newbr' as 'rp'" "$SEND" "$EXPORT" --repo "$T/div2" --out "$T/rpDivNew" --name rp --sign-key "$S" --gpg-recipient "$R"
+expect_fail "import diverged main + new branch" "non-fast-forward|rejected" "$RECV" "$IMPORT" --in "$T/rpDivNew" --name rp --signer "$S" --target "$D16" --provenance-log "$L16"
+git -C "$D16" rev-parse -q --verify refs/remotes/airgap/rp/newbr >/dev/null && bad "new branch ref created despite rejected main (not atomic)" || ok "no ref created for the new branch (atomic)"
+[ "$(git -C "$D16" rev-parse refs/remotes/airgap/rp/main)" = "$NEW" ] && ok "main quarantine ref unchanged" || bad "main ref changed"
+[ "$(git -C "$D16" for-each-ref refs/remotes/airgap | wc -l)" = 1 ] && ok "quarantine namespace has exactly the one earlier ref" || bad "unexpected refs: $(git -C "$D16" for-each-ref refs/remotes/airgap)"
+tail -1 "$L16" | jq -e '.status=="rejected" and (.refs|length)==1' >/dev/null && ok "failure record written (status rejected, refs as they still are)" || bad "failure record missing/wrong"
+expect_ok "failure record does not advance the replay guard: NEW re-import still a no-op" "$RECV" "$IMPORT" --in "$T/rpNew" --name rp --signer "$S" --target "$D16" --provenance-log "$L16"
+
+echo "== 17 replay guard: equal created_utc, different bundle (GitAI P2)"
+D17="$T/d17"; L17="$T/p17.jsonl"; git init -q -b main "$D17"; git -C "$D17" commit -q --allow-empty -m base
+# Two validly signed bundles under name 'eq' with the SAME created_utc but different
+# contents/manifests (as two exports in the same second would have).
+expect_ok "export A as 'eq'" "$SEND" "$EXPORT" --repo "$SRC" --out "$T/eqA" --name eq --sign-key "$S" --gpg-recipient "$R"
+git clone -q "$SRC" "$T/eqsrc"; echo 4 >"$T/eqsrc/f"; git -C "$T/eqsrc" commit -qam c4; EQB=$(git -C "$T/eqsrc" rev-parse main)
+expect_ok "export B (fast-forward of A) as 'eq'" "$SEND" "$EXPORT" --repo "$T/eqsrc" --out "$T/eqB" --name eq --sign-key "$S" --gpg-recipient "$R"
+CA=$(jq -r .created_utc "$T/eqA/eq.provenance.json")
+jq -c --arg c "$CA" '.created_utc=$c' "$T/eqB/eq.provenance.json" > "$T/eqB/p" && mv "$T/eqB/p" "$T/eqB/eq.provenance.json"
+( cd "$T/eqB" && sha256sum eq.bundle.gpg eq.provenance.json > eq.SHA256SUMS )
+GNUPGHOME="$SEND" gpg --batch --yes --local-user "$S" --armor --detach-sign --output "$T/eqB/eq.SHA256SUMS.asc" "$T/eqB/eq.SHA256SUMS" 2>/dev/null
+[ "$(jq -r .created_utc "$T/eqB/eq.provenance.json")" = "$CA" ] && ! cmp -s "$T/eqA/eq.SHA256SUMS" "$T/eqB/eq.SHA256SUMS" \
+  && ok "A and B: same created_utc, different signed manifests" || bad "equal-timestamp setup"
+expect_ok "import A" "$RECV" "$IMPORT" --in "$T/eqA" --name eq --signer "$S" --target "$D17" --provenance-log "$L17"
+expect_ok "re-import identical A (same manifest hash): no-op" "$RECV" "$IMPORT" --in "$T/eqA" --name eq --signer "$S" --target "$D17" --provenance-log "$L17"
+grep -q 're-import is a no-op' "$T/out" && ok "identical re-import reported as no-op" || bad "no no-op note"
+expect_fail "B with equal created_utc, different manifest = replay" "possible replay.*same created_utc" "$RECV" "$IMPORT" --in "$T/eqB" --name eq --signer "$S" --target "$D17" --provenance-log "$L17"
+[ "$(git -C "$D17" rev-parse refs/remotes/airgap/eq/main)" = "$NEW" ] && ok "ref still at A after refused B" || bad "ref moved after refused B"
+expect_ok "B with --allow-replay (fast-forward) imports" "$RECV" "$IMPORT" --in "$T/eqB" --name eq --signer "$S" --target "$D17" --provenance-log "$L17" --allow-replay
+[ "$(git -C "$D17" rev-parse refs/remotes/airgap/eq/main)" = "$EQB" ] && ok "ref at B after --allow-replay" || bad "ref not at B"
+jq -e 'has("manifest_sha256") and .status=="imported"' "$L17" >/dev/null && ok "import log records manifest_sha256 and status" || bad "log lacks manifest_sha256/status"
 
 echo "== temp dirs left by the scripts: $(ls -A "$T/tmp" | wc -l)"
 [ -z "$(ls -A "$T/tmp")" ] && ok "no temp dirs left" || bad "leftover temp: $(ls -A "$T/tmp")"
