@@ -119,9 +119,32 @@ fi
 rm -f "$BUNDLE"
 
 # 3. Provenance record (no secrets; PLAINTEXT on the medium, see the doc).
-ORIGIN=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null | sed -E 's#^([a-z][a-z0-9+.-]*://)[^@/]+@#\1#; s#[?\#].*$##' || true)
-# ^ drops userinfo (user:token@) and the whole query string and fragment
-#   (?token=..., &access_token=..., #...), which can carry credentials.
+# strip_origin URL: keep only scheme://host[:port]/path (or host:path for scp-style),
+# never userinfo, query, fragment or ;params, which can all carry credentials.
+#   * scheme is matched case-insensitively and printed lower-case (HTTPS://u:p@ ok)
+#   * userinfo: if there is an '@' before the first '/', drop through it; else if a
+#     ':' comes before the first '/' and an '@' follows (a password containing '/',
+#     e.g. user:pa/ss@host), drop through the LAST '@'. This can over-strip a path
+#     like host:8080/a@b to "b"; losing text is preferred to leaking a token.
+#   * scp-style user:tok@host:path -> host:path (user part dropped too)
+#   * everything from the first '?', '#' or ';' on is dropped
+#   * plain local paths (/x, ./x, ~/x, C:\x) are kept as they are
+strip_origin() {
+  local u=$1 scheme="" rest
+  if [[ "$u" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$ ]]; then
+    scheme="${BASH_REMATCH[1],,}://"; rest=${BASH_REMATCH[2]}
+  elif [[ "$u" =~ ^[^/]*: ]] && [[ ! "$u" =~ ^[A-Za-z]:[\\/] ]] && [[ "$u" != [./~]* ]]; then
+    rest=$u                                    # scp-style [user[:tok]@]host:path
+  else
+    printf '%s' "$u"; return                   # local path
+  fi
+  if [[ "$rest" =~ ^[^/@]*@ ]]; then rest=${rest#*@}
+  elif [[ "$rest" =~ ^[^/@]*:[^@]*@ ]]; then rest=${rest##*@}
+  fi
+  rest=${rest%%[?#;]*}
+  printf '%s%s' "$scheme" "$rest"
+}
+ORIGIN=$(strip_origin "$(git -C "$REPO" config --get remote.origin.url 2>/dev/null || true)")
 HOST=""; [ "$WITH_HOST" = 0 ] || HOST=$(hostname -s 2>/dev/null || echo unknown)
 jq -cn --arg name "$NAME" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --arg origin "${ORIGIN:-local}" --arg since "$SINCE" --argjson heads "$HEADS_JSON" \
