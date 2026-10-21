@@ -27,24 +27,57 @@ Tools in this PR: `tools/bundle-export.sh` and `tools/bundle-verify-import.sh`.
 
 **Export (connected side):**
 1. `git bundle create` from the chosen refs (full, or incremental with `--since REV`), then `git bundle verify`.
-2. Encrypt to the receiver's key: gpg (`--gpg-recipient FPR`) or age (`--age-recipient`). The plaintext bundle exists only in a temp dir that is removed on exit.
-3. Write `<name>.provenance.json` (source origin with any credential stripped, heads, plaintext sha256, recipient, signer fingerprint, UTC time).
+2. Encrypt to the receiver's key: gpg (`--gpg-recipient` = the receiver's **full 40-hex fingerprint**; short KEYIDs are refused) or age (`--age-recipient age1...`). The signing key (`--sign-key`) is also a full fingerprint. Both keys are checked first: they must exist and must not be revoked or expired. The plaintext bundle exists only in a mode-700 temp dir that is removed on exit.
+3. Write `<name>.provenance.json` with `jq`, never by string concatenation, so branch names containing quotes stay valid JSON. Fields: name, UTC time, plaintext sha256, encryption method, recipient, signer fingerprint, plus source origin (any credential stripped), `--since` and heads, unless `--redact-provenance` is given. The exporter hostname is left out unless `--with-host` is given.
 4. Write `<name>.SHA256SUMS` over the encrypted bundle and the provenance file, and a detached gpg signature `<name>.SHA256SUMS.asc`.
-5. Self-check the checksums and signature, then copy the 4 files to `--out`. It refuses to overwrite.
+5. Self-check the checksums and the signature (GOODSIG from exactly `--sign-key`). Then stage each file as a temp file inside `--out` and rename it into place with no-clobber, so a reader never sees a half-written file and nothing existing is overwritten.
 
-**Carry:** USB, SD card or any one-way medium. The 4 files are safe to carry: they're encrypted and tamper-evident.
+**Carry:** USB, SD card or any one-way medium.
+
+What the 4 files protect: the bundle **contents** (code, history, file data) are encrypted, and all 4 files are **tamper-evident** (signed manifest). They are **not confidential as a set**. `<name>.provenance.json`, `<name>.SHA256SUMS` and the `.asc` travel in **plaintext**, so anyone who sees the medium learns:
+
+| Plaintext field | Default | With `--redact-provenance` |
+|---|---|---|
+| bundle name, UTC export time, encryption method | shown | shown |
+| plaintext bundle sha256, encrypted file sha256s | shown | shown |
+| recipient fingerprint / age public key, signer fingerprint (also in the `.asc`) | shown | shown |
+| source origin URL (credentials stripped) | shown | omitted |
+| branch names and head commit SHAs, `--since` REV | shown | omitted |
+| exporter hostname | omitted | omitted (only with `--with-host`) |
+
+Use `--redact-provenance` when the repo name, branch names or commit SHAs are themselves sensitive. The importer needs none of the redacted fields.
+
+**Removable media hygiene (the USB hop):**
+- Turn off automount and autorun on **both** machines (desktop automounters such as udisks or GNOME, and anything else that opens or previews new media). Mount by hand only.
+- Mount read-only on the air-gapped side, without executables, device files or setuid: `mount -o ro,noexec,nodev,nosuid /dev/sdX1 /mnt/airgap`. On the connected side use `noexec,nodev,nosuid` too.
+- Never run anything from the medium, including the tools. The importer comes from the target machine's own reviewed copy of this repo, and you pass the medium only as `--in`.
+- Use a dedicated, freshly formatted medium for each direction. Unmount and eject before carrying it.
+- The importer copies the 4 files off the medium before checking anything, so a medium that changes underneath it (a malicious device, a hot swap) cannot change what is verified and imported.
 
 **Verify, then import (air-gapped side).** Order is fixed, and any failure stops before the repo is touched:
-1. The signature must be valid **and** come from the expected `--signer` fingerprint.
-2. `sha256sum --strict -c` on the manifest.
-3. Decrypt into a private temp dir (mode 700, always removed). The decrypted sha256 must match the provenance file.
+0. Copy the manifest, signature, bundle and provenance from `--in` into a private temp dir (mode 700, always removed). Symlinks and anything that isn't a regular file are refused. Every later step reads **only these copies**.
+1. Signature: `--signer` must be the signer's **full 40-hex (or 64-hex) primary-key fingerprint**. It is compared as an exact string, never as a regex. The signer's public key, and any revocation for it, must already be in the receiver's gpg keyring. The check runs in a throwaway keyring that holds only that key. It needs exactly one `GOODSIG` and a `VALIDSIG` whose primary fingerprint equals `--signer`. Any `BADSIG`, `ERRSIG`, `EXPSIG`, `EXPKEYSIG`, `REVKEYSIG`, `KEYREVOKED`, `KEYEXPIRED` or `NO_PUBKEY`, or a signer key that is revoked or expired, rejects the bundle.
+2. The manifest must list exactly two files, `<name>.bundle.gpg|age` and `<name>.provenance.json`, and nothing else. Then `sha256sum --strict -c` runs on the copies.
+3. The provenance must be a JSON object whose `name` and `signer` match the command line. Decrypt the copy (gpg must report `DECRYPTION_OKAY`; age needs `AGE_IDENTITY`). The decrypted sha256 must match the provenance.
 4. `git bundle verify` against the target, which catches missing prerequisite commits.
-5. Import with `git fetch` into the quarantine namespace `refs/remotes/airgap/<name>/*`. No branch is overwritten and nothing is forced. Promotion to a real branch happens by a reviewed PR.
-6. Append an import record to `~/.airgap/provenance.jsonl`, which sits outside every repo. Commit a copy via PR if the lane wants it on GitHub.
+5. Import with `git -c transfer.fsckObjects=true -c fetch.fsckObjects=true fetch` into the quarantine namespace `refs/remotes/airgap/<name>/*`. Malformed objects abort the fetch. No branch is overwritten and nothing is forced. Promotion to a real branch happens by a reviewed PR.
+6. Append an import record (built with `jq`) to `~/.airgap/provenance.jsonl`, which sits outside every repo. Commit a copy via PR if the lane wants it on GitHub.
 
-`--verify-only` runs steps 1–4 and imports nothing (dry run).
+`--verify-only` runs steps 0–4 and imports nothing (dry run).
 
-### Test result: TESTED on the shared box, 2026-10-21 15:24 CDT
+**Keys and who can import.** Keys are never committed. A receiver can import only if it holds (a) the private key the bundle was encrypted to, gpg or age, and (b) the sender's public signing key, checked out-of-band against its full fingerprint. Revocations must be imported into the receiver's keyring when they are issued. The importer rejects revoked or expired signers only if the receiver's keyring knows about them.
+
+### Tests: `tests/run_tests.sh` (TESTED, network/harden-pr9)
+
+Run `tests/run_tests.sh`. It needs bash, gpg, git and jq; age is optional and its cases are skipped without it. Sender, receiver and attacker use separate `GNUPGHOME`s under one `mktemp -d`, with throwaway keys that are deleted on exit. Set `ORIG_IMPORT=<path to the ed4192a importer>` to also run the attack cases against the pre-hardening script.
+
+Cases: good path (export, verify-only, import, JSON log), wrong signing key, signer not in keyring, short KEYID refused, revoked signer, 1 byte appended to the bundle, edited manifest, signed manifest without provenance, symlink on the medium, **file swap on the medium after the checksum check** (a PATH shim swaps in an attacker's bundle and provenance right after `sha256sum -c`), `--signer '.*'` and short KEYIDs refused, branch name containing `"`, `--redact-provenance`, malformed commit object rejected by fsck, age round trip plus age with the wrong identity, refusal to overwrite, and no temp dirs left behind.
+
+Result on the shared box (gpg 2.4.7, git 2.47.3, age 1.2.1): **39 passed, 0 failed, 0 skipped.** Against the ed4192a importer, the same harness reproduced GitAI's findings: it accepted a revoked signer, accepted an attacker's key with `--signer '.*'`, and imported the attacker's commit after the file swap. The hardened importer rejected the first two and imported the signed commit in the third. The full output is in the PR description and the network/harden-pr9 patch notes.
+
+### Earlier test result (pre-hardening, ed4192a): TESTED on the shared box, 2026-10-21 15:24 CDT
+
+Kept for history. These 10 cases ran from a log with one shared gpg home; `tests/run_tests.sh` above replaces them.
 
 Throwaway gpg home, keys and repos under `/tmp/airgap-test.*`, all deleted afterward. gpg 2.4.7, git 2.47.3. Fingerprints are redacted below.
 
@@ -62,7 +95,7 @@ Throwaway gpg home, keys and repos under `/tmp/airgap-test.*`, all deleted after
 | 10 | re-export with the same name | refuse to overwrite | PASS |
 | — | temp dirs left by the scripts | 0 | PASS |
 
-Not tested: the age path (age isn't installed on the box) and a real removable-media hop. Both stay **SIMULATION** until someone runs them.
+At that time the age path wasn't tested (it is now, in `tests/run_tests.sh`). A real removable-media hop is still **SIMULATION** until someone runs it.
 
 <details><summary>Raw log (fingerprints redacted)</summary>
 
