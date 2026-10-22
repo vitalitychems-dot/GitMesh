@@ -64,6 +64,7 @@ jobs:
           fail_if_ok nsenter --net=/proc/1/ns/net true
           fail_if_ok sudo -n nsenter --net=/proc/1/ns/net true
           fail_if_ok curl -sS --max-time 3 --unix-socket /var/run/docker.sock http://d/_ping
+          dns_bad=0
           dns_fail() {
             local name="$1"; shift
             if { [ "$name" = resolvectl ] || [ "$name" = busctl ]; } && ! "${wrap[@]}" bash -c "command -v $name >/dev/null 2>&1"; then
@@ -71,13 +72,14 @@ jobs:
               return 0
             fi
             local ec=0
-            "${wrap[@]}" "$@" >/dev/null 2>&1 || ec=$?
+            "${wrap[@]}" "$@" || ec=$?
             echo "$name exit $ec"
-            [ "$ec" -ne 0 ] || { echo "$name succeeded inside the wrapper" >&2; exit 1; }
+            if [ "$ec" -eq 0 ]; then echo "$name succeeded inside the wrapper" >&2; dns_bad=1; fi
           }
           dns_fail resolvectl resolvectl query github.com
           dns_fail busctl busctl call org.freedesktop.resolve1 /org/freedesktop/resolve1 org.freedesktop.resolve1.Manager ResolveHostname isit 0 github.com 0 0
           dns_fail getent getent hosts github.com
+          [ "$dns_bad" -eq 0 ]
           "${wrap[@]}" bash tools/offline-mesh-check.sh \
             projects/admit projects/carry projects/pass \
             projects/shift projects/spin projects/tie
