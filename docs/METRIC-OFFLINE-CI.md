@@ -49,9 +49,9 @@ node exit 1 with `ENOTFOUND` or `EAI_AGAIN`. Anything else, including curl 7 or
 and exits 5. A probe that succeeds exits 3. Then each listed project's `run`
 command runs with `timeout 15`.
 
-## Known limits (SIMULATION, not tested)
+## Not tested, not counted
 
-Post-job steps run on the host network as the same uid, and world-connectable host unix sockets (D-Bus, resolved) could leak DNS.
+Post-job steps are not tested and are not counted in the metric.
 
 ## Baseline (TESTED, main `0e44c621`, 2026-10-22)
 
