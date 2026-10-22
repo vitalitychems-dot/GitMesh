@@ -12,12 +12,16 @@ that one step. `on:` must include `pull_request`, the step must have no `if:`
 and no `continue-on-error`, and `"${wrap[@]}" bash tools/offline-mesh-check.sh`
 must be the first command on its line. Arguments run through backslash
 continuations and stop at `;`, `&&`, `||`, `|`, `#`, or the end of the command.
-Re-run it from a checkout:
+Re-run this tree's metric against a checkout of main `0e44c621` (needs bash, jq, unshare). That checkout prints `METRIC offline+ci: 0/9`:
 
 ```sh
-tools/metric-offline-ci.sh          # needs bash, jq, unshare; prints METRIC offline+ci: N/9
-tools/test-metric-offline-ci.sh     # base and the fake steps stay 0/9; this tree is 6/9
+git worktree add --detach /tmp/offline-ci-0e44c621 0e44c621
+tools/metric-offline-ci.sh /tmp/offline-ci-0e44c621
+git worktree remove --force /tmp/offline-ci-0e44c621
 ```
+
+`tools/metric-offline-ci.sh` on this tree prints `METRIC offline+ci: 6/9`.
+`tools/test-metric-offline-ci.sh` asserts `0/9` on that `0e44c621` checkout and `6/9` here.
 
 CI PASS lines from that step are the proof that the run actually exited 0.
 The metric is only the text check. It does not invent a pass.

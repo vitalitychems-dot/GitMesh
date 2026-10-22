@@ -41,17 +41,23 @@ jobs:
 
       # Offline mesh: no network inside the wrapper. The canary must fail
       # (job fails otherwise), then six index.json projects run with timeout.
-      # The sudo fallback clears supplementary groups and sets no_new_privs.
+      # The sudo fallback clears groups and sets no_new_privs. sudo and
+      # nsenter back to the host netns must both fail inside the wrapper.
       - name: Offline mesh projects (canary must fail)
         run: |
           if unshare -rn true 2>/dev/null; then wrap=(unshare -rn); else wrap=(sudo env "PATH=$PATH" unshare -n setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups --no-new-privs env "PATH=$PATH" "HOME=$HOME"); fi
           echo "offline wrapper: ${wrap[*]}"
           echo "id: $("${wrap[@]}" id)"
-          if "${wrap[@]}" sudo -n true; then
-            echo "sudo -n true succeeded inside the wrapper" >&2
-            exit 1
-          fi
-          echo "sudo -n true failed inside the wrapper"
+          fail_if_ok() {
+            if "${wrap[@]}" "$@"; then
+              echo "$* succeeded inside the wrapper" >&2
+              exit 1
+            fi
+            echo "$* failed inside the wrapper"
+          }
+          fail_if_ok sudo -n true
+          fail_if_ok nsenter --net=/proc/1/ns/net true
+          fail_if_ok sudo -n nsenter --net=/proc/1/ns/net true
           "${wrap[@]}" bash tools/offline-mesh-check.sh \
             projects/admit projects/carry projects/pass \
             projects/shift projects/spin projects/tie

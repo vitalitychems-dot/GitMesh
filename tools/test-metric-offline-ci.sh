@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Base, and fakes of the offline step on that base, stay 0/9.
-# This checkout, where the real step passes the six paths, is 6/9.
+# A pristine checkout of 0e44c621 (the command in docs/METRIC-OFFLINE-CI.md)
+# prints METRIC offline+ci: 0/9. Fakes of the offline step on that base stay
+# 0/9. This checkout, where the real step passes the six paths, is 6/9.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 metric=$root/tools/metric-offline-ci.sh
@@ -32,7 +33,7 @@ add_step() {
   check "$label" "$tmp" "METRIC offline+ci: 0/9"
 }
 
-check base "$tmp" "METRIC offline+ci: 0/9"
+check '0e44c621' "$tmp" "METRIC offline+ci: 0/9"
 reset
 printf '\n# %s\n' "$paths" >> "$wf"
 check comment "$tmp" "METRIC offline+ci: 0/9"
