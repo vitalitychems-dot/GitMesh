@@ -41,11 +41,17 @@ jobs:
 
       # Offline mesh: no network inside the wrapper. The canary must fail
       # (job fails otherwise), then six index.json projects run with timeout.
-      # The sudo fallback drops root before the projects run.
+      # The sudo fallback clears supplementary groups and sets no_new_privs.
       - name: Offline mesh projects (canary must fail)
         run: |
-          if unshare -rn true 2>/dev/null; then wrap=(unshare -rn); else wrap=(sudo env "PATH=$PATH" unshare -n setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups env "PATH=$PATH"); fi
+          if unshare -rn true 2>/dev/null; then wrap=(unshare -rn); else wrap=(sudo env "PATH=$PATH" unshare -n setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups --no-new-privs env "PATH=$PATH" "HOME=$HOME"); fi
           echo "offline wrapper: ${wrap[*]}"
+          echo "id: $("${wrap[@]}" id)"
+          if "${wrap[@]}" sudo -n true; then
+            echo "sudo -n true succeeded inside the wrapper" >&2
+            exit 1
+          fi
+          echo "sudo -n true failed inside the wrapper"
           "${wrap[@]}" bash tools/offline-mesh-check.sh \
             projects/admit projects/carry projects/pass \
             projects/shift projects/spin projects/tie

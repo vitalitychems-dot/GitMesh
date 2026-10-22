@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Run inside a network namespace with no network (CI uses unshare -rn, or
-# sudo unshare -n then setpriv). 1) curl, getent, and node must exist.
-# 2) /sys/class/net must be exactly lo. 3) Each canary must fail with a
-# network-failure code. 4) Run each project's `run` with a timeout.
+# Run inside a network namespace with no network. 1) curl, getent, and node
+# must exist. 2) /proc/self/net/dev must list exactly lo. 3) The canary must
+# fail with curl 6, getent 2, or node exit 1 and ENOTFOUND or EAI_AGAIN.
+# 4) Run each project's `run` with a timeout.
 # Usage: tools/offline-mesh-check.sh projects/admit projects/carry ...
 set -euo pipefail
 case "$0" in
@@ -20,28 +20,9 @@ for tool in curl getent node; do
 done
 [ "$missing" -eq 0 ] || exit 4
 
-netdevs=$(ls -1 /sys/class/net 2>/dev/null || true)
-if [ "$netdevs" != "lo" ]; then
-  # Host sysfs does not follow this netns until it is mounted in the netns.
-  # Do that in a nested mount namespace so the caller's /sys is left alone.
-  refresh='mount -t sysfs sysfs /sys && ls -1 /sys/class/net'
-  if refreshed=$(unshare -m bash -c "$refresh" 2>/dev/null); then
-    netdevs=$refreshed
-  elif refreshed=$(sudo -n unshare -m bash -c "$refresh" 2>/dev/null); then
-    netdevs=$refreshed
-  fi
-fi
-echo "ls /sys/class/net: ${netdevs//$'\n'/ }"
-[ "$netdevs" = "lo" ] || { echo "FAIL: /sys/class/net is not exactly lo" >&2; exit 6; }
-
-echo "id: $(id)"
-
-node_code_ok() {
-  case "$1" in
-    ENOTFOUND|EAI_AGAIN|ENETUNREACH|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT|EHOSTUNREACH|ENETDOWN|ECONNRESET|EHOSTDOWN|UND_ERR_SOCKET) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+netdevs=$(awk -F: 'NR>2{gsub(/ /,"",$1);print $1}' /proc/self/net/dev)
+echo "interfaces: ${netdevs//$'\n'/ }"
+[ "$netdevs" = "lo" ] || { echo "FAIL: interfaces are not exactly lo" >&2; exit 6; }
 
 leak=0
 inconclusive=0
@@ -49,8 +30,13 @@ probe() {
   local label="$1" ec=0 out="" code=""
   shift
   set +e
-  out=$(timeout 10 "$@" 2>&1)
-  ec=$?
+  if [ "$label" = node ]; then
+    out=$(timeout 10 "$@" 2>/dev/null)
+    ec=$?
+  else
+    timeout 10 "$@" >/dev/null 2>&1
+    ec=$?
+  fi
   set -e
   if [ "$ec" -eq 0 ]; then
     echo "CANARY LEAK: $label exit 0"
@@ -59,20 +45,24 @@ probe() {
   fi
   case "$label" in
     curl)
-      case "$ec" in
-        6|7|28) echo "canary ok (failed as expected): curl exit $ec" ;;
-        *) echo "CANARY INCONCLUSIVE: curl exit $ec"; inconclusive=1 ;;
-      esac
+      if [ "$ec" -eq 6 ]; then
+        echo "canary ok (failed as expected): curl exit $ec"
+      else
+        echo "CANARY INCONCLUSIVE: curl exit $ec"
+        inconclusive=1
+      fi
       ;;
     getent)
-      case "$ec" in
-        2) echo "canary ok (failed as expected): getent exit $ec" ;;
-        *) echo "CANARY INCONCLUSIVE: getent exit $ec"; inconclusive=1 ;;
-      esac
+      if [ "$ec" -eq 2 ]; then
+        echo "canary ok (failed as expected): getent exit $ec"
+      else
+        echo "CANARY INCONCLUSIVE: getent exit $ec"
+        inconclusive=1
+      fi
       ;;
     node)
       code=$(printf '%s' "$out" | tr -d '\r')
-      if node_code_ok "$code"; then
+      if [ "$ec" -eq 1 ] && { [ "$code" = ENOTFOUND ] || [ "$code" = EAI_AGAIN ]; }; then
         echo "canary ok (failed as expected): node exit $ec code $code"
       else
         echo "CANARY INCONCLUSIVE: node exit $ec code ${code:-<empty>}"
