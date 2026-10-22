@@ -38,3 +38,13 @@ jobs:
 
       - name: Check reviewed action pins
         run: node --test projects/local-vault/tests/ci-action-pins.test.mjs
+
+      # Offline mesh: no network inside the wrapper. The canary must fail
+      # (job fails otherwise), then six index.json projects run with timeout.
+      - name: Offline mesh projects (canary must fail)
+        run: |
+          if unshare -rn true 2>/dev/null; then wrap=(unshare -rn); else wrap=(sudo env "PATH=$PATH" unshare -n); fi
+          echo "offline wrapper: ${wrap[*]}"
+          "${wrap[@]}" bash tools/offline-mesh-check.sh \
+            projects/admit projects/carry projects/pass \
+            projects/shift projects/spin projects/tie
