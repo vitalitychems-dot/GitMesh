@@ -5,26 +5,38 @@ Owner: Network. Labels: **TESTED** = we ran it.
 ## Definition
 
 The number of projects in `mesh/index.json` whose `run` command exits 0 with no
-network (`unshare -rn`, 15 s timeout) **and** whose path is an argument of the
-step named `Offline mesh projects (canary must fail)` in
-`.github/workflows/local-vault-regressions.yml`. The metric is a text check of
-that one step. `on:` must include `pull_request`, the step must have no `if:`
-and no `continue-on-error`, and `"${wrap[@]}" bash tools/offline-mesh-check.sh`
-must be the first command on its line. Arguments run through backslash
-continuations and stop at `;`, `&&`, `||`, `|`, `#`, or the end of the command.
-Re-run this tree's metric against a checkout of main `0e44c621` (needs bash, jq, unshare). That checkout prints `METRIC offline+ci: 0/9`:
+network (`unshare -rn`, 15 s timeout) **and** whose `PASS <path>` line appears
+in the `Offline mesh projects (canary must fail)` step of a successful run of
+`Local vault source-sync regressions` at the measured SHA. The line counts only
+when the text after the timestamp begins with `PASS <path>`. No successful run
+at that SHA means CI is 0 for every project. CI PASS lines are the proof.
 
 ```sh
-git worktree add --detach /tmp/offline-ci-0e44c621 0e44c621
-tools/metric-offline-ci.sh /tmp/offline-ci-0e44c621
-git worktree remove --force /tmp/offline-ci-0e44c621
+tools/metric-offline-ci.sh <repo-root> <ci-log-file>   # needs bash, jq, unshare
 ```
 
-`tools/metric-offline-ci.sh` on this tree prints `METRIC offline+ci: 6/9`.
-`tools/test-metric-offline-ci.sh` asserts `0/9` on that `0e44c621` checkout and `6/9` here.
+Fetch the log (`gh run view --log` labels every step `UNKNOWN STEP` in gh 2.102,
+so keep the section that starts at `step: Offline mesh projects (canary must fail)`):
 
-CI PASS lines from that step are the proof that the run actually exited 0.
-The metric is only the text check. It does not invent a pass.
+```sh
+sha=0e44c621
+id=$(gh run list --workflow local-vault-regressions.yml --commit "$sha" --status success --json databaseId -q '.[0].databaseId')
+if [ -z "$id" ] || [ "$id" = null ]; then : > /tmp/ci-$sha.log
+else gh run view "$id" --log > /tmp/ci-$sha.log; fi
+git worktree add --detach /tmp/offline-ci-$sha "$sha"
+tools/metric-offline-ci.sh /tmp/offline-ci-$sha /tmp/ci-$sha.log
+```
+
+That baseline log has no `PASS` lines, so the metric prints `METRIC offline+ci: 0/9`.
+For this tree, use `sha=$(git rev-parse HEAD)` and keep only the offline step:
+
+```sh
+gh run view "$id" --log | awk '/step: Offline mesh projects \(canary must fail\)/{p=1} p&&/Post job cleanup/{exit} p' > /tmp/ci-$sha.log
+tools/metric-offline-ci.sh . /tmp/ci-$sha.log
+```
+
+That prints `METRIC offline+ci: 6/9`. `tools/test-metric-offline-ci.sh` checks the
+same rule on fixture logs.
 
 The CI side is `tools/offline-mesh-check.sh`, run by the step "Offline mesh
 projects (canary must fail)" in `local-vault-regressions.yml`. `curl`, `getent`,
@@ -36,6 +48,10 @@ node exit 1 with `ENOTFOUND` or `EAI_AGAIN`. Anything else, including curl 7 or
 28 and `ECONNREFUSED`, `ECONNRESET`, or `UND_ERR_*`, is `CANARY INCONCLUSIVE`
 and exits 5. A probe that succeeds exits 3. Then each listed project's `run`
 command runs with `timeout 15`.
+
+## Known limits (SIMULATION, not tested)
+
+Post-job steps run on the host network as the same uid, and world-connectable host unix sockets (D-Bus, resolved) could leak DNS.
 
 ## Baseline (TESTED, main `0e44c621`, 2026-10-22)
 

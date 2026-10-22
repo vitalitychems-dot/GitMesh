@@ -1,67 +1,31 @@
 #!/usr/bin/env bash
-# A pristine checkout of 0e44c621 (the command in docs/METRIC-OFFLINE-CI.md)
-# prints METRIC offline+ci: 0/9. Fakes of the offline step on that base stay
-# 0/9. This checkout, where the real step passes the six paths, is 6/9.
+# Fixture logs only. Six real PASS lines are 6/9. An empty log, a missing
+# log, an echoed or quoted PASS, and a FAIL line are 0/9.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 metric=$root/tools/metric-offline-ci.sh
-base=0e44c6215253aef203f85e24d415c2b0acbddc28
-paths='projects/admit projects/carry projects/pass projects/shift projects/spin projects/tie'
 tmp=$(mktemp -d)
-cleanup() { git -C "$root" worktree remove --force "$tmp" >/dev/null 2>&1 || rm -rf "$tmp"; }
-trap cleanup EXIT
-git -C "$root" worktree add --detach "$tmp" "$base" >/dev/null
-wf=$tmp/.github/workflows/local-vault-regressions.yml
-saved=$(mktemp)
-cp "$wf" "$saved"
+trap 'rm -rf "$tmp"' EXIT
+paths='projects/admit projects/carry projects/pass projects/shift projects/spin projects/tie'
+stamp='2026-10-22T00:00:00.0000000Z'
+: > "$tmp/empty.log"
+: > "$tmp/pass.log"
+: > "$tmp/decoy.log"
+for path in $paths; do
+  printf '%s %s\n' "$stamp" "PASS $path: ok" >> "$tmp/pass.log"
+  printf '%s %s\n' "$stamp" "echo \"PASS $path: no\"" >> "$tmp/decoy.log"
+  printf '%s %s\n' "$stamp" "\"PASS $path: no\"" >> "$tmp/decoy.log"
+  printf '%s %s\n' "$stamp" "FAIL $path: no" >> "$tmp/decoy.log"
+done
 
 check() {
-  local label="$1" dir="$2" want="$3" out
-  out=$(bash "$metric" "$dir")
+  local label="$1" file="$2" want="$3" out
+  out=$(bash "$metric" "$root" "$file")
   printf '== %s ==\n%s\n' "$label" "$out"
   printf '%s\n' "$out" | grep -qx "$want" || { echo "expected $want from $label" >&2; exit 1; }
 }
-
-reset() { cp "$saved" "$wf"; }
-add_step() {
-  local label="$1"
-  reset
-  {
-    printf '%s\n' '      - name: Offline mesh projects (canary must fail)'
-    cat
-  } >> "$wf"
-  check "$label" "$tmp" "METRIC offline+ci: 0/9"
-}
-
-check '0e44c621' "$tmp" "METRIC offline+ci: 0/9"
-reset
-printf '\n# %s\n' "$paths" >> "$wf"
-check comment "$tmp" "METRIC offline+ci: 0/9"
-
-add_step echo <<EOF
-        run: |
-          echo "\${wrap[@]}" bash tools/offline-mesh-check.sh $paths
-EOF
-add_step '|| true' <<EOF
-        run: |
-          "\${wrap[@]}" bash tools/offline-mesh-check.sh $paths || true
-EOF
-add_step 'if: false' <<EOF
-        if: false
-        run: |
-          "\${wrap[@]}" bash tools/offline-mesh-check.sh \\
-            $paths
-EOF
-add_step continue-on-error <<EOF
-        continue-on-error: true
-        run: |
-          "\${wrap[@]}" bash tools/offline-mesh-check.sh \\
-            $paths
-EOF
-add_step 'words after ;' <<EOF
-        run: |
-          "\${wrap[@]}" bash tools/offline-mesh-check.sh; $paths
-EOF
-
-check head "$root" "METRIC offline+ci: 6/9"
+check 'six PASS lines' "$tmp/pass.log" "METRIC offline+ci: 6/9"
+check 'empty log' "$tmp/empty.log" "METRIC offline+ci: 0/9"
+check 'missing log' "$tmp/no-such.log" "METRIC offline+ci: 0/9"
+check 'echo, quote, FAIL' "$tmp/decoy.log" "METRIC offline+ci: 0/9"
 echo "test-metric-offline-ci: ok"

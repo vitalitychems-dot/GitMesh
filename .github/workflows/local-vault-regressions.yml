@@ -39,25 +39,31 @@ jobs:
       - name: Check reviewed action pins
         run: node --test projects/local-vault/tests/ci-action-pins.test.mjs
 
-      # Offline mesh: no network inside the wrapper. The canary must fail
-      # (job fails otherwise), then six index.json projects run with timeout.
-      # The sudo fallback clears groups and sets no_new_privs. sudo and
-      # nsenter back to the host netns must both fail inside the wrapper.
+      # Both branches use setpriv. An unprivileged userns only maps uid 0 and
+      # rejects --clear-groups, so that branch drops caps and says so.
+      # The sudo branch drops to the runner uid with no groups and no caps.
       - name: Offline mesh projects (canary must fail)
         run: |
-          if unshare -rn true 2>/dev/null; then wrap=(unshare -rn); else wrap=(sudo env "PATH=$PATH" unshare -n setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups --no-new-privs env "PATH=$PATH" "HOME=$HOME"); fi
+          full=(setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all env "PATH=$PATH" "HOME=$HOME")
+          if unshare -rn true 2>/dev/null; then
+            if unshare -rn "${full[@]}" true 2>/dev/null; then wrap=(unshare -rn "${full[@]}")
+            else
+              echo "unprivileged userns: setpriv cannot --reuid to the host uid (only uid 0 is mapped) or --clear-groups (setgroups EPERM); using --no-new-privs --inh-caps=-all --bounding-set=-all"
+              wrap=(unshare -rn setpriv --no-new-privs --inh-caps=-all --bounding-set=-all env "PATH=$PATH" "HOME=$HOME")
+            fi
+          else wrap=(sudo env "PATH=$PATH" unshare -n "${full[@]}"); fi
+          echo "step: Offline mesh projects (canary must fail)"
           echo "offline wrapper: ${wrap[*]}"
           echo "id: $("${wrap[@]}" id)"
+          "${wrap[@]}" grep -E '^Cap(Eff|Prm|Inh|Bnd):' /proc/self/status
           fail_if_ok() {
-            if "${wrap[@]}" "$@"; then
-              echo "$* succeeded inside the wrapper" >&2
-              exit 1
-            fi
+            if "${wrap[@]}" "$@"; then echo "$* succeeded inside the wrapper" >&2; exit 1; fi
             echo "$* failed inside the wrapper"
           }
           fail_if_ok sudo -n true
           fail_if_ok nsenter --net=/proc/1/ns/net true
           fail_if_ok sudo -n nsenter --net=/proc/1/ns/net true
+          fail_if_ok curl -sS --max-time 3 --unix-socket /var/run/docker.sock http://d/_ping
           "${wrap[@]}" bash tools/offline-mesh-check.sh \
             projects/admit projects/carry projects/pass \
             projects/shift projects/spin projects/tie
