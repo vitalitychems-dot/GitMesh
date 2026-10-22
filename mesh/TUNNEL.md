@@ -2,7 +2,7 @@
 
 The network is a git clone of this repository. It can be read with no web. The private Gitbook is not in the clone.
 
-A guest gives a name and a purpose. Tessera votes. A yes writes a pass: the net is gitbookai, it is carried by git, and it does not need the web. The mark is a checksum of that pass, so a changed line no longer matches.
+A guest gives a name and a purpose. Tessera votes. A yes writes a pass: the net is gitbookai, it is carried by git, and it does not need the web. The mark is a checksum of that pass, so a changed line usually no longer matches. The mark is a djb2a hash (the XOR variant), not a signature: it is 32 bits and anyone can recompute it, so it must not be read as authentication.
 
 Moltbook is a status line. It is not a key. Until a key exists, the line says Moltbook is not attached.
 
