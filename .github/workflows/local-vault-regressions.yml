@@ -73,11 +73,11 @@ jobs:
             fi
             export MODE ACTIONS_RO_1 ACTIONS_RO_2 RUN_UID="$uid" RUN_GID="$gid" RUN_HOME="$HOME"
             ns=(unshare -rnm)
-            echo "offline wrapper: unshare -rnm; mount --bind; mount -o remount,bind,ro; setpriv mode $MODE"
+            echo "offline wrapper: unshare -rnm; mount --bind; mount -o remount,bind,ro; tmpfs /run/dbus /run/systemd/resolve; setpriv mode $MODE"
           else
             export MODE ACTIONS_RO_1 ACTIONS_RO_2 RUN_UID="$uid" RUN_GID="$gid" RUN_HOME="$HOME"
             ns=(sudo env "PATH=$PATH" "HOME=$HOME" "MODE=$MODE" "ACTIONS_RO_1=$ACTIONS_RO_1" "ACTIONS_RO_2=$ACTIONS_RO_2" "RUN_UID=$uid" "RUN_GID=$gid" "RUN_HOME=$HOME" unshare -n -m)
-            echo "offline wrapper: sudo env PATH=\$PATH unshare -n -m; mount --bind; mount -o remount,bind,ro; setpriv --reuid=$uid --regid=$gid --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all"
+            echo "offline wrapper: sudo env PATH=\$PATH unshare -n -m; mount --bind; mount -o remount,bind,ro; tmpfs /run/dbus /run/systemd/resolve; setpriv --reuid=$uid --regid=$gid --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all"
           fi
           inner='
           set -e
@@ -87,8 +87,15 @@ jobs:
             if ! err=$(mount --bind "$d" "$d" 2>&1); then echo "ro mount failed: $d: bind: $err" >&2; exit 99; fi
             if ! err=$(mount -o remount,bind,ro "$d" 2>&1); then echo "ro mount failed: $d: remount,bind,ro: $err" >&2; exit 99; fi
           }
+          hide_dir() {
+            local d="$1" err
+            [ -d "$d" ] || return 0
+            if ! err=$(mount -t tmpfs -o nosuid,nodev,noexec,ro,mode=0555 tmpfs "$d" 2>&1); then echo "hide mount failed: $d: tmpfs: $err" >&2; exit 99; fi
+          }
           mount_one "$ACTIONS_RO_1"
           mount_one "$ACTIONS_RO_2"
+          hide_dir /run/dbus
+          hide_dir /run/systemd/resolve
           if [ "$MODE" = capdrop ]; then
             exec setpriv --no-new-privs --inh-caps=-all --bounding-set=-all env "PATH=$PATH" "HOME=$RUN_HOME" "$@"
           fi
