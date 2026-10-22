@@ -104,7 +104,8 @@ jobs:
           actions_writable "$HOME/work/_actions"
           ws_actions=$(realpath -m "$GITHUB_WORKSPACE/../../_actions")
           if [ "$(realpath -m "$HOME/work/_actions")" != "$ws_actions" ]; then actions_writable "$ws_actions"; fi
-          [ "$dns_bad" -eq 0 ] && [ "$unix_bad" -eq 0 ]
+          # A failing test in an && list does not abort bash -e unless it is the last command.
+          if [ "$dns_bad" -ne 0 ] || [ "$unix_bad" -ne 0 ]; then exit 1; fi
           "${wrap[@]}" bash tools/offline-mesh-check.sh \
             projects/admit projects/carry projects/pass \
             projects/shift projects/spin projects/tie

@@ -49,9 +49,9 @@ node exit 1 with `ENOTFOUND` or `EAI_AGAIN`. Anything else, including curl 7 or
 and exits 5. A probe that succeeds exits 3. Then each listed project's `run`
 command runs with `timeout 15`.
 
-## Not tested, not counted
+## Actions directory (TESTED)
 
-Post-job steps are not tested and are not counted in the metric.
+The wrapper log printed `actions dir writable: yes` and `actions dir probed: /home/runner/work/_actions`. `$GITHUB_WORKSPACE/../../_actions` is that same path, so it was probed once. This is not part of the metric.
 
 ## Baseline (TESTED, main `0e44c621`, 2026-10-22)
 
