@@ -53,7 +53,7 @@ command runs with `timeout 15`.
 
 ## Actions directory (TESTED)
 
-The wrapper log printed `actions dir writable: yes` and `actions dir probed: /home/runner/work/_actions`. `$GITHUB_WORKSPACE/../../_actions` is that same path, so it was probed once. This is not part of the metric.
+The sudo wrapper is `unshare -n -m`, then `mount --bind` and `mount -o remount,bind,ro`, then `setpriv`. The log printed `actions mount: /home/runner/work/_actions ro,relatime,discard,journal_async_commit,nobarrier,errors=remount-ro,commit=30,data=writeback`, `actions dir probed: /home/runner/work/_actions`, `mktemp: failed to create file via template ‘/home/runner/work/_actions/probe.XXXXXX’: Read-only file system`, and `bash -c f=$(mktemp "$1/probe.XXXXXX") || exit 1; rm -f "$f" bash /home/runner/work/_actions failed inside the wrapper`. `$RUNNER_WORKSPACE/../_actions` and `$HOME/work/_actions` are that same path, so it was mounted once. The write is a must-fail gate on the step and is not part of the 0/9 metric. The step still exits 1 because `resolvectl`, `busctl`, and both AF_UNIX connects exit 0.
 
 ## Baseline (TESTED, main `0e44c621`, 2026-10-22)
 
