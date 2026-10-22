@@ -35,8 +35,10 @@ gh run view "$id" --log | awk '/step: Offline mesh projects \(canary must fail\)
 tools/metric-offline-ci.sh . /tmp/ci-$sha.log
 ```
 
-That prints `METRIC offline+ci: 6/9`. `tools/test-metric-offline-ci.sh` checks the
-same rule on fixture logs.
+A successful log that contains the six `PASS` lines prints `METRIC offline+ci: 6/9`.
+`tools/test-metric-offline-ci.sh` checks that rule on fixture logs. At this SHA
+the step exits 1 before those lines, because the AF_UNIX connects succeed, so
+there is no successful run and the metric is 0/9.
 
 The CI side is `tools/offline-mesh-check.sh`, run by the step "Offline mesh
 projects (canary must fail)" in `local-vault-regressions.yml`. `curl`, `getent`,
@@ -71,7 +73,10 @@ The wrapper log printed `actions dir writable: yes` and `actions dir probed: /ho
 
 ## After this change (expected 6/9)
 
-admit, carry, pass, shift, spin and tie run offline in CI: **6/9**.
+admit, carry, pass, shift, spin and tie are the offline projects. A successful
+step log with their `PASS` lines scores **6/9**. The current step exits 1 when
+resolved or either AF_UNIX socket accepts a connection, so this SHA has no
+successful run and measures **0/9**.
 
 ## Next
 
