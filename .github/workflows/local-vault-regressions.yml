@@ -79,7 +79,32 @@ jobs:
           dns_fail resolvectl resolvectl query github.com
           dns_fail busctl busctl call org.freedesktop.resolve1 /org/freedesktop/resolve1 org.freedesktop.resolve1.Manager ResolveHostname isit 0 github.com 0 0
           dns_fail getent getent hosts github.com
-          [ "$dns_bad" -eq 0 ]
+          unix_bad=0
+          unix_probe() {
+            local path="$1"
+            if ! "${wrap[@]}" test -e "$path"; then echo "absent: $path"; return 0; fi
+            if ! "${wrap[@]}" bash -c 'command -v python3 >/dev/null 2>&1'; then
+              echo "python3 missing inside the wrapper" >&2
+              unix_bad=1
+              return 0
+            fi
+            local ec=0
+            "${wrap[@]}" python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sys.exit(0 if s.connect_ex(sys.argv[1])==0 else 1)' "$path" || ec=$?
+            echo "unix $path exit $ec"
+            if [ "$ec" -eq 0 ]; then echo "unix $path connected inside the wrapper" >&2; unix_bad=1; fi
+          }
+          unix_probe /run/dbus/system_bus_socket
+          unix_probe /run/systemd/resolve/io.systemd.Resolve
+          actions_writable() {
+            local dir="$1" ec=0
+            "${wrap[@]}" bash -c 'd=$1; f=$(mktemp "$d/probe.XXXXXX" 2>/dev/null) || exit 1; rm -f "$f"' bash "$dir" || ec=$?
+            if [ "$ec" -eq 0 ]; then echo "actions dir writable: yes"; else echo "actions dir writable: no"; fi
+            echo "actions dir probed: $dir"
+          }
+          actions_writable "$HOME/work/_actions"
+          ws_actions=$(realpath -m "$GITHUB_WORKSPACE/../../_actions")
+          if [ "$(realpath -m "$HOME/work/_actions")" != "$ws_actions" ]; then actions_writable "$ws_actions"; fi
+          [ "$dns_bad" -eq 0 ] && [ "$unix_bad" -eq 0 ]
           "${wrap[@]}" bash tools/offline-mesh-check.sh \
             projects/admit projects/carry projects/pass \
             projects/shift projects/spin projects/tie
