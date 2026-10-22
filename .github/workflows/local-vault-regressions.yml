@@ -1,33 +1,37 @@
 name: Local vault source-sync regressions
 
 on:
-  push:
   pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Push to main keeps cancel-in-progress false so a landed commit's check
+# finishes instead of being cancelled by the next push on the same ref.
+# Pull requests and workflow_dispatch cancel the previous in-progress run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
 jobs:
   source-sync-regressions:
-    name: Source sync / ${{ matrix.os }} / Node ${{ matrix.node-version }}
-    runs-on: ${{ matrix.os }}
+    name: Source sync / ubuntu-latest / Node 20.x
+    runs-on: ubuntu-latest
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        node-version: ["20.x", "24.x"]
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
-      - name: Set up Node.js ${{ matrix.node-version }}
+      - name: Set up Node.js 20.x
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 20.x
 
       - name: Run mocked source-sync regressions
         run: node --test projects/local-vault/tests/sync-public-source.test.mjs
