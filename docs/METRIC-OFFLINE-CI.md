@@ -5,29 +5,33 @@ Owner: Network. Labels: **TESTED** = we ran it.
 ## Definition
 
 The number of projects in `mesh/index.json` whose `run` command exits 0 with no
-network (`unshare -rn`, 15 s timeout) **and** whose path is an argument of
-`tools/offline-mesh-check.sh` in a workflow `run` step. The count follows that
-invocation through its continuation lines and ignores comments. A comment, or
-any other mention of the path, is not CI coverage. Re-run it from a checkout:
+network (`unshare -rn`, 15 s timeout) **and** whose path is an argument of the
+step named `Offline mesh projects (canary must fail)` in
+`.github/workflows/local-vault-regressions.yml`. The metric is a text check of
+that one step. `on:` must include `pull_request`, the step must have no `if:`
+and no `continue-on-error`, and `"${wrap[@]}" bash tools/offline-mesh-check.sh`
+must be the first command on its line. Arguments run through backslash
+continuations and stop at `;`, `&&`, `||`, `|`, `#`, or the end of the command.
+Re-run it from a checkout:
 
 ```sh
 tools/metric-offline-ci.sh          # needs bash, jq, unshare; prints METRIC offline+ci: N/9
-tools/test-metric-offline-ci.sh     # base workflow plus a path comment stays 0/9; this tree is 6/9
+tools/test-metric-offline-ci.sh     # base and the fake steps stay 0/9; this tree is 6/9
 ```
 
-CI PASS lines from that step are the ground truth that the run actually exited 0.
-The metric only records that the path was passed in. It does not invent a pass.
+CI PASS lines from that step are the proof that the run actually exited 0.
+The metric is only the text check. It does not invent a pass.
 
 The CI side is `tools/offline-mesh-check.sh`, run by the step "Offline mesh
 projects (canary must fail)" in `local-vault-regressions.yml`. `curl`, `getent`,
-and `node` must be on `PATH` (missing tool: exit 4). `ls /sys/class/net` must be
-exactly `lo`. The canary is `curl https://github.com`, `getent hosts github.com`,
-and a Node `fetch` whose catch prints `err.cause?.code`. Accepted failures are
-curl 6, 7, or 28; getent 2; and the Node codes ENOTFOUND, EAI_AGAIN,
-ENETUNREACH, ECONNREFUSED, UND_ERR_CONNECT_TIMEOUT, or a similar network code
-(ETIMEDOUT, EHOSTUNREACH, ENETDOWN, ECONNRESET, EHOSTDOWN, UND_ERR_SOCKET).
-Any other non-zero code is `CANARY INCONCLUSIVE` and exits 5. A probe that
-succeeds exits 3. Then each listed project's `run` command runs with `timeout 15`.
+and `node` must be on `PATH` (missing tool: exit 4). Interfaces come from
+`/proc/self/net/dev` and must be exactly `lo`. The canary is `curl
+https://github.com`, `getent hosts github.com`, and a Node `fetch` whose catch
+prints `err.cause?.code`. The only accepted failures are curl 6, getent 2, and
+node exit 1 with `ENOTFOUND` or `EAI_AGAIN`. Anything else, including curl 7 or
+28 and `ECONNREFUSED`, `ECONNRESET`, or `UND_ERR_*`, is `CANARY INCONCLUSIVE`
+and exits 5. A probe that succeeds exits 3. Then each listed project's `run`
+command runs with `timeout 15`.
 
 ## Baseline (TESTED, main `0e44c621`, 2026-10-22)
 

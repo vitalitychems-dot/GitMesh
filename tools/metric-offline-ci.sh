@@ -1,97 +1,114 @@
 #!/usr/bin/env bash
-# Metric: projects in mesh/index.json whose `run` exits 0 with no network
-# (unshare -rn, 15 s timeout) AND whose path is an argument of
-# tools/offline-mesh-check.sh in a workflow run step.
-# A comment, or any other mention of the path, does not count.
-# CI PASS lines from that step are the ground truth that the run exited 0.
+# Metric: a project's run exits 0 with no network (unshare -rn, 15s) AND its
+# path is an argument of the one step "Offline mesh projects (canary must fail)"
+# in .github/workflows/local-vault-regressions.yml. This is a text check of
+# that step. CI PASS lines are the proof the run exited 0.
 # Usage: tools/metric-offline-ci.sh [repo-root]   (needs bash, jq, unshare)
 set -euo pipefail
-cd "${1:-$(dirname "$0")/..}"
-unshare -rn true 2>/dev/null || { echo "unshare -rn unavailable; cannot measure offline" >&2; exit 2; }
 
-strip_comment() {
+step_name='Offline mesh projects (canary must fail)'
+prefix='"${wrap[@]}" bash tools/offline-mesh-check.sh'
+wf_rel=.github/workflows/local-vault-regressions.yml
+
+trim() {
   local s="$1"
-  [[ "$s" == \#* ]] && { printf ''; return; }
-  printf '%s' "${s%% \#*}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
 }
 
-# Arguments of tools/offline-mesh-check.sh, one per line.
-# Starts at the invocation and follows trailing-backslash continuations.
-workflow_offline_args() {
-  local file="$1" line indent=0 rest content stripped in_run=0 run_indent=0 collecting=0 buf="" cmd tok seen
+on_has_pull_request() {
+  local line in=0 t
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    if [ "$in" -eq 0 ]; then
+      case "$line" in
+        on:*) in=1; case "$line" in *pull_request*) return 0 ;; esac ;;
+      esac
+      continue
+    fi
+    case "$line" in
+      [[:space:]]*)
+        t=$(trim "$line")
+        case "$t" in \#*) continue ;; *pull_request*) return 0 ;; esac
+        ;;
+      *) break ;;
+    esac
+  done < "$1"
+  return 1
+}
+
+# Print path arguments of a bare invocation in the named step.
+# An operator (; & | #) means the command is not bare, so it counts as nothing.
+step_paths() {
+  local line rest indent=0 in=0 step_indent=0 bad=0 collecting=0 buf="" content
+  local -a held=()
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%$'\r'}
     indent=0
     rest=$line
     while [ "${rest:0:1}" = " " ]; do indent=$((indent + 1)); rest=${rest:1}; done
+    if [ "$in" -eq 0 ]; then
+      [ "$rest" = "- name: $step_name" ] || continue
+      in=1
+      step_indent=$indent
+      continue
+    fi
+    if [ -n "$rest" ] && [ "$indent" -le "$step_indent" ]; then
+      break
+    fi
+    case "$rest" in
+      if:*|continue-on-error:*) bad=1; held=() ;;
+    esac
     content=$rest
     if [ "$collecting" -eq 1 ]; then
-      stripped=$(strip_comment "$content")
-      buf+=" ${stripped%\\}"
-      if [[ "$stripped" == *\\ ]]; then continue; fi
+      buf+=" ${content%\\}"
+      [[ "$content" == *\\ ]] && continue
       collecting=0
-      # fall through to emit via the shared splitter below
-      content=""
-      stripped=$buf
-      buf=""
-      seen=0
-      set -f
-      for tok in $stripped; do
-        if [ "$seen" -eq 0 ]; then
-          case "$tok" in
-            tools/offline-mesh-check.sh|*/tools/offline-mesh-check.sh) seen=1 ;;
-          esac
-          continue
+      [ "$bad" -eq 0 ] && emit_paths "$buf"
+      continue
+    fi
+    case "$content" in
+      "$prefix"|"$prefix "*|"$prefix"\\*)
+        if [[ "$content" == *\\ ]]; then
+          collecting=1
+          buf=${content%\\}
+        elif [ "$bad" -eq 0 ]; then
+          emit_paths "$content"
         fi
-        printf '%s\n' "$tok"
-      done
-      set +f
-      continue
-    fi
-    if [ "$in_run" -eq 1 ] && [ -n "$content" ] && [ "$indent" -le "$run_indent" ]; then
-      in_run=0
-    fi
-    if [ "$in_run" -eq 0 ]; then
-      case "$content" in
-        "run: |"*) in_run=1; run_indent=$indent; continue ;;
-        "run:"*)
-          cmd=${content#run:}
-          cmd=${cmd#"${cmd%%[![:space:]]*}"}
-          stripped=$(strip_comment "$cmd")
-          ;;
-        *) continue ;;
-      esac
-    else
-      stripped=$(strip_comment "$content")
-    fi
-    [[ "$stripped" == *"tools/offline-mesh-check.sh"* ]] || continue
-    if [[ "$stripped" == *\\ ]]; then
-      collecting=1
-      buf=${stripped%\\}
-      continue
-    fi
-    seen=0
-    set -f
-    for tok in $stripped; do
-      if [ "$seen" -eq 0 ]; then
-        case "$tok" in
-          tools/offline-mesh-check.sh|*/tools/offline-mesh-check.sh) seen=1 ;;
-        esac
-        continue
-      fi
-      printf '%s\n' "$tok"
-    done
-    set +f
-  done < "$file"
+        ;;
+    esac
+  done < "$1"
+  if [ "$collecting" -eq 1 ] && [ "$bad" -eq 0 ]; then
+    emit_paths "$buf"
+  fi
+  [ "$bad" -eq 0 ] && [ "${#held[@]}" -gt 0 ] || return 0
+  printf '%s\n' "${held[@]}"
 }
 
-shopt -s nullglob
+emit_paths() {
+  local cmd="$1" rest tok
+  rest=${cmd#"$prefix"}
+  case "$rest" in
+    *';'*|*'&'*|*'|'*|*'#'*) return 0 ;;
+  esac
+  set -f
+  for tok in $rest; do
+    [ -n "$tok" ] && held+=("$tok")
+  done
+  set +f
+}
+
+# main
+cd "${1:-$(dirname "$0")/..}"
+unshare -rn true 2>/dev/null || { echo "unshare -rn unavailable; cannot measure offline" >&2; exit 2; }
+
 ci_args=()
-for workflow in .github/workflows/*.yml; do
+if [ -f "$wf_rel" ] && on_has_pull_request "$wf_rel"; then
   while IFS= read -r arg; do
     [ -n "$arg" ] && ci_args+=("$arg")
-  done < <(workflow_offline_args "$workflow")
-done
+  done < <(step_paths "$wf_rel")
+fi
 
 n=0 both=0
 while IFS=$'\t' read -r name path run; do
