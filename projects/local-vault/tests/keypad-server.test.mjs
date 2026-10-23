@@ -36,6 +36,18 @@ test("macOS and Linux SSH forwarding restrictions match the keypad default port"
   assert.equal(authorizedKeysPort, String(DEFAULT_PORT));
 });
 
+test("Windows SSH forwarding restrictions match the keypad default port", () => {
+  const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const windowsInstructions = readme.match(/^### Windows host with OpenSSH\s*\n([\s\S]*?)(?=^### )/m)?.[1];
+
+  assert.ok(windowsInstructions, "The README must include a Windows OpenSSH section.");
+  const permitOpenPort = windowsInstructions.match(/^\s+PermitOpen 127\.0\.0\.1:(\d+)\s*$/m)?.[1];
+  const authorizedKeysPort = windowsInstructions.match(/permitopen="127\.0\.0\.1:(\d+)"/)?.[1];
+
+  assert.equal(permitOpenPort, String(DEFAULT_PORT));
+  assert.equal(authorizedKeysPort, String(DEFAULT_PORT));
+});
+
 test("README documents matching custom ports for the keypad and iPhone tunnel", () => {
   const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
