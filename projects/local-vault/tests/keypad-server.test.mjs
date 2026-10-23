@@ -48,6 +48,19 @@ test("Windows SSH forwarding restrictions match the keypad default port", () => 
   assert.equal(authorizedKeysPort, String(DEFAULT_PORT));
 });
 
+test("Windows tunnel account stays non-administrator and installs only the restricted iPhone public key", () => {
+  const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const windowsInstructions = readme.match(/^### Windows host with OpenSSH\s*\n([\s\S]*?)(?=^### )/m)?.[1];
+
+  assert.ok(windowsInstructions, "The README must include a Windows OpenSSH section.");
+  assert.match(windowsInstructions, /dedicated local account named `gitmesh-tunnel` that is \*\*not\*\* a member of Administrators/);
+  assert.match(windowsInstructions, /New-LocalUser -Name "gitmesh-tunnel"/);
+  assert.match(windowsInstructions, /paste the iPhone SSH client's \*\*public\*\* key there/);
+  assert.match(windowsInstructions, /writable only by the tunnel account and trusted administrators/);
+  assert.match(windowsInstructions, /Never copy the iPhone's private key to Windows or into GitMesh/);
+  assert.match(windowsInstructions, /restrict,port-forwarding,permitopen="127\.0\.0\.1:\d+" ssh-ed25519 <iPhone-public-key>/);
+});
+
 test("README documents matching custom ports for the keypad and iPhone tunnel", () => {
   const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
